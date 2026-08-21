@@ -1,0 +1,28 @@
+{
+ "model": "tiny_conv.onnx",
+ "opset": 17,
+ "inputs": [
+  {
+   "name": "x",
+   "dtype": "float32",
+   "shape": [
+    2,
+    3,
+    16,
+    16
+   ],
+   "file": "tiny_conv.in.0.bin"
+  }
+ ],
+ "outputs": [
+  {
+   "name": "out",
+   "dtype": "float32",
+   "shape": [
+    2,
+    10
+   ],
+   "file": "tiny_conv.out.0.bin"
+  }
+ ]
+}

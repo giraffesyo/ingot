@@ -141,3 +141,63 @@ func (t *Tensor) mustContiguous() {
 		panic("tensor: operation requires contiguous tensor")
 	}
 }
+
+// I32 returns the underlying int32 storage (contiguous tensors only).
+func (t *Tensor) I32() []int32 {
+	t.mustDType(I32)
+	t.mustContiguous()
+	n := t.Numel()
+	if n == 0 {
+		return nil
+	}
+	return unsafe.Slice((*int32)(unsafe.Pointer(&t.buf[t.offset*4])), n)
+}
+
+// Bool returns the underlying bool storage (contiguous tensors only).
+func (t *Tensor) Bool() []bool {
+	t.mustDType(Bool)
+	t.mustContiguous()
+	n := t.Numel()
+	if n == 0 {
+		return nil
+	}
+	return unsafe.Slice((*bool)(unsafe.Pointer(&t.buf[t.offset])), n)
+}
+
+// U8 returns the underlying uint8 storage (contiguous tensors only).
+func (t *Tensor) U8() []uint8 {
+	t.mustDType(U8)
+	t.mustContiguous()
+	return t.buf[t.offset : t.offset+t.Numel()]
+}
+
+// I8 returns the underlying int8 storage (contiguous tensors only).
+func (t *Tensor) I8() []int8 {
+	t.mustDType(I8)
+	t.mustContiguous()
+	n := t.Numel()
+	if n == 0 {
+		return nil
+	}
+	return unsafe.Slice((*int8)(unsafe.Pointer(&t.buf[t.offset])), n)
+}
+
+// FromI64 wraps an existing []int64 (no copy) with the given shape.
+func FromI64(data []int64, shape ...int) *Tensor {
+	s := Shape(shape)
+	if len(data) != s.Numel() {
+		panic(fmt.Sprintf("tensor: data len %d != numel %d for shape %v", len(data), s.Numel(), s))
+	}
+	t := &Tensor{dtype: I64, shape: s.Clone(), strides: s.Strides()}
+	if len(data) > 0 {
+		t.buf = unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*8)
+	}
+	return t
+}
+
+// Scalar returns a rank-0 f32 tensor.
+func Scalar(v float32) *Tensor {
+	t := New(F32)
+	t.F32()[0] = v
+	return t
+}

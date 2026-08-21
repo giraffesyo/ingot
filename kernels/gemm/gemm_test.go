@@ -138,3 +138,45 @@ func BenchmarkRef(b *testing.B) {
 	}
 	b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 }
+
+func TestSgemmTransposed(t *testing.T) {
+	r := rand.New(rand.NewPCG(11, 12))
+	for _, sh := range [][3]int{{1, 1, 1}, {5, 7, 3}, {MR + 1, NR + 1, KC + 1}, {2*MC + 1, 3*NR + 1, 33}, {3*MR + 1, NC + NR + 1, 17}, {64, 100, 2*KC + 3}} {
+		m, n, k := sh[0], sh[1], sh[2]
+		for _, tc := range []struct{ ta, tb bool }{{true, false}, {false, true}, {true, true}} {
+			// A stored as [m×k] (lda=k) or [k×m] (lda=m); B as [k×n] or [n×k].
+			a := randMat(r, m*k)
+			b := randMat(r, k*n)
+			c0 := randMat(r, m*n)
+			// Build the logical A[m×k] and B[k×n] the transposed storage represents.
+			la, lb := make([]float32, m*k), make([]float32, k*n)
+			lda, ldb := k, n
+			if tc.ta {
+				lda = m
+				for i := 0; i < m; i++ {
+					for p := 0; p < k; p++ {
+						la[i*k+p] = a[p*m+i]
+					}
+				}
+			} else {
+				copy(la, a)
+			}
+			if tc.tb {
+				ldb = k
+				for p := 0; p < k; p++ {
+					for j := 0; j < n; j++ {
+						lb[p*n+j] = b[j*k+p]
+					}
+				}
+			} else {
+				copy(lb, b)
+			}
+			want := oracle(m, n, k, 1, la, k, lb, n, 0.5, c0, n)
+			got := append([]float32(nil), c0...)
+			SgemmT(tc.ta, tc.tb, m, n, k, 1, a, lda, b, ldb, 0.5, got, n)
+			if e := maxRelErr(got, n, n, want); e > f32Tol(k) {
+				t.Fatalf("m=%d n=%d k=%d ta=%v tb=%v: max rel err %g", m, n, k, tc.ta, tc.tb, e)
+			}
+		}
+	}
+}
