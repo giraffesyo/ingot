@@ -1,0 +1,28 @@
+{
+ "model": "tiny_transformer.onnx",
+ "opset": 17,
+ "inputs": [
+  {
+   "name": "x",
+   "dtype": "float32",
+   "shape": [
+    2,
+    8,
+    32
+   ],
+   "file": "tiny_transformer.in.0.bin"
+  }
+ ],
+ "outputs": [
+  {
+   "name": "out",
+   "dtype": "float32",
+   "shape": [
+    2,
+    8,
+    32
+   ],
+   "file": "tiny_transformer.out.0.bin"
+  }
+ ]
+}

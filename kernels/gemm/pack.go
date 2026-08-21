@@ -43,3 +43,47 @@ func packBPanel(kc, cols int, b []float32, ldb int, dst []float32) {
 		clear(d[cols:])
 	}
 }
+
+// packAPanelT packs one MR-row panel of op(A)=Aᵀ where A is stored [k×m] with
+// row stride lda; a points at column i0 of row 0. For each p, the MR values
+// A[p][i0..i0+MR) are contiguous.
+func packAPanelT(kc, rows int, a []float32, lda int, dst []float32) {
+	dst = dst[:kc*MR]
+	if rows == MR {
+		for p := 0; p < kc; p++ {
+			copy(dst[p*MR:p*MR+MR], a[p*lda:p*lda+MR])
+		}
+		return
+	}
+	for p := 0; p < kc; p++ {
+		d := dst[p*MR : p*MR+MR : p*MR+MR]
+		copy(d, a[p*lda:p*lda+rows])
+		clear(d[rows:])
+	}
+}
+
+// packBPanelT packs one NR-column panel of op(B)=Bᵀ where B is stored [n×k]
+// with row stride ldb; b points at row j0. For each p, the NR values
+// B[j0..j0+NR)[p] are strided by ldb.
+func packBPanelT(kc, cols int, b []float32, ldb int, dst []float32) {
+	dst = dst[:kc*NR]
+	if cols == NR {
+		for p := 0; p < kc; p++ {
+			d := dst[p*NR : p*NR+NR : p*NR+NR]
+			for c := 0; c < NR; c++ {
+				d[c] = b[c*ldb+p]
+			}
+		}
+		return
+	}
+	for p := 0; p < kc; p++ {
+		d := dst[p*NR : p*NR+NR : p*NR+NR]
+		c := 0
+		for ; c < cols; c++ {
+			d[c] = b[c*ldb+p]
+		}
+		for ; c < NR; c++ {
+			d[c] = 0
+		}
+	}
+}

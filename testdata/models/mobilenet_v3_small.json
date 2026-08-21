@@ -1,0 +1,28 @@
+{
+ "model": "mobilenet_v3_small.onnx",
+ "opset": 17,
+ "inputs": [
+  {
+   "name": "x",
+   "dtype": "float32",
+   "shape": [
+    1,
+    3,
+    224,
+    224
+   ],
+   "file": "mobilenet_v3_small.in.0.bin"
+  }
+ ],
+ "outputs": [
+  {
+   "name": "out",
+   "dtype": "float32",
+   "shape": [
+    1,
+    1000
+   ],
+   "file": "mobilenet_v3_small.out.0.bin"
+  }
+ ]
+}

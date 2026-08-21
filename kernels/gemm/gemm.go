@@ -22,6 +22,7 @@ type gemmCtx struct {
 	mChunks, chunk   int
 	alpha            float32
 	acc              bool
+	transA, transB   bool
 	asrc, bsrc, cblk []float32
 	lda, ldb, ldc    int
 }
@@ -46,13 +47,20 @@ var ctxPool = sync.Pool{New: func() any {
 
 // Sgemm computes C = alpha*A·B + beta*C for row-major A[m×k], B[k×n], C[m×n]
 // with leading dimensions lda, ldb, ldc.
+func Sgemm(m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, beta float32, c []float32, ldc int) {
+	SgemmT(false, false, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+}
+
+// SgemmT is Sgemm with optional transposed operands: if transA, A is stored
+// as [k×m] (lda is its row stride) and op(A)=Aᵀ; likewise transB with B
+// stored as [n×k]. Transposition is folded into packing, not materialised.
 //
 // Structure (Goto/BLIS): for each NC-wide column block and KC-deep k block,
 // B is packed once into NR-wide panels; for each MC-tall row block, A is packed
 // into MR-wide panels and the macro-kernel sweeps the (MR×NR) tiles. Packing
 // and the macro-kernel are parallelised across par's worker pool; the k loop is
 // sequential so workers always accumulate into disjoint C tiles.
-func Sgemm(m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, beta float32, c []float32, ldc int) {
+func SgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, beta float32, c []float32, ldc int) {
 	if m == 0 || n == 0 {
 		return
 	}
@@ -68,6 +76,7 @@ func Sgemm(m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb in
 	g := ctxPool.Get().(*gemmCtx)
 	defer ctxPool.Put(g)
 	g.alpha, g.lda, g.ldb, g.ldc = alpha, lda, ldb, ldc
+	g.transA, g.transB = transA, transB
 	workers := par.Workers()
 
 	for j0 := 0; j0 < n; j0 += NC {
@@ -76,13 +85,21 @@ func Sgemm(m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb in
 		for p0 := 0; p0 < k; p0 += KC {
 			g.kc = min(KC, k-p0)
 			g.acc = !(firstOverwrite && p0 == 0)
-			g.bsrc = b[p0*ldb+j0:]
+			if transB {
+				g.bsrc = b[j0*ldb+p0:] // Bᵀ stored [n×k]: row j0, col p0
+			} else {
+				g.bsrc = b[p0*ldb+j0:]
+			}
 			g.phase = phasePackB
 			par.Run(g.nPanels, 8, g)
 			for i0 := 0; i0 < m; i0 += MC {
 				g.mc = min(MC, m-i0)
 				g.mPanels = (g.mc + MR - 1) / MR
-				g.asrc = a[i0*lda+p0:]
+				if transA {
+					g.asrc = a[p0*lda+i0:] // Aᵀ stored [k×m]: row p0, col i0
+				} else {
+					g.asrc = a[i0*lda+p0:]
+				}
 				g.phase = phasePackA
 				par.Run(g.mPanels, 4, g)
 				// 2D task grid: nPanels × mChunks, sized so there are at least
@@ -105,9 +122,17 @@ func Sgemm(m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb in
 func (g *gemmCtx) Run(t, w int) {
 	switch g.phase {
 	case phasePackB:
-		packBPanel(g.kc, min(NR, g.nc-t*NR), g.bsrc[t*NR:], g.ldb, g.b[t*g.kc*NR:])
+		if g.transB {
+			packBPanelT(g.kc, min(NR, g.nc-t*NR), g.bsrc[t*NR*g.ldb:], g.ldb, g.b[t*g.kc*NR:])
+		} else {
+			packBPanel(g.kc, min(NR, g.nc-t*NR), g.bsrc[t*NR:], g.ldb, g.b[t*g.kc*NR:])
+		}
 	case phasePackA:
-		packAPanel(g.kc, min(MR, g.mc-t*MR), g.asrc[t*MR*g.lda:], g.lda, g.a[t*g.kc*MR:])
+		if g.transA {
+			packAPanelT(g.kc, min(MR, g.mc-t*MR), g.asrc[t*MR:], g.lda, g.a[t*g.kc*MR:])
+		} else {
+			packAPanel(g.kc, min(MR, g.mc-t*MR), g.asrc[t*MR*g.lda:], g.lda, g.a[t*g.kc*MR:])
+		}
 	case phaseMacro:
 		g.macroTask(t, w)
 	}
