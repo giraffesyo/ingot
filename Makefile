@@ -2,7 +2,7 @@ export CGO_ENABLED=0
 PKG ?= ./...
 BENCH ?= .
 
-.PHONY: test bench lint prof vet fmt
+.PHONY: test bench lint prof vet fmt corpus
 
 test:
 	go test -race -count=1 $(PKG)
@@ -18,6 +18,9 @@ fmt:
 
 lint: vet
 	@command -v staticcheck >/dev/null && staticcheck ./... || echo "staticcheck not installed (go install honnef.co/go/tools/cmd/staticcheck@latest)"
+
+corpus:
+	cd tools/export && .venv/bin/python corpus.py
 
 prof:
 	go test -run=^$$ -bench=$(BENCH) -cpuprofile=cpu.prof $(PKG) && go tool pprof -top cpu.prof | head -40

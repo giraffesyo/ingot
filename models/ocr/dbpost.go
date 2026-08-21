@@ -42,16 +42,13 @@ func boxesFromProb(prob []float32, H, W int, sx, sy float64, d *Detector) []Box 
 			continue
 		}
 		rect = rect.unclip(d.Unclip)
-		corners := rect.corners()
-		// map to original coords
+		corners := orderCorners(rect.corners())
 		var b Box
 		b.Score = score
-		short := math.Inf(1)
 		for i, c := range corners {
 			b.Pts[i] = Point{c.X / sx, c.Y / sy}
 		}
-		short = math.Min(rect.w/sx, rect.h/sy)
-		if short < float64(d.MinSize) {
+		if math.Min(rect.w/sx, rect.h/sy) < float64(d.MinSize) {
 			continue
 		}
 		boxes = append(boxes, b)
@@ -98,6 +95,26 @@ func connectedComponents(bin []bool, H, W int) [][]int {
 		comps = append(comps, comp)
 	}
 	return comps
+}
+
+// orderCorners returns the 4 corners as top-left, top-right, bottom-right,
+// bottom-left. Left/right split by x, then top/bottom by y. This makes the crop
+// orientation deterministic (text reads left-to-right, not mirrored). For a box
+// taller than it is wide, the caller may still need a 90° rotation; horizontal
+// text (the common case) is handled here.
+func orderCorners(c [4]Point) [4]Point {
+	pts := c[:]
+	sort.Slice(pts, func(i, j int) bool { return pts[i].X < pts[j].X })
+	left := [2]Point{pts[0], pts[1]}
+	right := [2]Point{pts[2], pts[3]}
+	if left[0].Y > left[1].Y {
+		left[0], left[1] = left[1], left[0]
+	}
+	if right[0].Y > right[1].Y {
+		right[0], right[1] = right[1], right[0]
+	}
+	// tl, tr, br, bl
+	return [4]Point{left[0], right[0], right[1], left[1]}
 }
 
 // boxScore is the mean probability over a component's pixels.
