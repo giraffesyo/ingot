@@ -103,3 +103,39 @@ Where the 4.5× goes, and the fix (phase 4):
 
 Uncleared-buffer note: `Pool.GetUninit` / `Ctx.NewUninit` skip zeroing for ops
 that write every output element.
+
+
+## NEON elementwise kernels (`kernels/vek`)
+
+Generated NEON f32 kernels (WORD-encoded, like gemm) for the ops layer:
+add/sub/mul/div, max/min, relu, hardswish, hardsigmoid, clip, leakyrelu,
+add/mul-scalar. Go wrapper does the <4-element tail; Go fallback on non-arm64.
+
+Single-thread, n=200704 (16×112×112, a real early activation), Apple Silicon:
+
+| kernel | scalar Go | NEON | speedup |
+|---|---|---|---|
+| HardSwish | 2.05 Gelem/s | 16.7 | 8.1× |
+| Relu | — | 22.4 | ~7× |
+| Mul | — | 14.5 | mem-bound (2R+1W) |
+| Add | — | 14.4 | mem-bound |
+
+Wired into ops with parallel chunking + broadcast fast paths (same-shape,
+scalar, and per-channel block broadcast for squeeze-excite `[N,C,1,1]·[N,C,H,W]`).
+
+mobilenet_v3_small op breakdown after vek (MT), vs before:
+
+| op | before | after |
+|---|---|---|
+| HardSwish | 566 µs | 114 µs |
+| Relu | 302 µs | 65 µs |
+| Mul (SE broadcast) | 685 µs | 75 µs |
+
+End-to-end mobilenet_v3_small: **5.05 → 3.93 ms MT**, **8.2 → 6.5 ms 1T**.
+Conv is now **78%** of runtime — next target is implicit-GEMM conv (drop the
+im2col buffer) + a NEON depthwise kernel.
+
+| date | change | mnv3 1T | mnv3 MT |
+|---|---|---|---|
+| 2026-08-21 | im2col+GEMM conv, scalar elementwise | 8.2 ms | 5.05 ms |
+| 2026-08-21 | NEON vek elementwise + SE broadcast fast path | 6.5 ms | 3.93 ms |
