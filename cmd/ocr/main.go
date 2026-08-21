@@ -12,16 +12,21 @@ import (
 	"image/draw"
 	_ "image/jpeg"
 	"image/png"
+	"math"
 	"os"
+	"sort"
 
 	"github.com/giraffesyo/ocr/models/ocr"
 )
 
 func main() {
 	det := flag.String("det", "testdata/ocr/det.onnx", "detection model path")
+	rec := flag.String("rec", "testdata/ocr/rec.onnx", "recognition model path")
+	dict := flag.String("dict", "testdata/ocr/rec_dict.txt", "recognition char dictionary")
 	inPath := flag.String("in", "testdata/ocr/sample.png", "input image")
 	outPath := flag.String("out", "det_boxes.png", "annotated output PNG")
 	boxThr := flag.Float64("boxthr", 0.6, "box score threshold")
+	norec := flag.Bool("norec", false, "detection only")
 	flag.Parse()
 
 	img, err := loadImage(*inPath)
@@ -41,8 +46,26 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("detected %d text boxes\n", len(boxes))
+	sortBoxesTopToBottom(boxes)
+	var recog *ocr.Recognizer
+	if !*norec {
+		recog, err = ocr.NewRecognizer(*rec, *dict)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "recognizer:", err)
+			os.Exit(1)
+		}
+	}
 	for i, b := range boxes {
-		fmt.Printf("  box %d score=%.2f pts=%v\n", i, b.Score, b.Pts)
+		if recog != nil {
+			text, conf, rerr := recog.Recognize(img, b)
+			if rerr != nil {
+				fmt.Fprintln(os.Stderr, "recognize:", rerr)
+				continue
+			}
+			fmt.Printf("  box %d  det=%.2f rec=%.2f  %q\n", i, b.Score, conf, text)
+		} else {
+			fmt.Printf("  box %d score=%.2f pts=%v\n", i, b.Score, b.Pts)
+		}
 	}
 	if err := drawBoxes(img, boxes, *outPath); err != nil {
 		fmt.Fprintln(os.Stderr, "draw:", err)
@@ -107,6 +130,18 @@ func drawLine(img *image.RGBA, x0, y0, x1, y1 int, c color.Color) {
 			y0 += sy
 		}
 	}
+}
+
+// sortBoxesTopToBottom orders boxes by their top y, then left x (reading order).
+func sortBoxesTopToBottom(boxes []ocr.Box) {
+	sort.Slice(boxes, func(i, j int) bool {
+		yi := (boxes[i].Pts[0].Y + boxes[i].Pts[1].Y) / 2
+		yj := (boxes[j].Pts[0].Y + boxes[j].Pts[1].Y) / 2
+		if math.Abs(yi-yj) > 10 {
+			return yi < yj
+		}
+		return boxes[i].Pts[0].X < boxes[j].Pts[0].X
+	})
 }
 
 func abs(x int) int {

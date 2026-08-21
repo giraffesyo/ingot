@@ -90,8 +90,17 @@ Detection gaps / TODO:
   not a general polygon offset (pyclipper). Correct for the rect case we emit.
 - No angle classifier yet (cls.onnx copied but unused); needed for 180°-rotated text.
 
+Recognition: **working end-to-end.** PP-OCRv4 rec model (no op gaps, outputs
+post-softmax [1,T,6625]) + Go perspective-crop + CTC greedy decode with the
+ppocr_keys_v1 dictionary. Full pipeline on the 4-line sample decodes all lines
+exactly ("Hello World", "OCR 12345", "pure golang", "DBNet test"; rec conf 0.91-1.00).
+
 Recognition gaps / TODO:
-- rec model (ch_PP-OCRv4_rec) copied; **rec character dictionary not yet bundled**
-  (RapidOCR keeps it in package resources, not next to the model). Needed for CTC
-  decode. Fetch ppocr_keys_v1.txt.
-- Need: crop+perspective-rectify each box, resize to 48×W, CTC greedy decode.
+- Greedy CTC only; no beam search or language model.
+- Perspective crop uses bilinear corner blend (exact for parallelograms); a true
+  homography warp would be better for strongly perspective-distorted text.
+- No batching: one forward per box. Batching same-width boxes is the throughput win.
+- Angle classifier (cls.onnx) still unused — 180°-flipped text won't be corrected.
+- det normalization: pipeline uses ImageNet mean/std; PP-OCR config specifies
+  0.5/0.5 with limit_type=min/736. Detection is robust to this but exact PP-OCR
+  parity needs the config values.
