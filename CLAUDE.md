@@ -18,11 +18,13 @@ No regression merges.
   `tensor/` and `kernels/`.
 - Correctness before speed, but speed is a correctness requirement of the project:
   a kernel without a benchmark and a reference-comparison test does not exist.
-- Every op has a pure-Go reference implementation (`*_ref.go`) used as the oracle.
-  Fast paths (blocked Go, asm) are tested against the reference with tolerance tied
-  to dtype. Oracles accumulate in float64; f32 tolerance is rel 1e-5·√k for a
-  reduction of length k (summation order differs between blocked and naive).
-  bf16/int8: documented per op.
+- Every op is verified against an independent oracle: kernels have a pure-Go
+  reference (`*_ref.go`) that the fast paths (blocked Go, asm) are tested against;
+  ops are tested against hand-written or naive oracles in `ops/*_optest_test.go`
+  exercising the branches end-to-end model parity does not (dilation, groups,
+  autopad, ceil-mode pooling, negative-step Slice, Pad/Resize modes, strided
+  Softmax axis, transposed/batched MatMul). Oracles accumulate in float64; f32
+  tolerance is rel 1e-5·√k for a reduction of length k. bf16/int8: documented per op.
 - Numerical parity with ONNX Runtime / PyTorch on exported models is a test, not a
   goal. `testdata/` holds small exported models + reference outputs.
 - Unsupported ONNX op → loud error at load time listing the op and node name.
