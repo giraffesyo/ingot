@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/giraffesyo/ocr/kernels/par"
+	"github.com/giraffesyo/ocr/kernels/vek"
 	"github.com/giraffesyo/ocr/tensor"
 )
 
@@ -39,84 +40,150 @@ func (o *binaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 }
 
 // binaryFast handles same-shape and scalar-broadcast cases for + - * / with
-// tight loops; returns nil if the shapes need the generic path.
+// vek kernels (chunked in parallel for large tensors); returns nil for shapes
+// that need the generic broadcasting path.
 func binaryFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor {
 	af, bf := a.F32(), b.F32()
-	var out *tensor.Tensor
-	var of []float32
 	switch {
 	case a.Shape().Equal(b.Shape()):
-		out = ctx.New(tensor.F32, a.Shape()...)
-		of = out.F32()
-		of = of[:len(af)]
-		bf = bf[:len(af)]
-		switch kind {
-		case '+':
-			for i, x := range af {
-				of[i] = x + bf[i]
+		out := ctx.NewUninit(tensor.F32, a.Shape()...)
+		of := out.F32()
+		binParallel(len(of), func(lo, hi int) {
+			d, x, y := of[lo:hi], af[lo:hi], bf[lo:hi]
+			switch kind {
+			case '+':
+				vek.Add(d, x, y)
+			case '-':
+				vek.Sub(d, x, y)
+			case '*':
+				vek.Mul(d, x, y)
+			case '/':
+				vek.Div(d, x, y)
 			}
-		case '-':
-			for i, x := range af {
-				of[i] = x - bf[i]
-			}
-		case '*':
-			for i, x := range af {
-				of[i] = x * bf[i]
-			}
-		case '/':
-			for i, x := range af {
-				of[i] = x / bf[i]
-			}
-		}
+		})
+		return out
 	case len(bf) == 1:
-		out = ctx.New(tensor.F32, a.Shape()...)
-		of = out.F32()[:len(af)]
+		out := ctx.NewUninit(tensor.F32, a.Shape()...)
+		of := out.F32()
 		y := bf[0]
-		switch kind {
-		case '+':
-			for i, x := range af {
-				of[i] = x + y
+		binParallel(len(of), func(lo, hi int) {
+			d, x := of[lo:hi], af[lo:hi]
+			switch kind {
+			case '+':
+				vek.AddScalar(d, x, y)
+			case '-':
+				vek.AddScalar(d, x, -y)
+			case '*':
+				vek.MulScalar(d, x, y)
+			case '/':
+				vek.MulScalar(d, x, 1/y)
 			}
-		case '-':
-			for i, x := range af {
-				of[i] = x - y
-			}
-		case '*':
-			for i, x := range af {
-				of[i] = x * y
-			}
-		case '/':
-			inv := 1 / y
-			for i, x := range af {
-				of[i] = x * inv
-			}
-		}
+		})
+		return out
 	case len(af) == 1:
-		out = ctx.New(tensor.F32, b.Shape()...)
-		of = out.F32()[:len(bf)]
-		x := af[0]
-		switch kind {
-		case '+':
-			for i, y := range bf {
-				of[i] = x + y
-			}
-		case '-':
-			for i, y := range bf {
-				of[i] = x - y
-			}
-		case '*':
-			for i, y := range bf {
-				of[i] = x * y
-			}
-		case '/':
-			for i, y := range bf {
-				of[i] = x / y
-			}
+		// scalar OP vector: only + and * are order-independent.
+		if kind != '+' && kind != '*' {
+			return nil
 		}
-	default:
+		out := ctx.NewUninit(tensor.F32, b.Shape()...)
+		of := out.F32()
+		x := af[0]
+		binParallel(len(of), func(lo, hi int) {
+			d, y := of[lo:hi], bf[lo:hi]
+			if kind == '+' {
+				vek.AddScalar(d, y, x)
+			} else {
+				vek.MulScalar(d, y, x)
+			}
+		})
+		return out
+	}
+	// Per-block broadcast: one operand is 1 in a trailing suffix of dims and
+	// matches the other in the leading prefix (e.g. squeeze-excite scale
+	// [N,C,1,1] · activation [N,C,H,W]). Each small-operand element then scales
+	// a contiguous block; use the scalar vek kernels per block.
+	if out := blockBroadcastFast(ctx, a, b, kind); out != nil {
+		return out
+	}
+	return nil
+}
+
+// blockBroadcastFast handles a·b where the smaller operand broadcasts over a
+// contiguous trailing block of the larger (prefix dims equal, suffix dims 1).
+func blockBroadcastFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor {
+	big, small, swapped := a, b, false
+	if a.Numel() < b.Numel() {
+		big, small, swapped = b, a, true
+	}
+	bs, ss := big.Shape(), small.Shape()
+	if len(ss) != len(bs) {
 		return nil
 	}
+	// Require small dims to equal big in a prefix and be 1 in the suffix.
+	block := 1
+	suffix := true
+	for i := len(bs) - 1; i >= 0; i-- {
+		if suffix && ss[i] == 1 {
+			block *= bs[i]
+			continue
+		}
+		suffix = false
+		if ss[i] != bs[i] {
+			return nil
+		}
+	}
+	if block == 1 {
+		return nil // no benefit; same-shape path would have caught equal shapes
+	}
+	nBlocks := small.Numel()
+	out := ctx.NewUninit(tensor.F32, bs...)
+	of, bigf, smf := out.F32(), big.F32(), small.F32()
+	// scalar OP block: - and / are not order-independent, so only handle them
+	// when the big operand is the left (a) operand.
+	rev := swapped // small operand is on the left of the original expression
+	apply := func(d, x []float32, s float32) {
+		switch kind {
+		case '+':
+			vek.AddScalar(d, x, s)
+		case '*':
+			vek.MulScalar(d, x, s)
+		case '-':
+			if rev {
+				// s - x
+				vek.MulScalar(d, x, -1)
+				vek.AddScalar(d, d, s)
+			} else {
+				vek.AddScalar(d, x, -s)
+			}
+		case '/':
+			if rev {
+				return // s / x: no scalar kernel; fall back handled by caller
+			}
+			vek.MulScalar(d, x, 1/s)
+		}
+	}
+	if kind == '/' && rev {
+		return nil
+	}
+	par.For(nBlocks, max(1, unaryChunk/max(block, 1)), func(k, _ int) {
+		lo := k * block
+		apply(of[lo:lo+block], bigf[lo:lo+block], smf[k])
+	})
 	return out
+}
+
+// binParallel splits [0,n) into unaryChunk-sized pieces and runs fn in parallel
+// for large n, inline otherwise.
+func binParallel(n int, fn func(lo, hi int)) {
+	if n <= 2*unaryChunk {
+		fn(0, n)
+		return
+	}
+	chunks := (n + unaryChunk - 1) / unaryChunk
+	par.For(chunks, 1, func(c, _ int) {
+		lo := c * unaryChunk
+		fn(lo, min(lo+unaryChunk, n))
+	})
 }
 
 // runI64 handles integer shape arithmetic (Add/Sub/Mul/Div on int64), which
@@ -212,42 +279,8 @@ func (o *unaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	return []*tensor.Tensor{out}, nil
 }
 
-func reluVec(dst, src []float32) {
-	dst = dst[:len(src)]
-	for i, v := range src {
-		if v < 0 {
-			v = 0
-		}
-		dst[i] = v
-	}
-}
-
-func hardSwishVec(dst, src []float32) {
-	dst = dst[:len(src)]
-	for i, v := range src {
-		t := v/6 + 0.5
-		if t < 0 {
-			t = 0
-		} else if t > 1 {
-			t = 1
-		}
-		dst[i] = v * t
-	}
-}
-
 func hardSigmoidVec(alpha, beta float32) func(dst, src []float32) {
-	return func(dst, src []float32) {
-		dst = dst[:len(src)]
-		for i, v := range src {
-			t := alpha*v + beta
-			if t < 0 {
-				t = 0
-			} else if t > 1 {
-				t = 1
-			}
-			dst[i] = t
-		}
-	}
+	return func(dst, src []float32) { vek.HardSigmoid(dst, src, alpha, beta) }
 }
 
 func sigmoidVec(dst, src []float32) {
@@ -290,9 +323,9 @@ func init() {
 		v := vecOf(fn)
 		Register("", name, since, func(n NodeInfo) (Op, error) { return &unaryOp{n, v}, nil })
 	}
-	Register("", "Relu", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, reluVec}, nil })
+	Register("", "Relu", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.Relu}, nil })
 	Register("", "Sigmoid", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, sigmoidVec}, nil })
-	Register("", "HardSwish", 14, func(n NodeInfo) (Op, error) { return &unaryOp{n, hardSwishVec}, nil })
+	Register("", "HardSwish", 14, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.HardSwish}, nil })
 	un("Tanh", 6, func(x float32) float32 { return float32(math.Tanh(float64(x))) })
 	un("Exp", 6, func(x float32) float32 { return float32(math.Exp(float64(x))) })
 	un("Log", 6, func(x float32) float32 { return float32(math.Log(float64(x))) })
@@ -315,15 +348,7 @@ func init() {
 	})
 	Register("", "LeakyRelu", 6, func(n NodeInfo) (Op, error) {
 		a := n.Attrs.Float("alpha", 0.01)
-		return &unaryOp{n, func(dst, src []float32) {
-			dst = dst[:len(src)]
-			for i, v := range src {
-				if v < 0 {
-					v *= a
-				}
-				dst[i] = v
-			}
-		}}, nil
+		return &unaryOp{n, func(dst, src []float32) { vek.LeakyRelu(dst, src, a) }}, nil
 	})
 	Register("", "Elu", 6, func(n NodeInfo) (Op, error) {
 		a := n.Attrs.Float("alpha", 1)

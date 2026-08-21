@@ -30,9 +30,14 @@
 - [ ] `cmd/ocr` end-to-end
 
 ## Phase 4 — performance
-- [ ] asm conv (implicit GEMM), fused attention, softmax/layernorm SIMD
-- [ ] int8 GEMM (dot-product instrs: SDOT/UDOT on arm64, VNNI on amd64), bf16
-- [ ] operator fusion (GEMM epilogues), in-place, buffer reuse
+- [x] NEON elementwise kernels (kernels/vek): relu/hardswish/hardsigmoid/clip/
+      leakyrelu/add/sub/mul/div/scalar — 7-8× scalar; SE block-broadcast fast path.
+      mnv3 5.05→3.93 ms MT.
+- [ ] implicit-GEMM conv (no im2col buffer) + NEON depthwise kernel — conv is 78%
+- [ ] fused attention, softmax/layernorm SIMD
+- [ ] int8 GEMM (SDOT/UDOT on arm64, VNNI on amd64), bf16
+- [ ] operator fusion (conv/GEMM epilogue folds bias+activation), in-place, buffer reuse
+- [ ] amd64 AVX2/AVX-512 vek + gemm kernels via avo
 - [ ] ≤2× ONNX Runtime CPU on DBNet++ + SVTR, documented
 
 ## Phase 5 — breadth
