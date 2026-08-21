@@ -37,8 +37,27 @@ Full 1T table after NEON kernel:
 | lin 256×768×192 | 108.9 | 109.8 | single-threaded, same cause |
 | attn 256×256×64 | 101.4 | 99.5 | single-threaded, same cause |
 
-Next: parallelise inside a block (over MR/NR panels, BLIS-style), persistent worker
-pool, faster packing for small-M shapes.
+| 2026-08-21 | persistent worker pool (par.Run, 0 allocs), BLIS-style parallel packing + 2D (N-panel × M-chunk) macro tasks | 118.7 | 494.5 | 944–1021 | 377–443 |
+
+After intra-block parallelism (MT unless noted; ranges = quiet box vs. ~2 cores busy with other apps):
+
+| shape | 1T | MT | MT (2 cores busy) | note |
+|---|---|---|---|---|
+| sq512 | 118.7 | 494–616 | | |
+| sq1024 | — | 693–765 | | |
+| sq2048 | — | 944–1021 | 997 | **~95% of aggregate ceiling** |
+| conv 64×16384×576 | 93–99 | 378–443 | | packing now parallel |
+| conv 256×1024×2304 | 113 | 614–668 | | was single-threaded (111) |
+| lin 256×768×192 | 113–118 | 377–507 | 495 | was 110 |
+| attn 256×256×64 | 103–108 | 144–209 | 217 | was 100; region barriers dominate at 58µs |
+
+Observations:
+- Small shapes are barrier-bound: ~3 par.Run regions per (jc,pc,ic) block at ~6µs each.
+  Fusing pack-A into the macro task (pack-on-demand per M-chunk) would cut one.
+- When other processes hold cores, fewer workers beats more (stragglers at barriers).
+  Consider an adaptive worker count or letting the caller cap it per call.
+- amd64 AVX2/AVX-512 kernel deferred until there is an amd64 box to measure on
+  (can cross-build + correctness-test under Rosetta, but not benchmark).
 
 Method note: always sanity-check the box first — `uptime` (load avg) and a
 dependent-add loop for effective clock. On 2026-08-21 the first measurements were

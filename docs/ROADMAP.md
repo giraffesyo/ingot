@@ -4,9 +4,10 @@
 - [x] module, layout, CLAUDE.md
 - [x] `tensor`: DType, Tensor, shape/strides, pool
 - [x] `kernels/gemm`: reference, blocked f32 Go kernel, benchmark
-- [x] `kernels/par`: parallel-for with atomic scheduling (TODO: persistent pool → 0 allocs/op)
-- [ ] arm64 NEON micro-kernel (MR×NR f32), amd64 AVX2 via avo
-- [ ] `bench/`: GFLOPS table for common OCR shapes, compare vs ORT numbers
+- [x] `kernels/par`: persistent worker pool, `Run(Task)` 0-alloc, dynamic scheduling
+- [x] arm64 NEON 8×12 micro-kernel (generated asm) — 95% of core peak
+- [ ] amd64 AVX2/AVX-512 micro-kernel via avo (deferred: no amd64 box to measure)
+- [x] GFLOPS table for common OCR shapes (docs/PERF.md); ORT comparison pending phase 2
 
 ## Phase 2 — ONNX → graph → run
 - [ ] `onnx`: protobuf decode (vendored onnx.proto), IR conversion
