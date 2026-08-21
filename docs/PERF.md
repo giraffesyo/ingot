@@ -65,6 +65,16 @@ Observations:
   (AVX2→NEON translation, NOT native) it is 4.7× the scalar kernel — proof the
   SIMD path works; **native x86 GFLOPS are unmeasured (no x86 box) and expected to
   be much higher.** Needs benchmarking + MC/KC/NC tuning on real hardware.
+- The AVX2 path is selected at process start by runtime CPU detection
+  (`golang.org/x/sys/cpu`: AVX2+FMA → AVX2 kernel, else the portable Go kernel),
+  so the binary never executes an illegal instruction on pre-Haswell x86.
+  `gemm.HasAVX2` exposes which path is live. Fallback correctness is gated by
+  `TestSgemmGenericFallback`.
+- CI (`.github/workflows/ci.yml`) runs correctness on native runners for every
+  shipped arch — linux/amd64, linux/arm64, darwin/arm64, windows/amd64 — plus an
+  informational native-x86 benchmark job (uploads GFLOPS + CPU flags as an
+  artifact; not a gate, since shared runners are noisy). **This is where the
+  "native x86 GFLOPS unmeasured" gap gets closed once the repo is public.**
 - **amd64 vek (elementwise) is still scalar** — AVX2 VADDPS/VMULPS/VMAXPS kernels
   are the next amd64 item (~10-25% of a conv net). GEMM was done first as the
   highest-leverage piece.

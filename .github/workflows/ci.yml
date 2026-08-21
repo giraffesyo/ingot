@@ -1,11 +1,47 @@
 name: CI
 on: [push, pull_request]
+
+permissions:
+  contents: read
+
 jobs:
+  # Correctness on every arch we ship, natively (no emulation). The race
+  # detector needs cgo + a C toolchain (the runners have one); the library
+  # itself is still pure Go, which the separate no-cgo build step enforces.
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest        # linux/amd64  (native AVX2)
+            race: true
+          - os: ubuntu-24.04-arm     # linux/arm64  (native NEON)
+            race: true
+          - os: macos-latest         # darwin/arm64 (Apple Silicon, NEON)
+            race: true
+          - os: windows-latest       # windows/amd64
+            race: false
     runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Enforce pure Go (no cgo in the library)
+        run: CGO_ENABLED=0 go build ./...
+        shell: bash
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        if: matrix.race
+        run: go test -race -count=1 ./...
+      - name: Test
+        if: ${{ !matrix.race }}
+        run: go test -count=1 ./...
+
+  # Cross-compile smoke for targets we can't run here (static, cgo-free).
+  cross-build:
+    runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "0"
     steps:
@@ -13,14 +49,31 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
-      - name: Vet
-        run: go vet ./...
-      - name: Test (race)
-        # OCR model/corpus tests skip when testdata/ocr models are absent
-        # (large, license-bound, fetched separately). Everything else runs.
-        run: go test -race -count=1 ./...
-      - name: Build (cross-arch smoke)
+      - run: |
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64; do
+            echo "== $t =="
+            GOOS=${t%/*} GOARCH=${t#*/} go build ./...
+          done
+
+  # Native x86 benchmarks — INFORMATIONAL, never a gate. Shared runners are
+  # noisy and the CPU model varies, so this is for ballpark GFLOPS and catching
+  # gross regressions, not sub-percent tracking. Records CPU features so the
+  # numbers are interpretable and shows whether the AVX2 path was active.
+  bench-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: CPU info
         run: |
-          GOARCH=amd64 GOOS=linux  go build ./...
-          GOARCH=arm64 GOOS=linux  go build ./...
-          GOARCH=amd64 GOOS=windows go build ./...
+          lscpu | grep -E 'Model name|Flags' | tr ' ' '\n' | grep -E 'avx2|fma|avx512' | sort -u || true
+      - name: GEMM + elementwise benchmarks (native AVX2)
+        run: |
+          go test -run='^$' -bench='Sgemm|MicroKernel' -benchmem ./kernels/gemm | tee bench-gemm.txt
+          go test -run='^$' -bench='Vek'                -benchmem ./kernels/vek  | tee bench-vek.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-amd64
+          path: bench-*.txt
