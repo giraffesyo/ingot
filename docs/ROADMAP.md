@@ -42,6 +42,15 @@
 - [ ] amd64 AVX2/AVX-512 vek + gemm kernels via avo
 - [ ] ≤2× ONNX Runtime CPU on DBNet++ + SVTR, documented
 
-## Phase 5 — breadth
+## Coverage (breadth)
+- [x] model zoo conformance harness (graph.TestZoo, auto-discovers manifests)
+- [x] verified vs ORT: resnet, mobilenet_v2/v3, efficientnet, vit, bert, LLM block,
+      segnet (ConvTranspose+Resize). LLM/BERT/ViT run via primitive decomposition.
+- [x] external-data loader (onnx.DecodeFile), Resize (nearest/linear), ConvTranspose,
+      Pad (constant/reflect/edge), Dropout
+- [ ] gaps documented in docs/GAPS.md; OCR-blocking: If/Loop/Scan, GridSample,
+      NMS/TopK. Quantization (int8) and LSTM/GRU also open.
+
+## Phase 5 — OCR + breadth
 - [ ] layout analysis, reading order, tables, multilingual, handwriting
 - [ ] wasm target
