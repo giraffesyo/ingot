@@ -33,7 +33,9 @@
 - [x] NEON elementwise kernels (kernels/vek): relu/hardswish/hardsigmoid/clip/
       leakyrelu/add/sub/mul/div/scalar — 7-8× scalar; SE block-broadcast fast path.
       mnv3 5.05→3.93 ms MT.
-- [ ] implicit-GEMM conv (no im2col buffer) + NEON depthwise kernel — conv is 78%
+- [x] NEON depthwise kernel (stride-1 3×3/5×5, pad-then-convolve): hot dw convs
+      480→150 µs, mnv3 6.5→4.5 ms 1T. TODO: stride-2 depthwise (still scalar),
+      GEMV for classifier (batch-1 FC), implicit-GEMM for the regular conv.
 - [ ] fused attention, softmax/layernorm SIMD
 - [ ] int8 GEMM (SDOT/UDOT on arm64, VNNI on amd64), bf16
 - [ ] operator fusion (conv/GEMM epilogue folds bias+activation), in-place, buffer reuse

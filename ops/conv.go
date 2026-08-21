@@ -2,9 +2,11 @@ package ops
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/giraffesyo/ocr/kernels/gemm"
 	"github.com/giraffesyo/ocr/kernels/par"
+	"github.com/giraffesyo/ocr/kernels/vek"
 	"github.com/giraffesyo/ocr/tensor"
 )
 
@@ -13,6 +15,8 @@ import (
 type convOp struct {
 	n         NodeInfo
 	group     int
+	dwPadded  []float32 // lazily packed padded depthwise weights (C * paddedK)
+	dwOnce    sync.Once
 	strides   [2]int
 	dilations [2]int
 	pads      [4]int // top, left, bottom, right
@@ -103,8 +107,11 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 
 	depthwise := G == C && Cg == 1 && Mg == 1
 	pointwise := KH == 1 && KW == 1 && o.strides == [2]int{1, 1} && pads == [4]int{} && o.dilations == [2]int{1, 1}
+	dwFast := depthwise && o.strides == [2]int{1, 1} && o.dilations == [2]int{1, 1} && KH == KW && (KH == 3 || KH == 5)
 
 	switch {
+	case dwFast:
+		o.depthwiseS1(ctx, xf, wf, bias, of, N, C, H, W, KH, OH, OW, pads)
 	case depthwise:
 		o.depthwise(xf, wf, bias, of, N, C, H, W, KH, KW, OH, OW, pads)
 	case pointwise:
@@ -248,11 +255,7 @@ func (o *convOp) depthwise(x, w, bias, out []float32, N, C, H, W, KH, KW, OH, OW
 					wv := wc[kh*KW+kw]
 					dst := row[sp.lo:sp.hi]
 					if sw == 1 {
-						src := xr[sp.lo+sp.off : sp.hi+sp.off]
-						src = src[:len(dst)]
-						for i, v := range src {
-							dst[i] += wv * v
-						}
+						vek.Axpy(dst, xr[sp.lo+sp.off:sp.hi+sp.off], wv)
 					} else {
 						base := sp.lo*sw + sp.off
 						for i := range dst {
@@ -260,6 +263,67 @@ func (o *convOp) depthwise(x, w, bias, out []float32, N, C, H, W, KH, KW, OH, OW
 						}
 					}
 				}
+			}
+		}
+	})
+}
+
+// depthwiseS1 is a stride-1, dilation-1 KxK (K in {3,5}) depthwise conv. Each
+// input channel is copied once into a zero-padded scratch plane so every output
+// row is fully in-bounds and the NEON row kernel (vek.DwRowKxKS1) covers the
+// whole output — no scalar border. Parallel over (n, c); each worker reuses its
+// own padded plane (borders stay zero across channels, only the interior is
+// rewritten).
+func (o *convOp) depthwiseS1(ctx *Ctx, x, w, bias, out []float32, N, C, H, W, K, OH, OW int, pads [4]int) {
+	pt, pl, pb, pr := pads[0], pads[1], pads[2], pads[3]
+	Hp, Wp := H+pt+pb, W+pl+pr
+	paddedK := ((K*K + 3) / 4) * 4
+	o.dwOnce.Do(func() {
+		o.dwPadded = make([]float32, C*paddedK)
+		for c := 0; c < C; c++ {
+			copy(o.dwPadded[c*paddedK:c*paddedK+K*K], w[c*K*K:(c+1)*K*K])
+		}
+	})
+	workers := par.Workers()
+	scratch := ctx.New(tensor.F32, workers, Hp, Wp) // zeroed: borders stay 0
+	sf := scratch.F32()
+	plane := Hp * Wp
+	grain := max(1, 20000/max(OH*OW*K*K, 1))
+	par.For(N*C, grain, func(nc, wk int) {
+		c := nc % C
+		xc := x[nc*H*W : (nc+1)*H*W]
+		oc := out[nc*OH*OW : (nc+1)*OH*OW]
+		pad := sf[wk*plane : (wk+1)*plane]
+		// Copy this channel into the padded interior.
+		for i := 0; i < H; i++ {
+			copy(pad[(pt+i)*Wp+pl:(pt+i)*Wp+pl+W], xc[i*W:(i+1)*W])
+		}
+		var b float32
+		if bias != nil {
+			b = bias[c]
+		}
+		wp := o.dwPadded[c*paddedK : c*paddedK+paddedK]
+		ncols := OW &^ 3
+		for oh := 0; oh < OH; oh++ {
+			row := oc[oh*OW : (oh+1)*OW]
+			for i := range row {
+				row[i] = b
+			}
+			src := pad[oh*Wp:] // output col 0 reads padded[(oh)*Wp + 0 ..]
+			if K == 3 {
+				vek.DwRow3x3S1(row, src, wp, ncols, Wp)
+			} else {
+				vek.DwRow5x5S1(row, src, wp, ncols, Wp)
+			}
+			// <4 column remainder against the padded plane
+			for cc := ncols; cc < OW; cc++ {
+				var acc float32
+				for kh := 0; kh < K; kh++ {
+					for kw := 0; kw < K; kw++ {
+						acc += wp[kh*K+kw] * src[kh*Wp+cc+kw]
+					}
+				}
+				row[cc] += acc
 			}
 		}
 	})

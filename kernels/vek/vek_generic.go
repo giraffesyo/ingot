@@ -82,6 +82,32 @@ func MulScalar(dst, src []float32, s float32) {
 		dst[i] = src[i] * s
 	}
 }
+func Axpy(dst, src []float32, a float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		dst[i] += a * src[i]
+	}
+}
+
+// DwRow3x3S1: scalar fallback matching the arm64 kernel semantics.
+func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) { dwRowS1(dst, src, wpacked, ncols, W, 3) }
+
+// DwRow5x5S1: scalar fallback.
+func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) { dwRowS1(dst, src, wpacked, ncols, W, 5) }
+
+func dwRowS1(dst, src, wpacked []float32, ncols, W, K int) {
+	n := ncols &^ 3
+	for c := 0; c < n; c++ {
+		var acc float32
+		for kh := 0; kh < K; kh++ {
+			base := kh*W + c
+			for kw := 0; kw < K; kw++ {
+				acc += wpacked[kh*K+kw] * src[base+kw]
+			}
+		}
+		dst[c] += acc
+	}
+}
+
 func clamp01(x float32) float32 {
 	if x < 0 {
 		return 0

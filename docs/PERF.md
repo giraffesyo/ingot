@@ -139,3 +139,33 @@ im2col buffer) + a NEON depthwise kernel.
 |---|---|---|---|
 | 2026-08-21 | im2col+GEMM conv, scalar elementwise | 8.2 ms | 5.05 ms |
 | 2026-08-21 | NEON vek elementwise + SE broadcast fast path | 6.5 ms | 3.93 ms |
+
+
+## NEON depthwise conv (`kernels/vek` dwconv + `ops/conv.go`)
+
+Profiling showed the hot convs in MobileNetV3 were the **stride-1 depthwise**
+layers (5×5 over 14×14, many channels), not the pointwise 1×1 (those already run
+through NEON GEMM). Added generated NEON row kernels `dwconv3x3s1`/`dwconv5x5s1`
+(by-element FMLA against lane-packed weights, like the GEMM micro-kernel). The
+conv op pads each input channel once into a zero-bordered scratch plane so every
+output row is fully in-bounds and the kernel covers 100% of outputs — no scalar
+border. Weights are packed once and cached on the op.
+
+Hot stride-1 depthwise nodes (1T): 480 µs → 150 µs.
+
+| date | change | mnv3 1T | mnv3 MT |
+|---|---|---|---|
+| 2026-08-21 | NEON vek elementwise + SE broadcast | 6.5 ms | 3.93 ms |
+| 2026-08-21 | pad-then-convolve NEON depthwise (stride-1 3×3/5×5) | 4.5 ms | 3.44 ms |
+
+Cumulative this session: mnv3 8.2 → 4.5 ms 1T (1.8×), 5.05 → 3.44 ms MT.
+Gap to ONNX Runtime (1.12 ms MT) now ~3×.
+
+Remaining conv hot spots (next targets):
+- **classifier GEMV** (462+275 µs): final FC layers are matrix×vector (batch 1);
+  GEMM packs wastefully at M=1. A dedicated GEMV path.
+- **stride-2 depthwise** (features.2/4/9, ~250 µs each): still scalar; needs a
+  strided (LD2 deinterleave) NEON kernel or stride-2 pad-then-convolve variant.
+- **first regular conv** (290 µs): 3→16 3×3 s2 over 224×224 via im2col+GEMM.
+- **pointwise GEMMs**: small-M GEMM efficiency + conv/GEMM epilogue fusion
+  (fold bias + Relu/HardSwish into the GEMM write) would remove separate passes.
