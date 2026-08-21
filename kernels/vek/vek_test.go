@@ -109,6 +109,14 @@ func TestVek(t *testing.T) {
 			want[i] = a[i] * 3
 		}
 		eq(t, "MulScalar", out, want)
+
+		acc := randf(r, n)
+		copy(out, acc)
+		Axpy(out, a, 1.7)
+		for i := range want {
+			want[i] = acc[i] + 1.7*a[i]
+		}
+		eq(t, "Axpy", out, want)
 	}
 }
 

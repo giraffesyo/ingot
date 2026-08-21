@@ -41,6 +41,15 @@ func addscalar_asm(dst, src []float32, n int, s float32)
 //go:noescape
 func mulscalar_asm(dst, src []float32, n int, s float32)
 
+//go:noescape
+func axpy_asm(dst, src []float32, n int, a float32)
+
+//go:noescape
+func dwconv3x3s1_asm(dst, src, wpacked []float32, ncols, W int)
+
+//go:noescape
+func dwconv5x5s1_asm(dst, src, wpacked []float32, ncols, W int)
+
 func vecLen(dst, a, b []float32) int {
 	n := len(dst)
 	if len(a) < n {
@@ -203,6 +212,30 @@ func MulScalar(dst, src []float32, s float32) {
 	for i := m; i < n; i++ {
 		dst[i] = src[i] * s
 	}
+}
+
+// Axpy computes dst += a*src elementwise (in place on dst).
+func Axpy(dst, src []float32, a float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 3
+	axpy_asm(dst, src, m, a)
+	for i := m; i < n; i++ {
+		dst[i] += a * src[i]
+	}
+}
+
+// DwRow3x3S1 adds a stride-1 3x3 depthwise conv into dst for ncols output
+// columns, all taps in-bounds. wpacked holds 9 weights one-per-lane, padded to
+// 12. src points at the top-left input element for output column 0. dst is
+// pre-filled with bias. Only ncols&^3 columns are done here; the caller handles
+// the <4 remainder. W is the input row stride in elements.
+func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) {
+	dwconv3x3s1_asm(dst, src, wpacked, ncols&^3, W)
+}
+
+// DwRow5x5S1 is DwRow3x3S1 for a 5x5 kernel (25 weights padded to 28).
+func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) {
+	dwconv5x5s1_asm(dst, src, wpacked, ncols&^3, W)
 }
 
 func clamp01(x float32) float32 {

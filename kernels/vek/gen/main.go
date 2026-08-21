@@ -30,6 +30,13 @@ func movi0(d int) uint32      { return 0x4F000400 | u(d) }                      
 func u(x int) uint32          { return uint32(x) }
 func fbits(f float64) uint32  { return math.Float32bits(float32(f)) }
 
+// fmlaElem: FMLA Vd.4S += Vn.4S * Vm.S[idx].
+func fmlaElem(d, n, m, idx int) uint32 {
+	l := uint32(idx & 1)
+	h := uint32(idx >> 1)
+	return 0x4F801000 | l<<21 | u(m>>4)<<20 | u(m&15)<<16 | h<<11 | u(n)<<5 | u(d)
+}
+
 type gen struct{ b strings.Builder }
 
 func (g *gen) w(f string, a ...any) { fmt.Fprintf(&g.b, f+"\n", a...) }
@@ -194,5 +201,107 @@ func main() {
 		g.w("\tWORD $0x%08X // fmul v%d,v%d,v28", fmul(v, v, 28), v, v)
 	})
 
+	g.axpy()
+	g.dwconv(3)
+	g.dwconv(5)
+
 	os.Stdout.WriteString(g.b.String())
+}
+
+// dwconv emits func dwconvKxKs1_asm(dst, src []float32, wpacked []float32, ncols, W int):
+// one interior output row of a stride-1, dilation-1, KxK depthwise conv, adding
+// into dst (pre-filled with bias by the caller). src points at the top-left
+// input element for output column 0 (all taps in-bounds). wpacked holds K*K
+// weights one per lane, padded to a multiple of 4, loaded into V25.. once.
+// ncols is a multiple of 4.
+func (g *gen) dwconv(K int) {
+	name := fmt.Sprintf("dwconv%dx%ds1", K, K)
+	nw := K * K
+	nreg := (nw + 3) / 4
+	g.w("// func %s_asm(dst, src []float32, wpacked []float32, ncols, W int)", name)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-88", name)
+	g.w("	MOVD dst_base+0(FP), R0")
+	g.w("	MOVD src_base+24(FP), R1")
+	g.w("	MOVD wpacked_base+48(FP), R2")
+	g.w("	MOVD ncols+72(FP), R3")
+	g.w("	MOVD W+80(FP), R4")
+	g.w("	LSL $2, R4, R4 // row stride in bytes")
+	// VLD1 loads at most 4 registers per list; split the weight preload.
+	for base := 0; base < nreg; base += 4 {
+		cnt := min(4, nreg-base)
+		if base+cnt < nreg {
+			g.w("	VLD1.P %d(R2), [%s]", cnt*16, vregList(25+base, cnt))
+		} else {
+			g.w("	VLD1 (R2), [%s]", vregList(25+base, cnt))
+		}
+	}
+	g.w("loop:")
+	g.w("	CMP $4, R3")
+	g.w("	BLT done")
+	g.w("	VLD1 (R0), [V0.S4] // acc = dst[c..c+4]")
+	for kh := 0; kh < K; kh++ {
+		if kh == 0 {
+			g.w("	MOVD R1, R5")
+		} else {
+			g.w("	ADD R4, R5, R5")
+		}
+		g.w("	MOVD R5, R6")
+		for kw := 0; kw < K; kw++ {
+			t := kh*K + kw
+			if kw > 0 {
+				g.w("	ADD $4, R6, R6")
+			}
+			g.w("	VLD1 (R6), [V1.S4]")
+			g.w("	WORD $0x%08X // fmla v0 += v1 * v%d.s[%d] (w%d)", fmlaElem(0, 1, 25+t/4, t%4), 25+t/4, t%4, t)
+		}
+	}
+	g.w("	VST1.P [V0.S4], 16(R0)")
+	g.w("	ADD $16, R1, R1")
+	g.w("	SUB $4, R3, R3")
+	g.w("	B loop")
+	g.w("done:")
+	g.w("	RET")
+	g.w("")
+}
+
+func vregList(base, n int) string {
+	parts := make([]string, n)
+	for i := 0; i < n; i++ {
+		parts[i] = fmt.Sprintf("V%d.S4", base+i)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// axpy emits func axpy_asm(dst, src []float32, n int, a float32): dst += a*src.
+// dst is loaded, FMLA-accumulated with a broadcast, and stored.
+func (g *gen) axpy() {
+	g.w("// func axpy_asm(dst, src []float32, n int, a float32): dst += a*src")
+	g.w("TEXT ·axpy_asm(SB), NOSPLIT, $0-60")
+	g.w("	MOVD dst_base+0(FP), R0")
+	g.w("	MOVD src_base+24(FP), R1")
+	g.w("	MOVD n+48(FP), R3")
+	g.dupArg(28, 56, "a")
+	g.w("loop16:")
+	g.w("	CMP $16, R3")
+	g.w("	BLT loop4")
+	g.w("	VLD1 (R0), [V0.S4, V1.S4, V2.S4, V3.S4]")
+	g.w("	VLD1.P 64(R1), [V4.S4, V5.S4, V6.S4, V7.S4]")
+	for i := 0; i < 4; i++ {
+		g.w("	WORD $0x%08X // fmla v%d += v%d*v28", fmla(i, i+4, 28), i, i+4)
+	}
+	g.w("	VST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R0)")
+	g.w("	SUB $16, R3")
+	g.w("	B loop16")
+	g.w("loop4:")
+	g.w("	CMP $4, R3")
+	g.w("	BLT done")
+	g.w("	VLD1 (R0), [V0.S4]")
+	g.w("	VLD1.P 16(R1), [V4.S4]")
+	g.w("	WORD $0x%08X // fmla v0 += v4*v28", fmla(0, 4, 28))
+	g.w("	VST1.P [V0.S4], 16(R0)")
+	g.w("	SUB $4, R3")
+	g.w("	B loop4")
+	g.w("done:")
+	g.w("	RET")
+	g.w("")
 }
