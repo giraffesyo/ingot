@@ -12,18 +12,41 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "..", "testdata", "ocr", "co
 os.makedirs(OUT, exist_ok=True)
 random.seed(7)
 
-FONTS = [
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-    "/System/Library/Fonts/Supplemental/Georgia.ttf",
-    "/System/Library/Fonts/Supplemental/Verdana.ttf",
-    "/System/Library/Fonts/Menlo.ttc",
-    "/System/Library/Fonts/Supplemental/Courier New.ttf",
-]
-FONTS = [f for f in FONTS if os.path.exists(f)]
-CJK = [f for f in ["/System/Library/Fonts/Hiragino Sans GB.ttc",
-                   "/System/Library/Fonts/STHeiti Medium.ttc"] if os.path.exists(f)]
+def _discover_fonts():
+    """Find usable Latin + CJK TrueType fonts across macOS / Linux / Windows.
+
+    The committed corpus is fixed, so regeneration need not match byte-for-byte;
+    this only needs *some* varied fonts. Falls back to PIL's built-in font.
+    """
+    import glob
+    dirs = [
+        "/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts",
+        "/usr/share/fonts", "/usr/local/share/fonts", os.path.expanduser("~/.fonts"),
+        "C:/Windows/Fonts",
+    ]
+    latin_names = ("dejavusans", "liberationsans", "arial", "helvetica", "verdana",
+                   "georgia", "times", "liberationserif", "dejavuserif", "freesans",
+                   "notosans", "ubuntu", "roboto")
+    mono_names = ("dejavusansmono", "liberationmono", "courier", "menlo", "consola")
+    cjk_names = ("notosanscjk", "notosanssc", "hiragino", "stheiti", "songti",
+                 "pingfang", "wqy", "msyh", "simsun", "sourcehansans")
+    found_latin, found_cjk = [], []
+    for d in dirs:
+        for f in glob.glob(os.path.join(d, "**", "*.tt[cf]"), recursive=True) +                  glob.glob(os.path.join(d, "**", "*.otf"), recursive=True):
+            n = os.path.basename(f).lower().replace(" ", "")
+            if any(k in n for k in cjk_names):
+                found_cjk.append(f)
+            elif any(k in n for k in latin_names + mono_names):
+                found_latin.append(f)
+    # de-dup, cap variety
+    latin = sorted(set(found_latin))[:8]
+    cjk = sorted(set(found_cjk))[:2]
+    if not latin:
+        latin = ["<default>"]  # sentinel -> ImageFont.load_default()
+    return latin, cjk
+
+FONTS, CJK = _discover_fonts()
+print(f"fonts: {len(FONTS)} latin, {len(CJK)} cjk")
 
 WORDS = ("the quick brown fox jumps over lazy dog Invoice Total Amount Date Name "
          "Address Order Number Customer Product Quantity Price Subtotal Shipping "
@@ -66,8 +89,10 @@ def gen_image(idx):
         text, is_cjk = line_text()
         size = random.randint(18, 34)
         fpath = random.choice(CJK) if is_cjk else random.choice(FONTS)
-        try: font = ImageFont.truetype(fpath, size)
-        except Exception: font = ImageFont.load_default()
+        try:
+            font = ImageFont.load_default(size) if fpath == "<default>" else ImageFont.truetype(fpath, size)
+        except Exception:
+            font = ImageFont.load_default()
         x = random.randint(15, 60)
         bbox = d.textbbox((x, y), text, font=font)
         w, h = bbox[2]-bbox[0], bbox[3]-bbox[1]
