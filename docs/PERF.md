@@ -86,6 +86,39 @@ Observations:
   the 8-lane amd64 kernel. Fixed by making `vek.DwRow*` own their full width
   (SIMD bulk + internal scalar tail via `dwTail`), so callers are lane-agnostic.
 
+### Native x86 measurement (x86-64 (Zen 4), Linux)
+
+Measured on a real x86 box, retiring the "unmeasured
+on native x86" caveat. **Important:** the box was under heavy unrelated
+background load (heavy background load), so multi-thread numbers
+are contention-noise and omitted; single-thread figures are CPU-pinned (`taskset
+-c 0`) but still a *lower bound* under that load.
+
+| kernel (1T, pinned, under load) | GFLOPS |
+|---|---|
+| AVX2 6×16 micro-kernel | ~80 |
+| scalar generic micro-kernel | 3.0 |
+| **AVX2 speedup** | **~27×** |
+| full Sgemm sq512 | 65 |
+| full Sgemm sq2048 | 69 |
+| full Sgemm conv 256×1024×2304 | 60 |
+
+Zen4 AVX2 core peak is ~112 GFLOPS (2 FMA units × 8 lanes × 2 × ~3.5 GHz), so the
+micro-kernel is ~70% of peak *even while the box was oversubscribed ~2.6×* — a
+quiet machine should be higher. Full Sgemm at 60–69 vs the 80 micro-kernel is the
+usual packing/blocking overhead; the amd64 MC/KC/NC are still first-guess values
+(`params_amd64.go`) and want tuning on a quiet box.
+
+**Correctness on native x86 is complete:** the full kernel/op/onnx/tensor suite,
+model conformance (MobileNetV3, the zoo, PP-OCRv4 detection), and the OCR corpus
+all pass on Zen4 with results **identical to arm64** (corpus F1 0.917, exact-match
+0.919, CER 0.013 — same as NEON). The AVX2 GEMM + vek + depthwise path is proven
+on real hardware, not just Rosetta.
+
+Open on x86: (1) MT scaling + blocking tuning on a quiet machine; (2) an **AVX-512**
+kernel — this Zen4 has `avx512f`; a 16-wide / 32-register kernel could roughly
+double the micro-kernel throughput (needs its own runtime CPU guard).
+
 Method note: always sanity-check the box first — `uptime` (load avg) and a
 dependent-add loop for effective clock. On 2026-08-21 the first measurements were
 taken with the machine under heavy background load, at ~1.4 GHz effective.
