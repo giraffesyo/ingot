@@ -48,8 +48,9 @@ func TestSgemmMatchesRef(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	shapes := [][3]int{
 		{1, 1, 1}, {3, 5, 7}, {4, 4, 4}, {5, 9, 3}, {MR, NR, KC}, {MR + 1, NR + 1, KC + 1},
-		{MC, NC, KC}, {MC + 3, NC + 5, KC + 7}, {2*MC + 1, NC + NR + 1, KC + 3},
-		{64, 1000, 576}, {1, 4096, 64}, {4096, 1, 64}, {300, 17, 1},
+		// Exercise each blocking dimension past one block without blowing up the oracle.
+		{2*MC + 1, 3*NR + 1, 33}, {3*MR + 1, NC + NR + 1, 17}, {MR + 3, NR + 5, 2*KC + 3},
+		{MC + MR + 1, 2 * NR, KC + 1}, {64, 1000, 576}, {1, 4096, 64}, {4096, 1, 64}, {300, 17, 1},
 	}
 	for _, sh := range shapes {
 		m, n, k := sh[0], sh[1], sh[2]
