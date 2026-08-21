@@ -20,12 +20,21 @@ type Ctx struct {
 	Pool *tensor.Pool
 }
 
-// New allocates an output tensor from the pool.
+// New allocates a zeroed output tensor from the pool.
 func (c *Ctx) New(dt tensor.DType, shape ...int) *tensor.Tensor {
 	if c.Pool == nil {
 		return tensor.New(dt, shape...)
 	}
 	return c.Pool.Get(dt, shape...)
+}
+
+// NewUninit allocates an output tensor whose storage is not zeroed. Use only
+// when the op writes every element before it can be read.
+func (c *Ctx) NewUninit(dt tensor.DType, shape ...int) *tensor.Tensor {
+	if c.Pool == nil {
+		return tensor.New(dt, shape...)
+	}
+	return c.Pool.GetUninit(dt, shape...)
 }
 
 // NodeInfo describes a node to a Builder.

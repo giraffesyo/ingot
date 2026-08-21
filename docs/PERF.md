@@ -62,3 +62,44 @@ Observations:
 Method note: always sanity-check the box first — `uptime` (load avg) and a
 dependent-add loop for effective clock. On 2026-08-21 the first measurements were
 taken with the machine under heavy background load, at ~1.4 GHz effective.
+
+
+## End-to-end models (`graph`)
+
+Machine: Apple Silicon, Go 1.26.7, CGO_ENABLED=0. `BenchmarkModels`, f32.
+Reference: ONNX Runtime 1.29 CPU, same host.
+
+| model | ours 1T | ours MT | ORT 1T | ORT MT | ratio (MT) |
+|---|---|---|---|---|---|
+| mobilenet_v3_small | 8.2 ms | 5.05 ms | 2.71 ms | 1.12 ms | 4.5× |
+| tiny_conv | — | 0.090 ms | — | — | |
+| tiny_transformer | — | 0.087 ms | — | — | |
+
+Numerical parity vs ORT (max abs err): tiny_conv 1.5e-8, tiny_transformer 2.4e-7,
+mobilenet_v3_small 1.2e-5. Correctness is not the gap; speed is.
+
+Op breakdown, mobilenet_v3_small, 1T (`OCR_PROFILE_MODEL=… go test -run TestOpProfile -v`):
+
+| op | count | µs/run | share |
+|---|---|---|---|
+| Conv | 52 | 5357 | 63% |
+| Gemm | 2 | 929 | 11% |
+| HardSwish | 19 | 844 | 10% |
+| Mul | 9 | 600 | 7% |
+| Relu | 14 | 598 | 7% |
+| GlobalAveragePool | 10 | 128 | 2% |
+
+Where the 4.5× goes, and the fix (phase 4):
+- **Conv (63%)** — im2col+GEMM materialises the column buffer every call and the
+  1×1 path is fine, but 3×3 stride-1 convs pay im2col bandwidth. Implicit-GEMM
+  conv (pack directly from the input, no col buffer) + a NEON depthwise kernel.
+- **Elementwise + pool (26%)** — pure scalar Go. HardSwish/Relu/Mul/Sigmoid/
+  softmax/pool want NEON (and AVX2/512) whole-slice kernels; ~5-8× each.
+- **Gemm (11%)** — already NEON, near core peak; multi-op fusion (conv/gemm
+  epilogue folds bias+activation) removes separate Relu/HardSwish passes entirely.
+- Un-cleared pool allocation (done) removed the double-write on every output;
+  worth ~0 here because outputs are written immediately, but it matters once
+  kernels get faster.
+
+Uncleared-buffer note: `Pool.GetUninit` / `Ctx.NewUninit` skip zeroing for ops
+that write every output element.

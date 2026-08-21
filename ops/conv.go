@@ -95,7 +95,7 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if OH <= 0 || OW <= 0 {
 		return nil, o.n.Errorf("non-positive output size %dx%d", OH, OW)
 	}
-	out := ctx.New(tensor.F32, N, M, OH, OW)
+	out := ctx.NewUninit(tensor.F32, N, M, OH, OW)
 	xf, wf, of := x.F32(), w.F32(), out.F32()
 	Mg := M / G
 	K := Cg * KH * KW
@@ -155,7 +155,8 @@ func (o *convOp) im2col(x, col []float32, C, H, W, KH, KW, OH, OW int, pads [4]i
 	pt, pl := pads[0], pads[1]
 	P := OH * OW
 	K := C * KH * KW
-	par.For(K, 4, func(k, _ int) {
+	grain := max(1, 8192/max(P, 1))
+	par.For(K, grain, func(k, _ int) {
 		c := k / (KH * KW)
 		kh := (k / KW) % KH
 		kw := k % KW
@@ -194,12 +195,32 @@ func (o *convOp) im2col(x, col []float32, C, H, W, KH, KW, OH, OW int, pads [4]i
 	})
 }
 
-// depthwise: one filter per channel, direct computation, parallel over (n,c).
+// depthwise: one filter per channel. For each output row the kernel taps are
+// applied as clipped row-axpys (out[ow0:ow1] += w * x[ih][...]), so the inner
+// loops are branch-free and stride-1 for the common stride-1 case.
+// Parallel over (n, c) with grain chosen so each task is a few µs.
 func (o *convOp) depthwise(x, w, bias, out []float32, N, C, H, W, KH, KW, OH, OW int, pads [4]int) {
 	sh, sw := o.strides[0], o.strides[1]
 	dh, dw := o.dilations[0], o.dilations[1]
 	pt, pl := pads[0], pads[1]
-	par.For(N*C, 1, func(nc, _ int) {
+	// Per-kw valid output column range [lo, hi) such that 0 <= iw < W.
+	type span struct{ lo, hi, off int }
+	spans := make([]span, KW)
+	for kw := 0; kw < KW; kw++ {
+		off := kw*dw - pl // iw = ow*sw + off
+		lo := 0
+		if off < 0 {
+			lo = (-off + sw - 1) / sw
+		}
+		hi := OW
+		if m := (W - off + sw - 1) / sw; m < hi { // ow*sw+off < W
+			hi = max(m, 0)
+		}
+		spans[kw] = span{lo, max(hi, lo), off}
+	}
+	work := OH * OW * KH * KW
+	grain := max(1, 20000/max(work, 1))
+	par.For(N*C, grain, func(nc, _ int) {
 		c := nc % C
 		xc := x[nc*H*W : (nc+1)*H*W]
 		wc := w[c*KH*KW : (c+1)*KH*KW]
@@ -209,24 +230,36 @@ func (o *convOp) depthwise(x, w, bias, out []float32, N, C, H, W, KH, KW, OH, OW
 			b = bias[c]
 		}
 		for oh := 0; oh < OH; oh++ {
-			for ow := 0; ow < OW; ow++ {
-				acc := b
-				for kh := 0; kh < KH; kh++ {
-					ih := oh*sh + kh*dh - pt
-					if ih < 0 || ih >= H {
+			row := oc[oh*OW : (oh+1)*OW]
+			for i := range row {
+				row[i] = b
+			}
+			for kh := 0; kh < KH; kh++ {
+				ih := oh*sh + kh*dh - pt
+				if ih < 0 || ih >= H {
+					continue
+				}
+				xr := xc[ih*W : (ih+1)*W]
+				for kw := 0; kw < KW; kw++ {
+					sp := spans[kw]
+					if sp.hi <= sp.lo {
 						continue
 					}
-					xr := xc[ih*W : (ih+1)*W]
-					wr := wc[kh*KW : (kh+1)*KW]
-					for kw := 0; kw < KW; kw++ {
-						iw := ow*sw + kw*dw - pl
-						if iw < 0 || iw >= W {
-							continue
+					wv := wc[kh*KW+kw]
+					dst := row[sp.lo:sp.hi]
+					if sw == 1 {
+						src := xr[sp.lo+sp.off : sp.hi+sp.off]
+						src = src[:len(dst)]
+						for i, v := range src {
+							dst[i] += wv * v
 						}
-						acc += xr[iw] * wr[kw]
+					} else {
+						base := sp.lo*sw + sp.off
+						for i := range dst {
+							dst[i] += wv * xr[base+i*sw]
+						}
 					}
 				}
-				oc[oh*OW+ow] = acc
 			}
 		}
 	})

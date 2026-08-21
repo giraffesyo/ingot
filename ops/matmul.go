@@ -31,7 +31,7 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if K != Kb {
 		return nil, o.n.Errorf("inner dim mismatch %d vs %d", K, Kb)
 	}
-	out := ctx.New(tensor.F32, M, N)
+	out := ctx.NewUninit(tensor.F32, M, N)
 	of := out.F32()
 	beta := float32(0)
 	if len(in) > 2 && in[2] != nil && o.beta != 0 {
@@ -101,7 +101,7 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		return nil, o.n.Errorf("%v", err)
 	}
 	oshape := append(batch.Clone(), M, N)
-	out := ctx.New(tensor.F32, oshape...)
+	out := ctx.NewUninit(tensor.F32, oshape...)
 	af, bf, of := a.F32(), b.F32(), out.F32()
 	nb := batch.Numel()
 	if nb == 1 {

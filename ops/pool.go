@@ -87,7 +87,7 @@ func (o *poolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	OH := outDim(H, KH, sh, pads[0], pads[2])
 	OW := outDim(W, KW, sw, pads[1], pads[3])
-	out := ctx.New(tensor.F32, N, C, OH, OW)
+	out := ctx.NewUninit(tensor.F32, N, C, OH, OW)
 	xf, of := x.F32(), out.F32()
 	pt, pl := pads[0], pads[1]
 	isMax := o.kind == "max"
@@ -171,7 +171,7 @@ func (o *globalPoolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 	for i := 2; i < len(xs); i++ {
 		oshape[i] = 1
 	}
-	out := ctx.New(tensor.F32, oshape...)
+	out := ctx.NewUninit(tensor.F32, oshape...)
 	xf, of := x.F32(), out.F32()
 	par.For(N*C, 8, func(nc, _ int) {
 		src := xf[nc*P : (nc+1)*P]
