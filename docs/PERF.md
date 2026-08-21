@@ -75,9 +75,16 @@ Observations:
   informational native-x86 benchmark job (uploads GFLOPS + CPU flags as an
   artifact; not a gate, since shared runners are noisy). **This is where the
   "native x86 GFLOPS unmeasured" gap gets closed once the repo is public.**
-- **amd64 vek (elementwise) is still scalar** — AVX2 VADDPS/VMULPS/VMAXPS kernels
-  are the next amd64 item (~10-25% of a conv net). GEMM was done first as the
-  highest-leverage piece.
+- **amd64 vek (elementwise + depthwise) now has AVX2 kernels** too
+  (`kernels/vek/genamd64` → `vek_amd64.s`, 8-wide YMM): add/sub/mul/div/max/min,
+  relu/hardswish/hardsigmoid/clip/leakyrelu/scalar, axpy, and the 3×3/5×5 stride-1
+  depthwise rows (VBROADCASTSS weights + VFMADD231PS). So x86 now runs SIMD for
+  GEMM, elementwise, and depthwise — the whole hot path. Correctness verified
+  end-to-end under Rosetta; native x86 numbers pending an x86 box (the CI bench job).
+  Cross-arch testing caught a real bug here: `conv.go` had hardcoded the arm64
+  4-lane width (`OW &^ 3`) for the depthwise tail, which dropped output columns on
+  the 8-lane amd64 kernel. Fixed by making `vek.DwRow*` own their full width
+  (SIMD bulk + internal scalar tail via `dwTail`), so callers are lane-agnostic.
 
 Method note: always sanity-check the box first — `uptime` (load avg) and a
 dependent-add loop for effective clock. On 2026-08-21 the first measurements were
