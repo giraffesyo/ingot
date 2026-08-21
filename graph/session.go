@@ -11,6 +11,14 @@ import (
 )
 
 // Session is a compiled, runnable graph.
+//
+// Session.Run is safe for concurrent use by multiple goroutines: per-run state
+// (buffers, refcounts) is allocated per call, the tensor pool is mutually
+// exclusive, ops never mutate their inputs, and the only cross-run mutable state
+// (a per-op weight-pack cache) is guarded by sync.Once. Constants are shared
+// read-only. The exception is the Profile flag: enabling it makes Run write to
+// shared timing counters unsynchronised, so profile a Session from one goroutine
+// at a time. See TestSessionConcurrentRun.
 type Session struct {
 	g     *Graph
 	steps []step
@@ -19,7 +27,8 @@ type Session struct {
 	uses []int
 	nval int
 
-	// Profile enables per-node timing (see Stats).
+	// Profile enables per-node timing (see Stats). Not safe to enable while the
+	// Session is run concurrently — the timing counters are unsynchronised.
 	Profile bool
 	stats   []time.Duration // per step, cumulative
 	runs    int
@@ -146,7 +155,8 @@ func (s *Session) Graph() *Graph { return s.g }
 
 // Run executes the graph. feeds maps input names to tensors; every graph
 // input must be present. Returns graph outputs by name. Output tensors are
-// owned by the caller (not pooled).
+// owned by the caller (not pooled). Safe for concurrent use by multiple
+// goroutines (see the Session doc; the sole exception is Profile).
 func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tensor, error) {
 	vals := make([]*tensor.Tensor, s.nval)
 	live := make([]int, s.nval) // remaining uses
