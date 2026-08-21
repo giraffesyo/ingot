@@ -19,13 +19,27 @@ goroutine spawn).
 Known allocations: `par.For` spawns goroutines per region (2–364 allocs/op
 depending on block count). Replace with a persistent worker pool.
 
-| 2026-08-21 | arm64 NEON 8×12 micro-kernel (by-element FMLA via WORD), MC=256 KC=512 NC=3072 | 30.4 GFLOPS* | 75.3* | 210.4* | 107.0* |
+| 2026-08-21 | arm64 NEON 8×12 micro-kernel (by-element FMLA via WORD), MC=256 KC=512 NC=3072 | 120.5 GFLOPS | 229.3 | 742.5 | 328.5 |
 
-\* Measured while the machine was saturated by 52 unrelated background load
-(heavy background load; effective clock ≈1.4 GHz by dependent-add test).
-A pure-register FMLA loop peaked at 46 GFLOPS/thread under the same load, so
-the micro-kernel is at the ceiling *of that degraded core*. Re-measure on a quiet
-machine before drawing conclusions; expect ≥3× higher.
+Machine ceiling (pure-register FMLA loop, no loads): 130–138 GFLOPS per performance core,
+~1080 GFLOPS aggregate across all cores.
+Micro-kernel alone: 131.9 GFLOPS (95% of core peak).
 
-Method note: always sanity-check the box first —
-`uptime` (load avg) and a dependent-add loop for effective clock.
+Full 1T table after NEON kernel:
+
+| shape | 1T GFLOPS | MT GFLOPS | note |
+|---|---|---|---|
+| sq512 | 120.5 | 229.3 | |
+| sq1024 | 124.3 | 452.0 | |
+| sq2048 | — | 742.5 | 69% of aggregate ceiling |
+| conv 64×16384×576 | 71.6 | 328.5 | M small: B packing cost not amortised |
+| conv 256×1024×2304 | 113.3 | 110.9 | **single-threaded**: m≤MC and n≤NC → 1 block |
+| lin 256×768×192 | 108.9 | 109.8 | single-threaded, same cause |
+| attn 256×256×64 | 101.4 | 99.5 | single-threaded, same cause |
+
+Next: parallelise inside a block (over MR/NR panels, BLIS-style), persistent worker
+pool, faster packing for small-M shapes.
+
+Method note: always sanity-check the box first — `uptime` (load avg) and a
+dependent-add loop for effective clock. On 2026-08-21 the first measurements were
+taken with the machine under heavy background load, at ~1.4 GHz effective.
