@@ -1,0 +1,26 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        # OCR model/corpus tests skip when testdata/ocr models are absent
+        # (large, license-bound, fetched separately). Everything else runs.
+        run: go test -race -count=1 ./...
+      - name: Build (cross-arch smoke)
+        run: |
+          GOARCH=amd64 GOOS=linux  go build ./...
+          GOARCH=arm64 GOOS=linux  go build ./...
+          GOARCH=amd64 GOOS=windows go build ./...

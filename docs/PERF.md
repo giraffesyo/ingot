@@ -56,8 +56,13 @@ Observations:
   Fusing pack-A into the macro task (pack-on-demand per M-chunk) would cut one.
 - When other processes hold cores, fewer workers beats more (stragglers at barriers).
   Consider an adaptive worker count or letting the caller cap it per call.
-- amd64 AVX2/AVX-512 kernel deferred until there is an amd64 box to measure on
-  (can cross-build + correctness-test under Rosetta, but not benchmark).
+- amd64 AVX2/AVX-512 kernels are NOT written yet: on x86 both gemm and vek run the
+  scalar Go fallback, so the GFLOPS table above does NOT transfer to x86 — expect
+  ~10-30× slower there until AVX2 kernels land. **amd64 is correct but unoptimised.**
+  Verified: `GOARCH=amd64 go test ./...` passes under Rosetta (all ops, kernels,
+  and model conformance). This is the single biggest practical perf gap — the
+  machines that deploy this are mostly x86. Path: AVX2 8×8 FMA micro-kernel via
+  `avo`, correctness-testable under Rosetta here, benchmarked on a real x86 box.
 
 Method note: always sanity-check the box first — `uptime` (load avg) and a
 dependent-add loop for effective clock. On 2026-08-21 the first measurements were
