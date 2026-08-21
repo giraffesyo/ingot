@@ -6,23 +6,52 @@ import (
 	"github.com/giraffesyo/ocr/kernels/par"
 )
 
-// scratch holds per-worker packing buffers so steady-state calls allocate nothing.
-type scratch struct {
-	a    []float32 // MC*KC, padded to MR
-	b    []float32 // KC*NC, padded to NR
-	tile []float32 // MR*NR edge tile
+// gemmCtx is the per-call state shared by all workers. It doubles as the
+// par.Task for the three parallel phases (pack B, pack A, macro-kernel) so a
+// call allocates nothing in steady state.
+type gemmCtx struct {
+	a     []float32   // packed A block: MC*KC (MR-padded)
+	b     []float32   // packed B panel: KC*NC (NR-padded)
+	tiles [][]float32 // per-worker MR*NR edge tiles
+
+	phase int // phasePackB, phasePackA, phaseMacro
+
+	// current block geometry
+	kc, nc, mc       int
+	nPanels, mPanels int
+	mChunks, chunk   int
+	alpha            float32
+	acc              bool
+	asrc, bsrc, cblk []float32
+	lda, ldb, ldc    int
 }
 
-var scratchPool = sync.Pool{New: func() any {
-	return &scratch{
-		a:    make([]float32, (MC+MR)*KC),
-		b:    make([]float32, KC*(NC+NR)),
-		tile: make([]float32, MR*NR),
+const (
+	phasePackB = iota
+	phasePackA
+	phaseMacro
+)
+
+var ctxPool = sync.Pool{New: func() any {
+	g := &gemmCtx{
+		a: make([]float32, (MC+MR)*KC),
+		b: make([]float32, KC*(NC+NR)),
 	}
+	g.tiles = make([][]float32, par.Workers())
+	for i := range g.tiles {
+		g.tiles[i] = make([]float32, MR*NR)
+	}
+	return g
 }}
 
 // Sgemm computes C = alpha*A·B + beta*C for row-major A[m×k], B[k×n], C[m×n]
 // with leading dimensions lda, ldb, ldc.
+//
+// Structure (Goto/BLIS): for each NC-wide column block and KC-deep k block,
+// B is packed once into NR-wide panels; for each MC-tall row block, A is packed
+// into MR-wide panels and the macro-kernel sweeps the (MR×NR) tiles. Packing
+// and the macro-kernel are parallelised across par's worker pool; the k loop is
+// sequential so workers always accumulate into disjoint C tiles.
 func Sgemm(m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, beta float32, c []float32, ldc int) {
 	if m == 0 || n == 0 {
 		return
@@ -31,90 +60,88 @@ func Sgemm(m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb in
 		scaleC(m, n, beta, c, ldc)
 		return
 	}
-	// Apply beta once up front; the kernel then always accumulates into C
-	// for KC-blocks after the first. For the first KC block we overwrite when
-	// beta==0 to avoid reading uninitialised C.
 	if beta != 0 && beta != 1 {
 		scaleC(m, n, beta, c, ldc)
 	}
 	firstOverwrite := beta == 0
 
-	// Parallelize over NC-wide column blocks; each worker packs its own B panel.
-	// For small n, fall through to a single block and parallelize over M instead.
-	nBlocks := (n + NC - 1) / NC
-	if nBlocks >= par.MaxWorkers || m < MC {
-		par.For(nBlocks, 1, func(jb int) {
-			j0 := jb * NC
-			nc := min(NC, n-j0)
-			gemmColBlock(m, nc, k, alpha, a, lda, b[j0:], ldb, c[j0:], ldc, firstOverwrite)
-		})
-		return
-	}
-	// Parallelize over MC-tall row blocks inside each column block. B panel is
-	// packed once per (jb, pb) and shared read-only by all workers.
-	for jb := 0; jb < nBlocks; jb++ {
-		j0 := jb * NC
-		nc := min(NC, n-j0)
+	g := ctxPool.Get().(*gemmCtx)
+	defer ctxPool.Put(g)
+	g.alpha, g.lda, g.ldb, g.ldc = alpha, lda, ldb, ldc
+	workers := par.Workers()
+
+	for j0 := 0; j0 < n; j0 += NC {
+		g.nc = min(NC, n-j0)
+		g.nPanels = (g.nc + NR - 1) / NR
 		for p0 := 0; p0 < k; p0 += KC {
-			kc := min(KC, k-p0)
-			sb := scratchPool.Get().(*scratch)
-			packB(kc, nc, b[p0*ldb+j0:], ldb, sb.b)
-			mBlocks := (m + MC - 1) / MC
-			acc := !(firstOverwrite && p0 == 0)
-			par.For(mBlocks, 1, func(ib int) {
-				i0 := ib * MC
-				mc := min(MC, m-i0)
-				sa := scratchPool.Get().(*scratch)
-				packA(mc, kc, a[i0*lda+p0:], lda, sa.a)
-				macroKernel(mc, nc, kc, alpha, sa.a, sb.b, c[i0*ldc+j0:], ldc, acc, sa.tile)
-				scratchPool.Put(sa)
-			})
-			scratchPool.Put(sb)
-		}
-	}
-}
-
-// gemmColBlock handles one column block of width nc, single-threaded.
-func gemmColBlock(m, nc, k int, alpha float32, a []float32, lda int, b []float32, ldb int, c []float32, ldc int, firstOverwrite bool) {
-	s := scratchPool.Get().(*scratch)
-	defer scratchPool.Put(s)
-	for p0 := 0; p0 < k; p0 += KC {
-		kc := min(KC, k-p0)
-		packB(kc, nc, b[p0*ldb:], ldb, s.b)
-		acc := !(firstOverwrite && p0 == 0)
-		for i0 := 0; i0 < m; i0 += MC {
-			mc := min(MC, m-i0)
-			packA(mc, kc, a[i0*lda+p0:], lda, s.a)
-			macroKernel(mc, nc, kc, alpha, s.a, s.b, c[i0*ldc:], ldc, acc, s.tile)
-		}
-	}
-}
-
-// macroKernel multiplies a packed mc×kc A panel by a packed kc×nc B panel into C.
-func macroKernel(mc, nc, kc int, alpha float32, ap, bp []float32, c []float32, ldc int, accumulate bool, tile []float32) {
-	for j := 0; j < nc; j += NR {
-		nr := min(NR, nc-j)
-		bpan := bp[(j/NR)*kc*NR:]
-		for i := 0; i < mc; i += MR {
-			mr := min(MR, mc-i)
-			apan := ap[(i/MR)*kc*MR:]
-			if mr == MR && nr == NR && alpha == 1 {
-				microKernel(kc, apan, bpan, c[i*ldc+j:], ldc, accumulate)
-				continue
+			g.kc = min(KC, k-p0)
+			g.acc = !(firstOverwrite && p0 == 0)
+			g.bsrc = b[p0*ldb+j0:]
+			g.phase = phasePackB
+			par.Run(g.nPanels, 8, g)
+			for i0 := 0; i0 < m; i0 += MC {
+				g.mc = min(MC, m-i0)
+				g.mPanels = (g.mc + MR - 1) / MR
+				g.asrc = a[i0*lda+p0:]
+				g.phase = phasePackA
+				par.Run(g.mPanels, 4, g)
+				// 2D task grid: nPanels × mChunks, sized so there are at least
+				// ~2 tasks per worker when the problem allows.
+				mChunks := 1
+				for g.nPanels*mChunks < 2*workers && mChunks < g.mPanels {
+					mChunks++
+				}
+				g.chunk = (g.mPanels + mChunks - 1) / mChunks
+				g.mChunks = (g.mPanels + g.chunk - 1) / g.chunk
+				g.cblk = c[i0*ldc+j0:]
+				g.phase = phaseMacro
+				par.Run(g.nPanels*g.mChunks, 1, g)
 			}
-			// Edge tile or alpha != 1: compute into tile, then scatter.
-			microKernel(kc, apan, bpan, tile, NR, false)
-			for r := 0; r < mr; r++ {
-				row := c[(i+r)*ldc+j : (i+r)*ldc+j+nr]
-				t := tile[r*NR : r*NR+nr]
-				if accumulate {
-					for q := range row {
-						row[q] += alpha * t[q]
-					}
-				} else {
-					for q := range row {
-						row[q] = alpha * t[q]
-					}
+		}
+	}
+}
+
+// Run implements par.Task; dispatches on the current phase.
+func (g *gemmCtx) Run(t, w int) {
+	switch g.phase {
+	case phasePackB:
+		packBPanel(g.kc, min(NR, g.nc-t*NR), g.bsrc[t*NR:], g.ldb, g.b[t*g.kc*NR:])
+	case phasePackA:
+		packAPanel(g.kc, min(MR, g.mc-t*MR), g.asrc[t*MR*g.lda:], g.lda, g.a[t*g.kc*MR:])
+	case phaseMacro:
+		g.macroTask(t, w)
+	}
+}
+
+// macroTask computes all MR×NR tiles for one (B panel, A chunk) pair.
+func (g *gemmCtx) macroTask(t, w int) {
+	jp := t / g.mChunks
+	ipStart := (t % g.mChunks) * g.chunk
+	ipEnd := min(ipStart+g.chunk, g.mPanels)
+	kc, ldc := g.kc, g.ldc
+	nr := min(NR, g.nc-jp*NR)
+	bpan := g.b[jp*kc*NR:]
+	for ip := ipStart; ip < ipEnd; ip++ {
+		mr := min(MR, g.mc-ip*MR)
+		apan := g.a[ip*kc*MR:]
+		cptr := g.cblk[ip*MR*ldc+jp*NR:]
+		if mr == MR && nr == NR && g.alpha == 1 {
+			microKernel(kc, apan, bpan, cptr, ldc, g.acc)
+			continue
+		}
+		// Edge tile or alpha != 1: compute into a scratch tile, then scatter.
+		tile := g.tiles[w]
+		microKernel(kc, apan, bpan, tile, NR, false)
+		for r := 0; r < mr; r++ {
+			row := cptr[r*ldc : r*ldc+nr]
+			tr := tile[r*NR : r*NR+nr]
+			if g.acc {
+				for q := range row {
+					row[q] += g.alpha * tr[q]
+				}
+			} else {
+				for q := range row {
+					row[q] = g.alpha * tr[q]
 				}
 			}
 		}
