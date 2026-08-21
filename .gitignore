@@ -1,9 +1,19 @@
 /bin/
 # Model corpus is regenerable via tools/export (zoo.py / export.py); do not commit binaries.
 /testdata/models/
+
 *.prof
 *.test
 *.out
 .DS_Store
-/testdata/ocr/
+# OCR models are large & license-bound (fetched from RapidOCR); the small
+# synthetic corpus IS committed as the accuracy gate.
+/testdata/ocr/*.onnx
+/testdata/ocr/*.onnx.data
+/testdata/ocr/*.bin
+/testdata/ocr/*.json
+/testdata/ocr/*.png
+/testdata/ocr/*.txt
+!/testdata/ocr/corpus/
+
 det_boxes.png
