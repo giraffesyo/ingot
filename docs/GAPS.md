@@ -95,6 +95,32 @@ post-softmax [1,T,6625]) + Go perspective-crop + CTC greedy decode with the
 ppocr_keys_v1 dictionary. Full pipeline on the 4-line sample decodes all lines
 exactly ("Hello World", "OCR 12345", "pure golang", "DBNet test"; rec conf 0.91-1.00).
 
+## Accuracy — synthetic corpus (`models/ocr.TestCorpus`)
+
+24 generated images / 108 lines with exact ground truth (varied fonts, sizes,
+colours, numbers, dates, punctuation, some CJK, a few rotated). Generator:
+`tools/export/corpus.py`. Harness scores detection (IoU-matched P/R/F1 @0.5) and
+recognition (exact-match + char error rate via Levenshtein) and gates on them.
+
+Baseline 2026-08-21 (PP-OCRv4, greedy CTC):
+
+| metric | value |
+|---|---|
+| detection P / R / F1 | 0.917 / 0.917 / 0.917 |
+| recognition exact-match | 0.919 |
+| char accuracy (1-CER) | 0.987 |
+
+The corpus immediately earned itself: it caught a **corner-ordering bug** in DB
+post-processing (min-area-rect corners were not canonically ordered, so some crops
+were mirrored/reversed — e.g. "Model fox" → "xog Io"). Fixing it took exact-match
+from 0.75 to 0.92 and CER from 0.24 to 0.013.
+
+Remaining detection gap: ~9% of boxes are slightly mis-aligned on the left edge,
+clipping the first character (e.g. "Date" → box reads "ate"), which drops their
+IoU below 0.5. Raising the unclip ratio overshoots the (tight) GT and hurts more
+than it helps; the real fix is likely DB score_mode=slow (polygon from contour)
+or an asymmetric expansion. Not chased yet.
+
 Recognition gaps / TODO:
 - Greedy CTC only; no beam search or language model.
 - Perspective crop uses bilinear corner blend (exact for parallelograms); a true
