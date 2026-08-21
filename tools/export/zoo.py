@@ -1,0 +1,179 @@
+"""Export a diverse model zoo to probe runtime op coverage.
+
+Random-init small models (conformance checks parity with ONNX Runtime, not
+accuracy). Each exercises a different op cluster. Run: .venv/bin/python zoo.py
+"""
+import json, os, sys, traceback
+import numpy as np
+import torch, torch.nn as nn, torch.nn.functional as F
+import onnx, onnxruntime as ort
+
+OUT = os.path.join(os.path.dirname(__file__), "..", "..", "testdata", "models")
+os.makedirs(OUT, exist_ok=True)
+torch.manual_seed(0); np.random.seed(0)
+
+def export(name, model, inputs, input_names, opset=17):
+    model.eval()
+    path = os.path.join(OUT, name + ".onnx")
+    try:
+        torch.onnx.export(model, tuple(inputs), path, input_names=input_names,
+                          output_names=["out"], opset_version=opset, do_constant_folding=True)
+    except Exception as e:
+        print(f"{name}: EXPORT FAILED: {e}")
+        return
+    m = onnx.load(path); onnx.checker.check_model(m)
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    feeds = {n: x.numpy() for n, x in zip(input_names, inputs)}
+    outs = sess.run(None, feeds)
+    man = {"model": name + ".onnx", "opset": opset, "inputs": [], "outputs": []}
+    for i, (n, x) in enumerate(feeds.items()):
+        f = f"{name}.in.{i}.bin"; x.tofile(os.path.join(OUT, f))
+        man["inputs"].append({"name": n, "dtype": str(x.dtype), "shape": list(x.shape), "file": f})
+    for i, (o, y) in enumerate(zip(sess.get_outputs(), outs)):
+        f = f"{name}.out.{i}.bin"; np.ascontiguousarray(y).tofile(os.path.join(OUT, f))
+        man["outputs"].append({"name": o.name, "dtype": str(y.dtype), "shape": list(y.shape), "file": f})
+    json.dump(man, open(os.path.join(OUT, name + ".json"), "w"), indent=1)
+    ops = sorted({n.op_type for n in m.graph.node})
+    print(f"{name}: {len(m.graph.node)} nodes, ops={ops}")
+
+# --- ResNet-style: Conv/BN/Relu/Add residual, MaxPool, GAP, Linear ---
+class BasicBlock(nn.Module):
+    def __init__(self, cin, cout, stride=1):
+        super().__init__()
+        self.c1 = nn.Conv2d(cin, cout, 3, stride, 1, bias=False); self.b1 = nn.BatchNorm2d(cout)
+        self.c2 = nn.Conv2d(cout, cout, 3, 1, 1, bias=False); self.b2 = nn.BatchNorm2d(cout)
+        self.down = None
+        if stride != 1 or cin != cout:
+            self.down = nn.Sequential(nn.Conv2d(cin, cout, 1, stride, bias=False), nn.BatchNorm2d(cout))
+        for m in self.modules():
+            if isinstance(m, nn.BatchNorm2d): m.running_var.uniform_(0.5, 1.5); m.running_mean.normal_()
+    def forward(self, x):
+        idn = x if self.down is None else self.down(x)
+        x = F.relu(self.b1(self.c1(x))); x = self.b2(self.c2(x))
+        return F.relu(x + idn)
+class ResNetish(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.stem = nn.Sequential(nn.Conv2d(3, 16, 7, 2, 3, bias=False), nn.BatchNorm2d(16), nn.ReLU(), nn.MaxPool2d(3, 2, 1))
+        self.l1 = BasicBlock(16, 16); self.l2 = BasicBlock(16, 32, 2); self.l3 = BasicBlock(32, 64, 2)
+        self.fc = nn.Linear(64, 10)
+        for m in self.modules():
+            if isinstance(m, nn.BatchNorm2d): m.running_var.uniform_(0.5, 1.5)
+    def forward(self, x):
+        x = self.l3(self.l2(self.l1(self.stem(x))))
+        return self.fc(F.adaptive_avg_pool2d(x, 1).flatten(1))
+
+# --- ViT: patch embed conv, cls token, pos emb, transformer, head ---
+class ViT(nn.Module):
+    def __init__(self, dim=48, heads=4, depth=2, patch=8, img=32):
+        super().__init__()
+        self.patch = nn.Conv2d(3, dim, patch, patch)
+        n = (img // patch) ** 2
+        self.cls = nn.Parameter(torch.randn(1, 1, dim))
+        self.pos = nn.Parameter(torch.randn(1, n + 1, dim))
+        self.blocks = nn.ModuleList([nn.TransformerEncoderLayer(dim, heads, dim*2, batch_first=True, activation="gelu", norm_first=True) for _ in range(depth)])
+        self.norm = nn.LayerNorm(dim); self.head = nn.Linear(dim, 10)
+    def forward(self, x):
+        x = self.patch(x).flatten(2).transpose(1, 2)          # [B, N, D]
+        cls = self.cls.expand(x.shape[0], -1, -1)
+        x = torch.cat([cls, x], 1) + self.pos
+        for b in self.blocks: x = b(x)
+        return self.head(self.norm(x)[:, 0])
+
+# --- BERT-ish encoder: embedding gather, LN, attention, GELU, tanh pooler ---
+class Bertish(nn.Module):
+    def __init__(self, vocab=100, dim=48, heads=4, depth=2, maxlen=16):
+        super().__init__()
+        self.tok = nn.Embedding(vocab, dim); self.pos = nn.Embedding(maxlen, dim)
+        self.enc = nn.TransformerEncoder(nn.TransformerEncoderLayer(dim, heads, dim*2, batch_first=True, activation="gelu"), depth)
+        self.pool = nn.Linear(dim, dim)
+    def forward(self, ids):
+        pos = torch.arange(ids.shape[1]).unsqueeze(0)
+        x = self.tok(ids) + self.pos(pos)
+        x = self.enc(x)
+        return torch.tanh(self.pool(x[:, 0]))
+
+# --- Segmentation head: encoder + bilinear upsample (Resize) + transpose conv ---
+class SegNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.e1 = nn.Sequential(nn.Conv2d(3, 16, 3, 2, 1), nn.ReLU())
+        self.e2 = nn.Sequential(nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU())
+        self.up = nn.ConvTranspose2d(32, 16, 2, 2)
+        self.head = nn.Conv2d(16, 2, 1)
+    def forward(self, x):
+        x = self.e2(self.e1(x))
+        x = F.relu(self.up(x))
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        return self.head(x)
+
+# --- LLM block: RMSNorm + RoPE + SwiGLU + causal attention (decomposed) ---
+class RMSNorm(nn.Module):
+    def __init__(self, d): super().__init__(); self.w = nn.Parameter(torch.ones(d))
+    def forward(self, x): return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6) * self.w
+class LLMBlock(nn.Module):
+    def __init__(self, dim=48, heads=4, hidden=128):
+        super().__init__()
+        self.n1 = RMSNorm(dim); self.n2 = RMSNorm(dim)
+        self.q = nn.Linear(dim, dim, bias=False); self.k = nn.Linear(dim, dim, bias=False)
+        self.v = nn.Linear(dim, dim, bias=False); self.o = nn.Linear(dim, dim, bias=False)
+        self.w1 = nn.Linear(dim, hidden, bias=False); self.w2 = nn.Linear(dim, hidden, bias=False)
+        self.w3 = nn.Linear(hidden, dim, bias=False); self.h = heads; self.dim = dim
+    def forward(self, x):
+        B, T, D = x.shape; hd = D // self.h
+        y = self.n1(x)
+        q = self.q(y).view(B, T, self.h, hd).transpose(1, 2)
+        k = self.k(y).view(B, T, self.h, hd).transpose(1, 2)
+        v = self.v(y).view(B, T, self.h, hd).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) / (hd ** 0.5)
+        mask = torch.triu(torch.full((T, T), float("-inf")), 1)
+        att = (att + mask).softmax(-1)
+        y = (att @ v).transpose(1, 2).reshape(B, T, D)
+        x = x + self.o(y)
+        g = self.n2(x)
+        x = x + self.w3(F.silu(self.w1(g)) * self.w2(g))
+        return x
+
+MODELS = {
+    "resnetish": lambda: export("resnetish", ResNetish(), [torch.randn(1, 3, 64, 64)], ["x"]),
+    "vit": lambda: export("vit", ViT(), [torch.randn(1, 3, 32, 32)], ["x"]),
+    "bertish": lambda: export("bertish", Bertish(), [torch.randint(0, 100, (1, 16))], ["ids"]),
+    "segnet": lambda: export("segnet", SegNet(), [torch.randn(1, 3, 32, 32)], ["x"]),
+    "llmblock": lambda: export("llmblock", LLMBlock(), [torch.randn(1, 12, 48)], ["x"]),
+    "mobilenet_v2": lambda: _mv2(),
+    "efficientnet_b0": lambda: _effnet(),
+}
+def _mv2():
+    import torchvision
+    export("mobilenet_v2", torchvision.models.mobilenet_v2(), [torch.randn(1, 3, 224, 224)], ["x"])
+def _effnet():
+    import torchvision
+    export("efficientnet_b0", torchvision.models.efficientnet_b0(), [torch.randn(1, 3, 224, 224)], ["x"])
+
+if __name__ == "__main__":
+    names = sys.argv[1:] or MODELS
+    for n in names:
+        try: MODELS[n]()
+        except Exception:
+            print(f"{n}: ERROR\n{traceback.format_exc()}")
+
+# --- Op-probe modules: exercise Pad/Resize/ConvTranspose variants directly ---
+class OpProbe(nn.Module):
+    def forward(self, x):
+        a = F.pad(x, (1, 2, 2, 1), mode="reflect")
+        b = F.pad(x, (2, 2, 1, 1), mode="replicate")
+        c = F.pad(x, (1, 1, 1, 1), mode="constant", value=0.5)
+        a = F.interpolate(a, scale_factor=2, mode="nearest")
+        b = F.interpolate(b, size=(20, 20), mode="bilinear", align_corners=True)
+        c = F.interpolate(c, scale_factor=1.5, mode="bilinear", align_corners=False)
+        return a.mean() + b.mean() + c.mean()
+class DeconvProbe(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.d1 = nn.ConvTranspose2d(4, 6, 3, stride=2, padding=1, output_padding=1)
+        self.d2 = nn.ConvTranspose2d(6, 6, 2, stride=2, groups=2)
+    def forward(self, x):
+        return self.d2(F.relu(self.d1(x)))
+
+MODELS["opprobe"] = lambda: export("opprobe", OpProbe(), [torch.randn(1, 3, 8, 8)], ["x"])
+MODELS["deconvprobe"] = lambda: export("deconvprobe", DeconvProbe(), [torch.randn(1, 4, 8, 8)], ["x"])

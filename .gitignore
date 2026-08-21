@@ -1,5 +1,6 @@
 /bin/
-/testdata/models/*.onnx
+# Model corpus is regenerable via tools/export (zoo.py / export.py); do not commit binaries.
+/testdata/models/
 *.prof
 *.test
 *.out
