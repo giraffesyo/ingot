@@ -74,3 +74,24 @@ AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv Co
 4. Implement in `ops/` with a `_ref`-style oracle where non-trivial; re-run.
 
 Performance gaps (kernels, not coverage) are tracked separately in `docs/PERF.md`.
+
+## OCR pipeline notes (phase 3, in progress)
+
+Detection works end-to-end: **PP-OCRv4 detector (330 nodes) runs on the pure-Go
+runtime, matching ONNX Runtime to 9.5e-5**, and Go DB post-processing
+(binarise → connected components → convex hull + rotating-calipers min-area rect
+→ unclip → score/size filter) produces correct boxes on the test image. No op
+gaps — the detector uses only Conv/BN/Clip/Concat/ConvTranspose/Resize/etc.
+
+Detection gaps / TODO:
+- Box post-processing is min-area-rect only; PP-OCR also supports polygon output
+  (`det_db_score_mode=slow`, `use_dilation`). Fine for horizontal/rotated text.
+- Unclip uses the exact rectangle-offset formula (w,h += 2·area·ratio/perimeter),
+  not a general polygon offset (pyclipper). Correct for the rect case we emit.
+- No angle classifier yet (cls.onnx copied but unused); needed for 180°-rotated text.
+
+Recognition gaps / TODO:
+- rec model (ch_PP-OCRv4_rec) copied; **rec character dictionary not yet bundled**
+  (RapidOCR keeps it in package resources, not next to the model). Needed for CTC
+  decode. Fetch ppocr_keys_v1.txt.
+- Need: crop+perspective-rectify each box, resize to 48×W, CTC greedy decode.

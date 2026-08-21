@@ -169,3 +169,18 @@ Remaining conv hot spots (next targets):
 - **first regular conv** (290 µs): 3→16 3×3 s2 over 224×224 via im2col+GEMM.
 - **pointwise GEMMs**: small-M GEMM efficiency + conv/GEMM epilogue fusion
   (fold bias + Relu/HardSwish into the GEMM write) would remove separate passes.
+
+## OCR pipeline perf ideas (noted during phase 3)
+
+- Detection is one big conv net (330 nodes) — same kernels as classification, so
+  it inherits all conv/elementwise work. Dominated by Conv; benefits directly from
+  the phase-4 conv/GEMM fusion and stride-2 depthwise NEON.
+- DB post-processing (connected components + hull + calipers) is pure Go and cheap
+  relative to the net, but connectedComponents allocates per-component slices —
+  a flat label array + bounding-box accumulation would cut allocations if it ever
+  matters.
+- Recognition runs one small net per detected box; batching boxes of similar width
+  into one padded batch (single GEMM-heavy forward) is the main throughput lever.
+- resizeBilinear in preprocessing is scalar per-pixel via image.At (slow RGBA
+  conversion); a fast path for *image.RGBA/NRGBA reading the pixel slice directly
+  would speed preprocessing on large images.
