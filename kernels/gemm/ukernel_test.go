@@ -32,6 +32,27 @@ func TestMicroKernelMatchesGeneric(t *testing.T) {
 	}
 }
 
+// TestSgemmGenericFallback forces the portable micro-kernel (the path taken on
+// CPUs without AVX2/NEON) and checks Sgemm still matches the float64 oracle.
+func TestSgemmGenericFallback(t *testing.T) {
+	saved := microKernel
+	microKernel = microKernelGeneric
+	defer func() { microKernel = saved }()
+	r := rand.New(rand.NewPCG(21, 22))
+	for _, sh := range [][3]int{{1, 1, 1}, {5, 7, 3}, {MR + 1, NR + 1, KC + 1}, {2*MC + 1, 3*NR + 1, 33}, {64, 100, 2*KC + 3}} {
+		m, n, k := sh[0], sh[1], sh[2]
+		a := randMat(r, m*k)
+		b := randMat(r, k*n)
+		c0 := randMat(r, m*n)
+		want := oracle(m, n, k, 1, a, k, b, n, 0.5, c0, n)
+		got := append([]float32(nil), c0...)
+		Sgemm(m, n, k, 1, a, k, b, n, 0.5, got, n)
+		if e := maxRelErr(got, n, n, want); e > f32Tol(k) {
+			t.Fatalf("generic fallback m=%d n=%d k=%d: rel err %g", m, n, k, e)
+		}
+	}
+}
+
 func abs32(x float32) float32 {
 	if x < 0 {
 		return -x
