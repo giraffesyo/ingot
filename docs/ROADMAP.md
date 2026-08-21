@@ -6,7 +6,8 @@
 - [x] `kernels/gemm`: reference, blocked f32 Go kernel, benchmark
 - [x] `kernels/par`: persistent worker pool, `Run(Task)` 0-alloc, dynamic scheduling
 - [x] arm64 NEON 8×12 micro-kernel (generated asm) — 95% of core peak
-- [ ] amd64 AVX2/AVX-512 micro-kernel via avo (deferred: no amd64 box to measure)
+- [x] amd64 AVX2 6×16 GEMM micro-kernel (Go asm, verified under Rosetta; native
+      bench + tuning pending an x86 box). TODO: AVX2 vek elementwise.
 - [x] GFLOPS table for common OCR shapes (docs/PERF.md); ORT comparison pending phase 2
 
 ## Phase 2 — ONNX → graph → run
