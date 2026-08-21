@@ -1,4 +1,4 @@
-//go:build !arm64
+//go:build !arm64 && !amd64
 
 package vek
 
@@ -88,25 +88,11 @@ func Axpy(dst, src []float32, a float32) {
 	}
 }
 
-// DwRow3x3S1: scalar fallback matching the arm64 kernel semantics.
-func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) { dwRowS1(dst, src, wpacked, ncols, W, 3) }
+// DwRow3x3S1: scalar fallback (full width).
+func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) { dwTail(dst, src, wpacked, 0, ncols, W, 3) }
 
-// DwRow5x5S1: scalar fallback.
-func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) { dwRowS1(dst, src, wpacked, ncols, W, 5) }
-
-func dwRowS1(dst, src, wpacked []float32, ncols, W, K int) {
-	n := ncols &^ 3
-	for c := 0; c < n; c++ {
-		var acc float32
-		for kh := 0; kh < K; kh++ {
-			base := kh*W + c
-			for kw := 0; kw < K; kw++ {
-				acc += wpacked[kh*K+kw] * src[base+kw]
-			}
-		}
-		dst[c] += acc
-	}
-}
+// DwRow5x5S1: scalar fallback (full width).
+func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) { dwTail(dst, src, wpacked, 0, ncols, W, 5) }
 
 func clamp01(x float32) float32 {
 	if x < 0 {

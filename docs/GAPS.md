@@ -62,10 +62,11 @@ AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv Co
 - **Sequence, Map, and Optional types are unsupported** (rare outside NLP pipelines).
 
 ### Platform
-- **amd64 GEMM has an AVX2 6×16 kernel** (correctness-verified under Rosetta, native
-  perf unmeasured). **amd64 vek elementwise is still scalar** — AVX2 kernels next.
-  amd64 is correct end-to-end (`GOARCH=amd64 go test ./...` green under Rosetta; CI
-  cross-builds linux/amd64, linux/arm64, windows/amd64). See docs/PERF.md.
+- **amd64 has AVX2 kernels for the whole hot path**: GEMM (6×16), elementwise, and
+  3×3/5×5 depthwise. Selected at init by CPU detection (falls back to scalar Go on
+  pre-Haswell x86). Correctness-verified under Rosetta; native x86 perf unmeasured
+  (the CI bench job will produce it). Remaining amd64: AVX-512 (needs runtime
+  detection; not all runners have it), and perf tuning on real hardware.
 
 ### Loader
 - **External data: supported** (this session) — sidecar `.onnx.data` resolved by

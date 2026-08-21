@@ -1,4 +1,4 @@
-//go:build arm64
+//go:build amd64
 
 package vek
 
@@ -61,50 +61,43 @@ func vecLen(dst, a, b []float32) int {
 	return n
 }
 
-// Add computes dst = a + b elementwise over min lengths.
+// AVX2 kernels process 8 lanes at a time; the Go tail handles n%8.
+
 func Add(dst, a, b []float32) {
 	n := vecLen(dst, a, b)
-	m := n &^ 3
+	m := n &^ 7
 	add_asm(dst, a, b, m)
 	for i := m; i < n; i++ {
 		dst[i] = a[i] + b[i]
 	}
 }
-
-// Sub computes dst = a - b.
 func Sub(dst, a, b []float32) {
 	n := vecLen(dst, a, b)
-	m := n &^ 3
+	m := n &^ 7
 	sub_asm(dst, a, b, m)
 	for i := m; i < n; i++ {
 		dst[i] = a[i] - b[i]
 	}
 }
-
-// Mul computes dst = a * b.
 func Mul(dst, a, b []float32) {
 	n := vecLen(dst, a, b)
-	m := n &^ 3
+	m := n &^ 7
 	mul_asm(dst, a, b, m)
 	for i := m; i < n; i++ {
 		dst[i] = a[i] * b[i]
 	}
 }
-
-// Div computes dst = a / b.
 func Div(dst, a, b []float32) {
 	n := vecLen(dst, a, b)
-	m := n &^ 3
+	m := n &^ 7
 	div_asm(dst, a, b, m)
 	for i := m; i < n; i++ {
 		dst[i] = a[i] / b[i]
 	}
 }
-
-// MaxPair computes dst = max(a, b).
 func MaxPair(dst, a, b []float32) {
 	n := vecLen(dst, a, b)
-	m := n &^ 3
+	m := n &^ 7
 	maxpair_asm(dst, a, b, m)
 	for i := m; i < n; i++ {
 		if b[i] > a[i] {
@@ -114,11 +107,9 @@ func MaxPair(dst, a, b []float32) {
 		}
 	}
 }
-
-// MinPair computes dst = min(a, b).
 func MinPair(dst, a, b []float32) {
 	n := vecLen(dst, a, b)
-	m := n &^ 3
+	m := n &^ 7
 	minpair_asm(dst, a, b, m)
 	for i := m; i < n; i++ {
 		if b[i] < a[i] {
@@ -128,11 +119,9 @@ func MinPair(dst, a, b []float32) {
 		}
 	}
 }
-
-// Relu computes dst = max(src, 0).
 func Relu(dst, src []float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	relu_asm(dst, src, m)
 	for i := m; i < n; i++ {
 		if src[i] > 0 {
@@ -142,31 +131,25 @@ func Relu(dst, src []float32) {
 		}
 	}
 }
-
-// HardSwish computes dst = src * clamp(src/6+0.5, 0, 1).
 func HardSwish(dst, src []float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	hardswish_asm(dst, src, m)
 	for i := m; i < n; i++ {
 		dst[i] = src[i] * clamp01(src[i]/6+0.5)
 	}
 }
-
-// HardSigmoid computes dst = clamp(alpha*src+beta, 0, 1).
 func HardSigmoid(dst, src []float32, alpha, beta float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	hardsigmoid_asm(dst, src, m, alpha, beta)
 	for i := m; i < n; i++ {
 		dst[i] = clamp01(alpha*src[i] + beta)
 	}
 }
-
-// Clip computes dst = min(max(src, lo), hi).
 func Clip(dst, src []float32, lo, hi float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	clip_asm(dst, src, m, lo, hi)
 	for i := m; i < n; i++ {
 		v := src[i]
@@ -179,11 +162,9 @@ func Clip(dst, src []float32, lo, hi float32) {
 		dst[i] = v
 	}
 }
-
-// LeakyRelu computes dst = src>0 ? src : alpha*src.
 func LeakyRelu(dst, src []float32, alpha float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	leakyrelu_asm(dst, src, m, alpha)
 	for i := m; i < n; i++ {
 		v := src[i]
@@ -193,51 +174,41 @@ func LeakyRelu(dst, src []float32, alpha float32) {
 		dst[i] = v
 	}
 }
-
-// AddScalar computes dst = src + s.
 func AddScalar(dst, src []float32, s float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	addscalar_asm(dst, src, m, s)
 	for i := m; i < n; i++ {
 		dst[i] = src[i] + s
 	}
 }
-
-// MulScalar computes dst = src * s.
 func MulScalar(dst, src []float32, s float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	mulscalar_asm(dst, src, m, s)
 	for i := m; i < n; i++ {
 		dst[i] = src[i] * s
 	}
 }
-
-// Axpy computes dst += a*src elementwise (in place on dst).
 func Axpy(dst, src []float32, a float32) {
 	n := min(len(dst), len(src))
-	m := n &^ 3
+	m := n &^ 7
 	axpy_asm(dst, src, m, a)
 	for i := m; i < n; i++ {
 		dst[i] += a * src[i]
 	}
 }
 
-// DwRow3x3S1 adds a stride-1 3x3 depthwise conv into dst for ncols output
-// columns, all taps in-bounds. wpacked holds 9 weights one-per-lane, padded to
-// 12. src points at the top-left input element for output column 0. dst is
-// pre-filled with bias. Only ncols&^3 columns are done here; the caller handles
-// the <4 remainder. W is the input row stride in elements.
+// DwRow3x3S1 adds a stride-1 3x3 depthwise conv into dst over ncols output
+// columns (all taps in-bounds); the AVX2 kernel does ncols&^7, the caller's
+// remainder loop handles the rest.
 func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) {
-	m := ncols &^ 3
+	m := ncols &^ 7
 	dwconv3x3s1_asm(dst, src, wpacked, m, W)
 	dwTail(dst, src, wpacked, m, ncols, W, 3)
 }
-
-// DwRow5x5S1 is DwRow3x3S1 for a 5x5 kernel (25 weights padded to 28).
 func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) {
-	m := ncols &^ 3
+	m := ncols &^ 7
 	dwconv5x5s1_asm(dst, src, wpacked, m, W)
 	dwTail(dst, src, wpacked, m, ncols, W, 5)
 }
