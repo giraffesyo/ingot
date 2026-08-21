@@ -61,6 +61,12 @@ AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv Co
   shapes); shapes produced by Loop/If do not.
 - **Sequence, Map, and Optional types are unsupported** (rare outside NLP pipelines).
 
+### Platform
+- **amd64/x86 has no SIMD kernels** — gemm and vek fall back to scalar Go. amd64
+  is *correct* (`GOARCH=amd64 go test ./...` green under Rosetta; CI cross-builds
+  linux/amd64, linux/arm64, windows/amd64) but ~10-30× slower than the NEON path.
+  AVX2/AVX-512 kernels are the top perf item (docs/PERF.md).
+
 ### Loader
 - **External data: supported** (this session) — sidecar `.onnx.data` resolved by
   `onnx.DecodeFile`. Offset/length honoured; sidecar files memoised.
