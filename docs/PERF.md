@@ -18,3 +18,14 @@ goroutine spawn).
 
 Known allocations: `par.For` spawns goroutines per region (2–364 allocs/op
 depending on block count). Replace with a persistent worker pool.
+
+| 2026-08-21 | arm64 NEON 8×12 micro-kernel (by-element FMLA via WORD), MC=256 KC=512 NC=3072 | 30.4 GFLOPS* | 75.3* | 210.4* | 107.0* |
+
+\* Measured while the machine was saturated by 52 unrelated background load
+(heavy background load; effective clock ≈1.4 GHz by dependent-add test).
+A pure-register FMLA loop peaked at 46 GFLOPS/thread under the same load, so
+the micro-kernel is at the ceiling *of that degraded core*. Re-measure on a quiet
+machine before drawing conclusions; expect ≥3× higher.
+
+Method note: always sanity-check the box first —
+`uptime` (load avg) and a dependent-add loop for effective clock.
