@@ -3,14 +3,16 @@ package ops
 import (
 	"math"
 
+	"github.com/giraffesyo/ocr/kernels/par"
 	"github.com/giraffesyo/ocr/tensor"
 )
 
 // ---- binary arithmetic with broadcasting ----
 
 type binaryOp struct {
-	n  NodeInfo
-	fn func(x, y float32) float32
+	n    NodeInfo
+	fn   func(x, y float32) float32
+	kind byte // '+', '-', '*', '/' for specialised loops, 0 otherwise
 }
 
 func (o *binaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
@@ -24,11 +26,97 @@ func (o *binaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	if a.DType() != tensor.F32 || b.DType() != tensor.F32 {
 		return nil, o.n.Errorf("unsupported dtypes %s, %s", a.DType(), b.DType())
 	}
+	if o.kind != 0 {
+		if out := binaryFast(ctx, a, b, o.kind); out != nil {
+			return []*tensor.Tensor{out}, nil
+		}
+	}
 	out, err := binaryF32(ctx, a, b, o.fn)
 	if err != nil {
 		return nil, o.n.Errorf("%v", err)
 	}
 	return []*tensor.Tensor{out}, nil
+}
+
+// binaryFast handles same-shape and scalar-broadcast cases for + - * / with
+// tight loops; returns nil if the shapes need the generic path.
+func binaryFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor {
+	af, bf := a.F32(), b.F32()
+	var out *tensor.Tensor
+	var of []float32
+	switch {
+	case a.Shape().Equal(b.Shape()):
+		out = ctx.New(tensor.F32, a.Shape()...)
+		of = out.F32()
+		of = of[:len(af)]
+		bf = bf[:len(af)]
+		switch kind {
+		case '+':
+			for i, x := range af {
+				of[i] = x + bf[i]
+			}
+		case '-':
+			for i, x := range af {
+				of[i] = x - bf[i]
+			}
+		case '*':
+			for i, x := range af {
+				of[i] = x * bf[i]
+			}
+		case '/':
+			for i, x := range af {
+				of[i] = x / bf[i]
+			}
+		}
+	case len(bf) == 1:
+		out = ctx.New(tensor.F32, a.Shape()...)
+		of = out.F32()[:len(af)]
+		y := bf[0]
+		switch kind {
+		case '+':
+			for i, x := range af {
+				of[i] = x + y
+			}
+		case '-':
+			for i, x := range af {
+				of[i] = x - y
+			}
+		case '*':
+			for i, x := range af {
+				of[i] = x * y
+			}
+		case '/':
+			inv := 1 / y
+			for i, x := range af {
+				of[i] = x * inv
+			}
+		}
+	case len(af) == 1:
+		out = ctx.New(tensor.F32, b.Shape()...)
+		of = out.F32()[:len(bf)]
+		x := af[0]
+		switch kind {
+		case '+':
+			for i, y := range bf {
+				of[i] = x + y
+			}
+		case '-':
+			for i, y := range bf {
+				of[i] = x - y
+			}
+		case '*':
+			for i, y := range bf {
+				of[i] = x * y
+			}
+		case '/':
+			for i, y := range bf {
+				of[i] = x / y
+			}
+		}
+	default:
+		return nil
+	}
+	return out
 }
 
 // runI64 handles integer shape arithmetic (Add/Sub/Mul/Div on int64), which
@@ -80,10 +168,25 @@ func (o *binaryOp) runI64(ctx *Ctx, a, b *tensor.Tensor) ([]*tensor.Tensor, erro
 
 // ---- unary elementwise ----
 
+// unaryOp applies vec(dst, src) over chunks in parallel. vec is a whole-slice
+// kernel (no per-element indirect call).
 type unaryOp struct {
-	n  NodeInfo
-	fn func(x float32) float32
+	n   NodeInfo
+	vec func(dst, src []float32)
 }
+
+// vecOf lifts a per-element function to a slice kernel (for rare ops).
+func vecOf(fn func(float32) float32) func(dst, src []float32) {
+	return func(dst, src []float32) {
+		dst = dst[:len(src)]
+		for i, v := range src {
+			dst[i] = fn(v)
+		}
+	}
+}
+
+// unaryChunk is the per-task element count for parallel elementwise ops.
+const unaryChunk = 16384
 
 func (o *unaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if len(in) < 1 || in[0] == nil {
@@ -93,19 +196,65 @@ func (o *unaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if x.DType() != tensor.F32 {
 		return nil, o.n.Errorf("unsupported dtype %s", x.DType())
 	}
-	out := ctx.New(tensor.F32, x.Shape()...)
+	out := ctx.NewUninit(tensor.F32, x.Shape()...)
 	xf, of := x.F32(), out.F32()
-	fn := o.fn
-	for i := range of {
-		of[i] = fn(xf[i])
+	n := len(of)
+	if n <= 2*unaryChunk {
+		o.vec(of, xf)
+		return []*tensor.Tensor{out}, nil
 	}
+	chunks := (n + unaryChunk - 1) / unaryChunk
+	par.For(chunks, 1, func(c, _ int) {
+		lo := c * unaryChunk
+		hi := min(lo+unaryChunk, n)
+		o.vec(of[lo:hi], xf[lo:hi])
+	})
 	return []*tensor.Tensor{out}, nil
 }
 
-func sigmoid(x float32) float32 { return 1 / (1 + float32(math.Exp(float64(-x)))) }
+func reluVec(dst, src []float32) {
+	dst = dst[:len(src)]
+	for i, v := range src {
+		if v < 0 {
+			v = 0
+		}
+		dst[i] = v
+	}
+}
 
-func hardSigmoid(alpha, beta float32) func(float32) float32 {
-	return func(x float32) float32 { return min(1, max(0, alpha*x+beta)) }
+func hardSwishVec(dst, src []float32) {
+	dst = dst[:len(src)]
+	for i, v := range src {
+		t := v/6 + 0.5
+		if t < 0 {
+			t = 0
+		} else if t > 1 {
+			t = 1
+		}
+		dst[i] = v * t
+	}
+}
+
+func hardSigmoidVec(alpha, beta float32) func(dst, src []float32) {
+	return func(dst, src []float32) {
+		dst = dst[:len(src)]
+		for i, v := range src {
+			t := alpha*v + beta
+			if t < 0 {
+				t = 0
+			} else if t > 1 {
+				t = 1
+			}
+			dst[i] = t
+		}
+	}
+}
+
+func sigmoidVec(dst, src []float32) {
+	dst = dst[:len(src)]
+	for i, v := range src {
+		dst[i] = 1 / (1 + float32(math.Exp(float64(-v))))
+	}
 }
 
 func gelu(x float32) float32 {
@@ -118,14 +267,14 @@ func geluTanh(x float32) float32 {
 }
 
 func init() {
-	bin := func(name string, fn func(x, y float32) float32) {
-		Register("", name, 7, func(n NodeInfo) (Op, error) { return &binaryOp{n, fn}, nil })
+	bin := func(name string, kind byte, fn func(x, y float32) float32) {
+		Register("", name, 7, func(n NodeInfo) (Op, error) { return &binaryOp{n: n, fn: fn, kind: kind}, nil })
 	}
-	bin("Add", func(x, y float32) float32 { return x + y })
-	bin("Sub", func(x, y float32) float32 { return x - y })
-	bin("Mul", func(x, y float32) float32 { return x * y })
-	bin("Div", func(x, y float32) float32 { return x / y })
-	bin("Pow", func(x, y float32) float32 {
+	bin("Add", '+', func(x, y float32) float32 { return x + y })
+	bin("Sub", '-', func(x, y float32) float32 { return x - y })
+	bin("Mul", '*', func(x, y float32) float32 { return x * y })
+	bin("Div", '/', func(x, y float32) float32 { return x / y })
+	bin("Pow", 0, func(x, y float32) float32 {
 		switch y {
 		case 2:
 			return x * x
@@ -134,14 +283,16 @@ func init() {
 		}
 		return float32(math.Pow(float64(x), float64(y)))
 	})
-	bin("Max", func(x, y float32) float32 { return max(x, y) })
-	bin("Min", func(x, y float32) float32 { return min(x, y) })
+	bin("Max", 0, func(x, y float32) float32 { return max(x, y) })
+	bin("Min", 0, func(x, y float32) float32 { return min(x, y) })
 
 	un := func(name string, since int, fn func(x float32) float32) {
-		Register("", name, since, func(n NodeInfo) (Op, error) { return &unaryOp{n, fn}, nil })
+		v := vecOf(fn)
+		Register("", name, since, func(n NodeInfo) (Op, error) { return &unaryOp{n, v}, nil })
 	}
-	un("Relu", 6, func(x float32) float32 { return max(0, x) })
-	un("Sigmoid", 6, sigmoid)
+	Register("", "Relu", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, reluVec}, nil })
+	Register("", "Sigmoid", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, sigmoidVec}, nil })
+	Register("", "HardSwish", 14, func(n NodeInfo) (Op, error) { return &unaryOp{n, hardSwishVec}, nil })
 	un("Tanh", 6, func(x float32) float32 { return float32(math.Tanh(float64(x))) })
 	un("Exp", 6, func(x float32) float32 { return float32(math.Exp(float64(x))) })
 	un("Log", 6, func(x float32) float32 { return float32(math.Log(float64(x))) })
@@ -154,38 +305,40 @@ func init() {
 	un("Ceil", 6, func(x float32) float32 { return float32(math.Ceil(float64(x))) })
 	un("Round", 11, func(x float32) float32 { return float32(math.RoundToEven(float64(x))) })
 	un("Softplus", 1, func(x float32) float32 { return float32(math.Log1p(math.Exp(float64(x)))) })
-	un("HardSwish", 14, func(x float32) float32 { return x * min(1, max(0, x/6+0.5)) })
 	un("Mish", 18, func(x float32) float32 {
 		return x * float32(math.Tanh(math.Log1p(math.Exp(float64(x)))))
 	})
 	un("Identity", 1, func(x float32) float32 { return x }) // replaced below for non-f32
 
 	Register("", "HardSigmoid", 6, func(n NodeInfo) (Op, error) {
-		return &unaryOp{n, hardSigmoid(n.Attrs.Float("alpha", 0.2), n.Attrs.Float("beta", 0.5))}, nil
+		return &unaryOp{n, hardSigmoidVec(n.Attrs.Float("alpha", 0.2), n.Attrs.Float("beta", 0.5))}, nil
 	})
 	Register("", "LeakyRelu", 6, func(n NodeInfo) (Op, error) {
 		a := n.Attrs.Float("alpha", 0.01)
-		return &unaryOp{n, func(x float32) float32 {
-			if x < 0 {
-				return a * x
+		return &unaryOp{n, func(dst, src []float32) {
+			dst = dst[:len(src)]
+			for i, v := range src {
+				if v < 0 {
+					v *= a
+				}
+				dst[i] = v
 			}
-			return x
 		}}, nil
 	})
 	Register("", "Elu", 6, func(n NodeInfo) (Op, error) {
 		a := n.Attrs.Float("alpha", 1)
-		return &unaryOp{n, func(x float32) float32 {
+		return &unaryOp{n, vecOf(func(x float32) float32 {
 			if x < 0 {
 				return a * (float32(math.Exp(float64(x))) - 1)
 			}
 			return x
-		}}, nil
+		})}, nil
 	})
 	Register("", "Gelu", 20, func(n NodeInfo) (Op, error) {
 		if n.Attrs.String("approximate", "none") == "tanh" {
-			return &unaryOp{n, geluTanh}, nil
+			return &unaryOp{n, vecOf(geluTanh)}, nil
 		}
-		return &unaryOp{n, gelu}, nil
+		return &unaryOp{n, vecOf(gelu)}, nil
 	})
 	Register("", "Identity", 1, func(n NodeInfo) (Op, error) { return identityOp{n}, nil })
 	Register("", "Clip", 11, func(n NodeInfo) (Op, error) { return &clipOp{n: n}, nil })
@@ -225,7 +378,7 @@ func (o *clipOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 	}
 	x := in[0]
-	out := ctx.New(tensor.F32, x.Shape()...)
+	out := ctx.NewUninit(tensor.F32, x.Shape()...)
 	xf, of := x.F32(), out.F32()
 	for i := range of {
 		of[i] = min(hi, max(lo, xf[i]))

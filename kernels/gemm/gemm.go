@@ -33,6 +33,10 @@ const (
 	phaseMacro
 )
 
+// minTaskMACs is the multiply-accumulate count below which an extra worker is
+// not worth its hand-off (~1µs at 100 GFLOPS).
+const minTaskMACs = 48 * 1024
+
 var ctxPool = sync.Pool{New: func() any {
 	g := &gemmCtx{
 		a: make([]float32, (MC+MR)*KC),
@@ -77,7 +81,11 @@ func SgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 	defer ctxPool.Put(g)
 	g.alpha, g.lda, g.ldb, g.ldc = alpha, lda, ldb, ldc
 	g.transA, g.transB = transA, transB
+	// Cap fan-out by work: ~minTaskMACs per task keeps hand-off cost amortised.
 	workers := par.Workers()
+	if w := int(int64(m) * int64(n) * int64(k) / minTaskMACs); w < workers {
+		workers = max(w, 1)
+	}
 
 	for j0 := 0; j0 < n; j0 += NC {
 		g.nc = min(NC, n-j0)
@@ -91,7 +99,13 @@ func SgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 				g.bsrc = b[p0*ldb+j0:]
 			}
 			g.phase = phasePackB
-			par.Run(g.nPanels, 8, g)
+			if workers > 1 {
+				par.Run(g.nPanels, max(8, g.nPanels/(2*workers)), g)
+			} else {
+				for t := 0; t < g.nPanels; t++ {
+					g.Run(t, 0)
+				}
+			}
 			for i0 := 0; i0 < m; i0 += MC {
 				g.mc = min(MC, m-i0)
 				g.mPanels = (g.mc + MR - 1) / MR
@@ -101,7 +115,13 @@ func SgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 					g.asrc = a[i0*lda+p0:]
 				}
 				g.phase = phasePackA
-				par.Run(g.mPanels, 4, g)
+				if workers > 1 {
+					par.Run(g.mPanels, max(4, g.mPanels/(2*workers)), g)
+				} else {
+					for t := 0; t < g.mPanels; t++ {
+						g.Run(t, 0)
+					}
+				}
 				// 2D task grid: nPanels × mChunks, sized so there are at least
 				// ~2 tasks per worker when the problem allows.
 				mChunks := 1
@@ -112,7 +132,13 @@ func SgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 				g.mChunks = (g.mPanels + g.chunk - 1) / g.chunk
 				g.cblk = c[i0*ldc+j0:]
 				g.phase = phaseMacro
-				par.Run(g.nPanels*g.mChunks, 1, g)
+				if workers > 1 {
+					par.Run(g.nPanels*g.mChunks, 1, g)
+				} else {
+					for t := 0; t < g.nPanels*g.mChunks; t++ {
+						g.Run(t, 0)
+					}
+				}
 			}
 		}
 	}

@@ -24,6 +24,14 @@ func sizeClass(n int) int {
 
 // Get returns a zeroed tensor of the given dtype/shape backed by pooled storage.
 func (p *Pool) Get(dt DType, shape ...int) *Tensor {
+	t := p.GetUninit(dt, shape...)
+	clear(t.buf)
+	return t
+}
+
+// GetUninit is Get without zeroing the storage. Use only when the caller writes
+// every element before it is read.
+func (p *Pool) GetUninit(dt DType, shape ...int) *Tensor {
 	s := Shape(shape)
 	need := s.Numel() * dt.Size()
 	cls := sizeClass(need)
@@ -38,9 +46,7 @@ func (p *Pool) Get(dt DType, shape ...int) *Tensor {
 	if buf == nil {
 		buf = make([]byte, cls)
 	}
-	buf = buf[:need]
-	clear(buf)
-	return &Tensor{dtype: dt, shape: s.Clone(), strides: s.Strides(), buf: buf, pool: p}
+	return &Tensor{dtype: dt, shape: s.Clone(), strides: s.Strides(), buf: buf[:need], pool: p}
 }
 
 // Put returns the tensor's storage to the pool. The tensor must not be used after.

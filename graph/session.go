@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/giraffesyo/ocr/ops"
 	"github.com/giraffesyo/ocr/tensor"
@@ -17,6 +18,63 @@ type Session struct {
 	// refcount of each value id over the whole graph (consumer count, +1 if output)
 	uses []int
 	nval int
+
+	// Profile enables per-node timing (see Stats).
+	Profile bool
+	stats   []time.Duration // per step, cumulative
+	runs    int
+}
+
+// OpStat is aggregated timing for one op type.
+type OpStat struct {
+	OpType string
+	Count  int
+	Total  time.Duration
+}
+
+// Stats returns per-op-type timing aggregated over all profiled runs, sorted
+// by total time descending.
+func (s *Session) Stats() []OpStat {
+	m := map[string]*OpStat{}
+	for i, st := range s.steps {
+		o := m[st.node.OpType]
+		if o == nil {
+			o = &OpStat{OpType: st.node.OpType}
+			m[st.node.OpType] = o
+		}
+		o.Count++
+		if i < len(s.stats) {
+			o.Total += s.stats[i]
+		}
+	}
+	out := make([]OpStat, 0, len(m))
+	for _, o := range m {
+		out = append(out, *o)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Total > out[j].Total })
+	return out
+}
+
+// Runs returns the number of profiled runs (divide Stats totals by this).
+func (s *Session) Runs() int { return s.runs }
+
+// NodeStats returns per-node timing (cumulative over profiled runs) in
+// execution order.
+func (s *Session) NodeStats() []struct {
+	Node  *Node
+	Total time.Duration
+} {
+	out := make([]struct {
+		Node  *Node
+		Total time.Duration
+	}, len(s.steps))
+	for i, st := range s.steps {
+		out[i].Node = st.node
+		if i < len(s.stats) {
+			out[i].Total = s.stats[i]
+		}
+	}
+	return out
 }
 
 type step struct {
@@ -115,8 +173,18 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 		isOutput[v.id] = true
 	}
 	in := make([]*tensor.Tensor, 0, 8)
+	if s.Profile && len(s.stats) != len(s.steps) {
+		s.stats = make([]time.Duration, len(s.steps))
+	}
+	if s.Profile {
+		s.runs++
+	}
 	for si := range s.steps {
 		st := &s.steps[si]
+		var t0 time.Time
+		if s.Profile {
+			t0 = time.Now()
+		}
 		in = in[:0]
 		for _, id := range st.in {
 			if id < 0 {
@@ -132,6 +200,9 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 		outs, err := st.op.Run(ctx, in)
 		if err != nil {
 			return nil, fmt.Errorf("graph: %w", err)
+		}
+		if s.Profile {
+			s.stats[si] += time.Since(t0)
 		}
 		if len(outs) < len(st.out) {
 			// Ops may return fewer outputs if trailing ones are optional.

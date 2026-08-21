@@ -10,12 +10,17 @@
 - [x] GFLOPS table for common OCR shapes (docs/PERF.md); ORT comparison pending phase 2
 
 ## Phase 2 — ONNX → graph → run
-- [ ] `onnx`: protobuf decode (vendored onnx.proto), IR conversion
-- [ ] `graph`: shape inference, const folding, conv+BN fusion, memory planner, executor
-- [ ] ops: Conv, MatMul/Gemm, Add/Mul/Sub/Div, Relu/Gelu/SiLU/HardSwish, BatchNorm,
-      LayerNorm, Softmax, Reshape/Transpose/Concat/Slice/Gather, Resize, MaxPool/AvgPool,
-      Sigmoid, Attention (fused), Where, Cast, Expand, Squeeze/Unsqueeze
-- [ ] conformance: MobileNetV3 + a tiny ViT exported from PyTorch, logits match ≤1e-4
+- [x] `onnx`: dependency-free protobuf decode → structs
+- [x] `graph`: IR, ONNX→IR builder, const folding (Constant nodes), executor with
+      pooled refcounted intermediates, per-op profiler. TODO: shape inference pass,
+      conv+BN fusion, static memory planner.
+- [x] ops: ~80 ops incl. Conv, MatMul/Gemm, elementwise+broadcast, BatchNorm/
+      LayerNorm/InstanceNorm, Softmax, Reshape/Transpose/Concat/Slice/Gather/Split/
+      Tile, MaxPool/AvgPool/Global*, reductions, ArgMax/Min, Cast/Where/Expand/
+      Squeeze/Unsqueeze/Range/ConstantOfShape/compare/logical.
+      TODO: Resize (needed for detection), fused Attention, GridSample, NonMaxSuppression.
+- [x] conformance: tiny_conv, tiny_transformer, mobilenet_v3_small vs ONNX Runtime
+      (≤1.2e-5 max abs err). Harness in graph/conformance_test.go, exporter in tools/export.
 
 ## Phase 3 — OCR
 - [ ] DBNet++ port (PaddleOCR / OpenOCR export), DB postproc (polygons, unclip)

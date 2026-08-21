@@ -5,10 +5,13 @@
 //   - MaxWorkers-1 helper goroutines are started lazily on first use and live
 //     for the life of the process. The calling goroutine always participates
 //     (worker id 0), so a region never waits on a goroutine spawn.
-//   - Work is handed to helpers with a non-blocking send on an unbuffered
-//     channel: only helpers that are idle *right now* join a region. This makes
-//     nested or concurrent For calls safe (no deadlock, the caller just does
-//     more of the work itself) at the cost of occasionally using fewer helpers.
+//   - Helpers spin-poll for new work for a short while (SpinNS) before parking,
+//     so back-to-back regions — the normal case during inference — hand off in
+//     ~100ns instead of paying a thread wake-up (tens of µs on macOS).
+//   - Work is offered through a buffered channel; a helper that picks up a job
+//     after its region has closed just drops it. The caller never blocks on a
+//     helper that has not started, so nested and concurrent Run calls cannot
+//     deadlock — the caller simply does more of the work itself.
 //   - Indices are distributed dynamically via an atomic counter in chunks of
 //     `grain`, which balances uneven work and heterogeneous cores.
 //
@@ -20,11 +23,15 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // MaxWorkers is the total number of workers (including the caller). It is read
 // once, when the pool starts on first use.
 var MaxWorkers = runtime.GOMAXPROCS(0)
+
+// SpinNS is how long an idle helper spin-polls before parking.
+var SpinNS int64 = 50_000
 
 // Task is a unit of parallel work. Run(i, w) is called for each index i in
 // [0,n) by worker w. Implementations must be safe for concurrent calls.
@@ -42,7 +49,8 @@ type job struct {
 	n, grain int
 	task     Task
 	next     atomic.Int64
-	wg       sync.WaitGroup
+	closed   atomic.Bool
+	active   atomic.Int32 // helpers currently running this job
 }
 
 var (
@@ -54,16 +62,42 @@ var (
 
 func start() {
 	nworkers = max(MaxWorkers, 1)
-	jobs = make(chan *job)
+	jobs = make(chan *job, nworkers)
 	for w := 1; w < nworkers; w++ {
 		go worker(w)
 	}
 }
 
 func worker(w int) {
-	for j := range jobs {
+	for {
+		var j *job
+		// Spin-poll, then block.
+		deadline := time.Now().UnixNano() + SpinNS
+		for {
+			select {
+			case j = <-jobs:
+			default:
+			}
+			if j != nil {
+				break
+			}
+			if time.Now().UnixNano() > deadline {
+				j = <-jobs
+				break
+			}
+			runtime.Gosched()
+		}
+		// Claim: bump active, then re-check closed (see Run for the protocol).
+		if j.closed.Load() {
+			continue
+		}
+		j.active.Add(1)
+		if j.closed.Load() {
+			j.active.Add(-1)
+			continue
+		}
 		j.run(w)
-		j.wg.Done()
+		j.active.Add(-1)
 	}
 }
 
@@ -81,7 +115,7 @@ func (j *job) run(w int) {
 }
 
 // Workers returns the pool size (caller + helpers). Valid worker ids passed to
-// For's fn are in [0, Workers()).
+// Task.Run are in [0, Workers()).
 func Workers() int {
 	once.Do(start)
 	return nworkers
@@ -95,6 +129,9 @@ func For(n, grain int, fn func(i, w int)) { Run(n, grain, Func(fn)) }
 // it (0 is the caller). Consecutive indices are handed out in chunks of grain.
 // If the region would use a single worker, t runs inline on the caller.
 // Passing a pointer-typed Task allocates nothing.
+//
+// Choose grain so that one chunk is at least a few microseconds of work; a
+// region with a single chunk never leaves the caller.
 func Run(n, grain int, t Task) {
 	if n <= 0 {
 		return
@@ -114,17 +151,23 @@ func Run(n, grain int, t Task) {
 	j := jobPool.Get().(*job)
 	j.n, j.grain, j.task = n, grain, t
 	j.next.Store(0)
+	j.closed.Store(false)
 	for sent := 0; sent < helpers; sent++ {
-		j.wg.Add(1)
 		select {
 		case jobs <- j:
 		default:
-			j.wg.Done()
-			sent = helpers // no idle helper: stop offering
+			sent = helpers // buffer full: enough offers outstanding
 		}
 	}
 	j.run(0)
-	j.wg.Wait()
+	// Close the job: helpers that have not claimed it yet will drop it; wait
+	// for those that have.
+	j.closed.Store(true)
+	for j.active.Load() != 0 {
+		runtime.Gosched()
+	}
+	// Drain our own stale offers if they're still sitting in the channel so
+	// they don't make helpers spin on dead jobs (best effort).
 	j.task = nil
 	jobPool.Put(j)
 }

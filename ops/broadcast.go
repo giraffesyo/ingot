@@ -70,7 +70,7 @@ func binaryF32(ctx *Ctx, a, b *tensor.Tensor, fn func(x, y float32) float32) (*t
 		return out, nil
 	}
 	if len(af) == 1 {
-		out := ctx.New(tensor.F32, bs...)
+		out := ctx.NewUninit(tensor.F32, bs...)
 		of := out.F32()
 		x := af[0]
 		for i := range of {

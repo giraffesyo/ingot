@@ -127,6 +127,43 @@ func TestTinyConv(t *testing.T)         { runConformance(t, "tiny_conv", 1e-5) }
 func TestTinyTransformer(t *testing.T)  { runConformance(t, "tiny_transformer", 1e-4) }
 func TestMobileNetV3Small(t *testing.T) { runConformance(t, "mobilenet_v3_small", 1e-3) }
 
+// TestOpProfile prints a per-op-type time breakdown for a model
+// (go test -run TestOpProfile -v -args -model=mobilenet_v3_small).
+func TestOpProfile(t *testing.T) {
+	name := os.Getenv("OCR_PROFILE_MODEL")
+	if name == "" {
+		t.Skip("set OCR_PROFILE_MODEL=<name>")
+	}
+	s, man := loadSession(t, name)
+	feeds := map[string]*tensor.Tensor{}
+	for _, in := range man.Inputs {
+		feeds[in.Name] = loadBin(t, in)
+	}
+	for i := 0; i < 5; i++ { // warm up
+		if _, err := s.Run(feeds); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Profile = true
+	const runs = 50
+	start := time.Now()
+	for i := 0; i < runs; i++ {
+		if _, err := s.Run(feeds); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total := time.Since(start)
+	t.Logf("%s: %v/run over %d runs", name, total/runs, runs)
+	for _, st := range s.Stats() {
+		t.Logf("  %-22s n=%3d  %8.1f µs/run  %5.1f%%", st.OpType, st.Count, float64(st.Total.Microseconds())/runs, 100*float64(st.Total)/float64(total))
+	}
+	if os.Getenv("OCR_PROFILE_NODES") != "" {
+		for _, ns := range s.NodeStats() {
+			t.Logf("    %-40s %8.1f µs", ns.Node.Name, float64(ns.Total.Microseconds())/runs)
+		}
+	}
+}
+
 func BenchmarkModels(b *testing.B) {
 	for _, name := range []string{"tiny_conv", "tiny_transformer", "mobilenet_v3_small"} {
 		b.Run(name, func(b *testing.B) {
