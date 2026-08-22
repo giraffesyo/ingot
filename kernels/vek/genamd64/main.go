@@ -30,7 +30,62 @@ func (g *gen) header() {
 	g.w("GLOBL c_half<>(SB), RODATA|NOPTR, $4")
 	g.w("DATA c_one<>+0(SB)/4, $1.0")
 	g.w("GLOBL c_one<>(SB), RODATA|NOPTR, $4")
+	for _, c := range expConsts {
+		if c.sym == "c_one" {
+			continue // declared above
+		}
+		g.w("DATA %s<>+0(SB)/4, $%v", c.sym, c.val)
+		g.w("GLOBL %s<>(SB), RODATA|NOPTR, $4", c.sym)
+	}
 	g.w("")
+}
+
+// Exp constants (Cephes expf): x clamped to [lo,hi]; n = round(x·log2e);
+// r = x − n·ln2 (hi/lo split); e^r ≈ 1 + r + r²·P(r); result = 2^n·e^r by
+// adding n<<23 to the float bits. Below lo saturates at the smallest normal,
+// above hi at ~2.3e38. Registers Y4..Y15 hold the constants, Y1..Y3 scratch.
+var expConsts = []struct {
+	reg int
+	sym string
+	val float64
+}{
+	{4, "c_explo", -87.33654}, {5, "c_exphi", 88.37626}, {6, "c_log2e", 1.44269504088896341},
+	{7, "c_ln2hi", 0.693359375}, {8, "c_ln2lo", -2.12194440e-4},
+	{9, "c_p0", 1.9875691500e-4}, {10, "c_p1", 1.3981999507e-3}, {11, "c_p2", 8.3334519073e-3},
+	{12, "c_p3", 4.1665795894e-2}, {13, "c_p4", 1.6666665459e-1}, {14, "c_p5", 5.0000001201e-1},
+	{15, "c_one", 1.0},
+}
+
+func expPrep(g *gen) {
+	for _, c := range expConsts {
+		g.w("\tVBROADCASTSS %s<>(SB), Y%d", c.sym, c.reg)
+	}
+}
+
+// expBody: Y0 ← exp(Y0); clobbers Y1..Y3.
+func expBody(g *gen) {
+	g.w("\tVMAXPS Y4, Y0, Y0          // clamp lo")
+	g.w("\tVMINPS Y5, Y0, Y0          // clamp hi")
+	g.w("\tVMULPS Y6, Y0, Y1          // x*log2e")
+	g.w("\tVROUNDPS $0, Y1, Y1        // n = round-to-nearest")
+	g.w("\tVFNMADD231PS Y7, Y1, Y0    // r = x - n*ln2hi")
+	g.w("\tVFNMADD231PS Y8, Y1, Y0    // r -= n*ln2lo")
+	g.w("\tVMOVUPS Y10, Y2            // p1")
+	g.w("\tVFMADD231PS Y9, Y0, Y2     // p0*r + p1")
+	g.w("\tVMOVUPS Y11, Y3            // p2")
+	g.w("\tVFMADD231PS Y2, Y0, Y3")
+	g.w("\tVMOVUPS Y12, Y2            // p3")
+	g.w("\tVFMADD231PS Y3, Y0, Y2")
+	g.w("\tVMOVUPS Y13, Y3            // p4")
+	g.w("\tVFMADD231PS Y2, Y0, Y3")
+	g.w("\tVMOVUPS Y14, Y2            // p5")
+	g.w("\tVFMADD231PS Y3, Y0, Y2     // P(r)")
+	g.w("\tVMULPS Y0, Y0, Y3          // r^2")
+	g.w("\tVADDPS Y15, Y0, Y0         // r+1")
+	g.w("\tVFMADD231PS Y3, Y2, Y0     // += P*r^2")
+	g.w("\tVCVTPS2DQ Y1, Y1           // n → int")
+	g.w("\tVPSLLD $23, Y1, Y1")
+	g.w("\tVPADDD Y1, Y0, Y0          // * 2^n")
 }
 
 // binary: func name_asm(dst, a, b []float32, n int); n multiple of 8.
@@ -155,6 +210,15 @@ func main() {
 	prepScalar := func(g *gen) { g.w("\tVBROADCASTSS s+56(FP), Y13") }
 	g.unary("addscalar", 60, prepScalar, func(g *gen) { g.w("\tVADDPS Y13, Y0, Y0") })
 	g.unary("mulscalar", 60, prepScalar, func(g *gen) { g.w("\tVMULPS Y13, Y0, Y0") })
+
+	g.unary("exp", 56, expPrep, expBody)
+	g.unary("sigmoid", 56, expPrep, func(g *gen) {
+		g.w("\tVXORPS Y1, Y1, Y1")
+		g.w("\tVSUBPS Y0, Y1, Y0          // -x")
+		expBody(g)
+		g.w("\tVADDPS Y15, Y0, Y0         // 1+e^-x")
+		g.w("\tVDIVPS Y0, Y15, Y0         // 1/(1+e^-x)")
+	})
 
 	g.axpy()
 	g.dwconv(3)

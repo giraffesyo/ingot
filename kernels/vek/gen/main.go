@@ -25,8 +25,13 @@ func fmax(d, n, m int) uint32 { return 0x4E20F400 | u(m)<<16 | u(n)<<5 | u(d) }
 func fmin(d, n, m int) uint32 { return 0x4EA0F400 | u(m)<<16 | u(n)<<5 | u(d) }
 func fmla(d, n, m int) uint32 { return 0x4E20CC00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd += Vn*Vm
 func orr(d, n int) uint32     { return 0x4EA01C00 | u(n)<<16 | u(n)<<5 | u(d) } // move Vd=Vn
-func dupW(d, wn int) uint32   { return 0x4E040C00 | u(wn)<<5 | u(d) }           // Vd.4S=dup(Wn)
-func movi0(d int) uint32      { return 0x4F000400 | u(d) }                      // Vd.4S=0
+func frintn(d, n int) uint32  { return 0x4E218800 | u(n)<<5 | u(d) }            // round to nearest even
+func fcvtns(d, n int) uint32  { return 0x4E21A800 | u(n)<<5 | u(d) }            // f32 → s32 (nearest)
+func shl23(d, n int) uint32   { return 0x4F375400 | u(n)<<5 | u(d) }            // Vd.4S = Vn.4S << 23
+func addi(d, n, m int) uint32 { return 0x4EA08400 | u(m)<<16 | u(n)<<5 | u(d) } // integer add .4S
+func fneg(d, n int) uint32    { return 0x6EA0F800 | u(n)<<5 | u(d) }
+func dupW(d, wn int) uint32   { return 0x4E040C00 | u(wn)<<5 | u(d) } // Vd.4S=dup(Wn)
+func movi0(d int) uint32      { return 0x4F000400 | u(d) }            // Vd.4S=0
 func u(x int) uint32          { return uint32(x) }
 func fbits(f float64) uint32  { return math.Float32bits(float32(f)) }
 
@@ -201,6 +206,15 @@ func main() {
 		g.w("\tWORD $0x%08X // fmul v%d,v%d,v28", fmul(v, v, 28), v, v)
 	})
 
+	// exp / sigmoid: see expBody.
+	g.unary("exp", 56, expPrep, func(g *gen, v, s int) { expBody(g, v, s, s+4, s+12) })
+	g.unary("sigmoid", 56, expPrep, func(g *gen, v, s int) {
+		g.w("\tWORD $0x%08X // fneg v%d", fneg(v, v), v)
+		expBody(g, v, s, s+4, s+12)
+		g.w("\tWORD $0x%08X // fadd v%d += 1", fadd(v, v, 27), v)
+		g.w("\tWORD $0x%08X // fdiv v%d = 1/v%d", fdiv(v, 27, v), v, v)
+	})
+
 	g.axpy()
 	g.dwconv(3)
 	g.dwconv(5)
@@ -304,4 +318,52 @@ func (g *gen) axpy() {
 	g.w("done:")
 	g.w("	RET")
 	g.w("")
+}
+
+// Exp constants (Cephes expf): x clamped to [lo,hi]; n = round(x·log2e);
+// r = x − n·ln2 (hi/lo split); e^r ≈ 1 + r + r²·P(r); result = 2^n·e^r by
+// adding n<<23 to the float bits. Inputs below lo saturate at the smallest
+// normal instead of flushing to 0, above hi at ~2.3e38 instead of +Inf.
+var expConsts = []struct {
+	reg  int
+	val  float64
+	name string
+}{
+	{8, -87.33654, "lo"}, {9, 88.37626, "hi"}, {10, 1.44269504088896341, "log2e"},
+	{11, -0.693359375, "-ln2hi"}, {12, 2.12194440e-4, "-ln2lo"},
+	{13, 1.9875691500e-4, "p0"}, {14, 1.3981999507e-3, "p1"}, {15, 8.3334519073e-3, "p2"},
+	{24, 4.1665795894e-2, "p3"}, {25, 1.6666665459e-1, "p4"}, {26, 5.0000001201e-1, "p5"},
+	{27, 1.0, "1.0"},
+}
+
+func expPrep(g *gen) {
+	for _, c := range expConsts {
+		g.dupConst(c.reg, c.val, c.name)
+	}
+}
+
+// expBody: v ← exp(v) using scratch s, t, u and the expConsts registers.
+func expBody(g *gen, v, s, t, u int) {
+	g.w("\tWORD $0x%08X // fmax v%d,lo", fmax(v, v, 8), v)
+	g.w("\tWORD $0x%08X // fmin v%d,hi", fmin(v, v, 9), v)
+	g.w("\tWORD $0x%08X // v%d = x*log2e", fmul(u, v, 10), u)
+	g.w("\tWORD $0x%08X // frintn v%d (n)", frintn(u, u), u)
+	g.w("\tWORD $0x%08X // r = x - n*ln2hi", fmla(v, u, 11))
+	g.w("\tWORD $0x%08X // r -= n*ln2lo", fmla(v, u, 12))
+	g.w("\tWORD $0x%08X // v%d = p1", orr(s, 14), s)
+	g.w("\tWORD $0x%08X // s += p0*r", fmla(s, 13, v))
+	g.w("\tWORD $0x%08X // v%d = p2", orr(t, 15), t)
+	g.w("\tWORD $0x%08X // t += s*r", fmla(t, s, v))
+	g.w("\tWORD $0x%08X // v%d = p3", orr(s, 24), s)
+	g.w("\tWORD $0x%08X // s += t*r", fmla(s, t, v))
+	g.w("\tWORD $0x%08X // v%d = p4", orr(t, 25), t)
+	g.w("\tWORD $0x%08X // t += s*r", fmla(t, s, v))
+	g.w("\tWORD $0x%08X // v%d = p5", orr(s, 26), s)
+	g.w("\tWORD $0x%08X // s += t*r  (P(r))", fmla(s, t, v))
+	g.w("\tWORD $0x%08X // t = r*r", fmul(t, v, v))
+	g.w("\tWORD $0x%08X // v = r+1", fadd(v, v, 27))
+	g.w("\tWORD $0x%08X // v += P*r^2", fmla(v, s, t))
+	g.w("\tWORD $0x%08X // n → int", fcvtns(u, u))
+	g.w("\tWORD $0x%08X // n << 23", shl23(u, u))
+	g.w("\tWORD $0x%08X // v = v * 2^n (int add)", addi(v, v, u))
 }

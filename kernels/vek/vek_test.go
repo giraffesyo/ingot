@@ -117,6 +117,35 @@ func TestVek(t *testing.T) {
 			want[i] = acc[i] + 1.7*a[i]
 		}
 		eq(t, "Axpy", out, want)
+
+		// Exp/Sigmoid over a wide range (incl. the saturation bounds); the
+		// SIMD polynomial is compared at a relative 4e-7.
+		wide := make([]float32, n)
+		for i := range wide {
+			wide[i] = a[i] * 30
+		}
+		if n > 8 {
+			copy(wide, []float32{-100, -87.4, -87.3, -20, -1e-3, 0, 1e-3, 20, 88.3, 88.4, 100}[:min(n, 11)])
+		}
+		Exp(out, wide)
+		for i := range want {
+			want[i] = expScalar(wide[i])
+		}
+		eqRel(t, "Exp", out, want, 4e-7)
+		Sigmoid(out, wide)
+		for i := range want {
+			want[i] = 1 / (1 + expScalar(-wide[i]))
+		}
+		eqRel(t, "Sigmoid", out, want, 4e-7)
+	}
+}
+
+func eqRel(t *testing.T, name string, got, want []float32, rel float64) {
+	t.Helper()
+	for i := range want {
+		if math.Abs(float64(got[i]-want[i])) > rel*math.Abs(float64(want[i]))+1e-38 {
+			t.Fatalf("%s[%d]: got %g want %g", name, i, got[i], want[i])
+		}
 	}
 }
 
@@ -149,4 +178,6 @@ func BenchmarkVek(b *testing.B) {
 	run("Relu", func() { Relu(out, x) })
 	run("Mul", func() { Mul(out, x, y) })
 	run("Add", func() { Add(out, x, y) })
+	run("Exp", func() { Exp(out, x) })
+	run("Sigmoid", func() { Sigmoid(out, x) })
 }

@@ -103,3 +103,17 @@ func clamp01(x float32) float32 {
 	}
 	return x
 }
+
+// Exp computes dst = e^src (saturating at [-87.3, 88.4] like the SIMD kernels).
+func Exp(dst, src []float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		dst[i] = expScalar(src[i])
+	}
+}
+
+// Sigmoid computes dst = 1/(1+e^-src).
+func Sigmoid(dst, src []float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		dst[i] = 1 / (1 + expScalar(-src[i]))
+	}
+}
