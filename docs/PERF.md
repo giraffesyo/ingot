@@ -412,8 +412,25 @@ verified against clang before use. 1T, 200k elements, Apple Silicon:
 | Sigmoid | ~0.2 | 1.5 |
 
 Wired into Softmax/LogSoftmax (row exp + 4-way sum), Sigmoid (op and conv
-epilogue) and the Exp op. Model-level effect to be measured on a quiet machine
-(the first measurement coincided with a load-18 spike from another build).
+epilogue) and the Exp op.
+
+### Round-1 final numbers (quiet machine, 2026-08-22)
+
+| model | ours MT | ORT MT | ratio | ours 1T | ORT 1T | ratio |
+|---|---|---|---|---|---|---|
+| det_640 | **12.6 ms** | 17.8 | **0.71×** | 74 ms | 69 | 1.08× |
+| det_960 | **21.2 ms** | 44.9 | **0.47×** | 157 ms | 157 | 1.00× |
+| rec_320 | **5.5 ms** | 6.3 | **0.88×** | 17.1 ms | 11.7 | 1.46× |
+| rec_b8_320 | **32.7 ms** | 36.4 | **0.90×** | 135 ms | 174 | 0.78× |
+
+Every configuration is now at or below ORT multi-threaded; single-threaded we
+match on det and trail only on rec_320 (the SME effect above). rec 1T is 90%
+Conv at ~100 GFLOPS (NEON kernel peak); Softmax fell 1.24 → 0.40 ms.
+
+**Pipeline** (`BenchmarkPipeline`, corpus img_006, det+rec end-to-end): 45 ms MT
+with recbatch 1 *and* 8, 1.2 M allocs/op. The model forwards account for ~15 ms
+of that — pre/post-processing (image resize, crop sampling, DB post-proc)
+dominates and is the next target; rec batching cannot show until it does.
 
 ### Remaining per-op gaps worth taking next
 
