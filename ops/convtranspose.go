@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"sync"
+
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/kernels/vek"
@@ -20,6 +22,11 @@ type convTransposeOp struct {
 	outShape  []int64
 	autoPad   string
 	epi       epilogue
+
+	packMu  sync.Mutex
+	packed  []*gemm.PackedA // per group: Wgᵀ [KK×CinG] pre-packed
+	packSrc *float32
+	packLen int
 }
 
 func buildConvTranspose(n NodeInfo) (Op, error) {
@@ -95,9 +102,26 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 	// onto the output plane at stride s with offset (kh·d − pad).
 	col := ctx.NewUninit(tensor.F32, KK, HW)
 	cf := col.F32()
+	var pk []*gemm.PackedA
+	if gemm.PackFits(KK, CinG) {
+		o.packMu.Lock()
+		if o.packSrc != &wf[0] || o.packLen != len(wf) {
+			o.packed = make([]*gemm.PackedA, G)
+			for g := 0; g < G; g++ {
+				o.packed[g] = gemm.PackA(true, KK, CinG, wf[g*CinG*KK:], KK)
+			}
+			o.packSrc, o.packLen = &wf[0], len(wf)
+		}
+		pk = o.packed
+		o.packMu.Unlock()
+	}
 	for n := 0; n < N; n++ {
 		for g := 0; g < G; g++ {
-			gemm.SgemmT(true, false, KK, HW, CinG, 1, wf[g*CinG*KK:], KK, xf[(n*Cin+g*CinG)*HW:], HW, 0, cf, HW)
+			if pk != nil {
+				gemm.SgemmPackedA(pk[g], HW, xf[(n*Cin+g*CinG)*HW:], HW, 0, cf, HW, true)
+			} else {
+				gemm.SgemmT(true, false, KK, HW, CinG, 1, wf[g*CinG*KK:], KK, xf[(n*Cin+g*CinG)*HW:], HW, 0, cf, HW)
+			}
 			if !overlap {
 				// Non-overlapping k≤s, no pad: out[ih*sh+kh][iw*sw+kw] = col + b. Each
 				// output element is written exactly once, so tasks can be (channel,

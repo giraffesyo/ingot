@@ -190,3 +190,68 @@ func TestSgemmTransposed(t *testing.T) {
 		}
 	}
 }
+
+func TestSgemmPackedA(t *testing.T) {
+	r := rand.New(rand.NewPCG(21, 22))
+	for _, sh := range [][3]int{{1, 1, 1}, {5, 9, 3}, {MR + 1, NR + 1, KC + 1}, {24, 160, 864}, {480, 40, 480}, {96, 25600, 16}, {64, 100, 2*KC + 3}} {
+		m, n, k := sh[0], sh[1], sh[2]
+		for _, tr := range []bool{false, true} {
+			for _, par := range []bool{false, true} {
+				a := randMat(r, m*k)
+				b := randMat(r, k*n)
+				c0 := randMat(r, m*n)
+				la, lda := a, k
+				if tr {
+					// store A transposed: [k×m]
+					la, lda = make([]float32, m*k), m
+					for i := 0; i < m; i++ {
+						for p := 0; p < k; p++ {
+							la[p*m+i] = a[i*k+p]
+						}
+					}
+				}
+				pa := PackA(tr, m, k, la, lda)
+				for _, beta := range []float32{0, 1} {
+					want := oracle(m, n, k, 1, a, k, b, n, beta, c0, n)
+					got := append([]float32(nil), c0...)
+					SgemmPackedA(pa, n, b, n, beta, got, n, par)
+					if e := maxRelErr(got, n, n, want); e > f32Tol(k) {
+						t.Fatalf("m=%d n=%d k=%d tr=%v par=%v beta=%g: max rel err %g", m, n, k, tr, par, beta, e)
+					}
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkSgemmPackedA(b *testing.B) {
+	r := rand.New(rand.NewPCG(5, 6))
+	for _, sh := range []struct {
+		name    string
+		m, n, k int
+	}{{"rec_m480_n240_k480", 480, 240, 480}, {"pw_m96_n25600_k96", 96, 25600, 96}, {"conv3x3_m24_n160_k864_serial", 24, 160, 864}} {
+		a := randMat(r, sh.m*sh.k)
+		bm := randMat(r, sh.k*sh.n)
+		c := make([]float32, sh.m*sh.n)
+		pa := PackA(false, sh.m, sh.k, a, sh.k)
+		parallel := sh.n > 1000
+		b.Run(sh.name+"/packed", func(b *testing.B) {
+			flops := 2 * float64(sh.m) * float64(sh.n) * float64(sh.k)
+			for i := 0; i < b.N; i++ {
+				SgemmPackedA(pa, sh.n, bm, sh.n, 0, c, sh.n, parallel)
+			}
+			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+		b.Run(sh.name+"/unpacked", func(b *testing.B) {
+			flops := 2 * float64(sh.m) * float64(sh.n) * float64(sh.k)
+			for i := 0; i < b.N; i++ {
+				if parallel {
+					Sgemm(sh.m, sh.n, sh.k, 1, a, sh.k, bm, sh.n, 0, c, sh.n)
+				} else {
+					SgemmSerial(sh.m, sh.n, sh.k, 1, a, sh.k, bm, sh.n, 0, c, sh.n)
+				}
+			}
+			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+	}
+}
