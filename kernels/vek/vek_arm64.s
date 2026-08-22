@@ -610,6 +610,187 @@ loop4:
 done:
 	RET
 
+// func silu_asm(dst, src []float32, n int, ...)
+TEXT ·silu_asm(SB), NOSPLIT, $0-56
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD n+48(FP), R3
+	MOVD $-1028740017, R9 // lo = -87.33654
+	WORD $0x4E040D28 // dup v8.4s, w9
+	MOVD $1118879909, R9 // hi = 88.37626
+	WORD $0x4E040D29 // dup v9.4s, w9
+	MOVD $1069066811, R9 // log2e = 1.4426950408889634
+	WORD $0x4E040D2A // dup v10.4s, w9
+	MOVD $-1087275008, R9 // -ln2hi = -0.693359375
+	WORD $0x4E040D2B // dup v11.4s, w9
+	MOVD $962494595, R9 // -ln2lo = 0.00021219444
+	WORD $0x4E040D2C // dup v12.4s, w9
+	MOVD $961571175, R9 // p0 = 0.000198756915
+	WORD $0x4E040D2D // dup v13.4s, w9
+	MOVD $985088974, R9 // p1 = 0.0013981999507
+	WORD $0x4E040D2E // dup v14.4s, w9
+	MOVD $1007192328, R9 // p2 = 0.0083334519073
+	WORD $0x4E040D2F // dup v15.4s, w9
+	MOVD $1026206145, R9 // p3 = 0.041665795894
+	WORD $0x4E040D38 // dup v24.4s, w9
+	MOVD $1042983594, R9 // p4 = 0.16666665459
+	WORD $0x4E040D39 // dup v25.4s, w9
+	MOVD $1056964608, R9 // p5 = 0.50000001201
+	WORD $0x4E040D3A // dup v26.4s, w9
+	MOVD $1065353216, R9 // 1.0 = 1
+	WORD $0x4E040D3B // dup v27.4s, w9
+loop16:
+	CMP $16, R3
+	BLT loop4
+	VLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]
+	WORD $0x4EA01C04 // v4 = x (copy)
+	WORD $0x6EA0F800 // fneg v0
+	WORD $0x4E28F400 // fmax v0,lo
+	WORD $0x4EA9F400 // fmin v0,hi
+	WORD $0x6E2ADC1C // v28 = x*log2e
+	WORD $0x4E218B9C // frintn v28 (n)
+	WORD $0x4E2BCF80 // r = x - n*ln2hi
+	WORD $0x4E2CCF80 // r -= n*ln2lo
+	WORD $0x4EAE1DD0 // v16 = p1
+	WORD $0x4E20CDB0 // s += p0*r
+	WORD $0x4EAF1DF4 // v20 = p2
+	WORD $0x4E20CE14 // t += s*r
+	WORD $0x4EB81F10 // v16 = p3
+	WORD $0x4E20CE90 // s += t*r
+	WORD $0x4EB91F34 // v20 = p4
+	WORD $0x4E20CE14 // t += s*r
+	WORD $0x4EBA1F50 // v16 = p5
+	WORD $0x4E20CE90 // s += t*r  (P(r))
+	WORD $0x6E20DC14 // t = r*r
+	WORD $0x4E3BD400 // v = r+1
+	WORD $0x4E34CE00 // v += P*r^2
+	WORD $0x4E21AB9C // n → int
+	WORD $0x4F37579C // n << 23
+	WORD $0x4EBC8400 // v = v * 2^n (int add)
+	WORD $0x4E3BD400 // fadd v0 += 1
+	WORD $0x6E20FF60 // fdiv v0 = 1/v0
+	WORD $0x6E24DC00 // fmul v0 *= x
+	WORD $0x4EA11C25 // v5 = x (copy)
+	WORD $0x6EA0F821 // fneg v1
+	WORD $0x4E28F421 // fmax v1,lo
+	WORD $0x4EA9F421 // fmin v1,hi
+	WORD $0x6E2ADC3D // v29 = x*log2e
+	WORD $0x4E218BBD // frintn v29 (n)
+	WORD $0x4E2BCFA1 // r = x - n*ln2hi
+	WORD $0x4E2CCFA1 // r -= n*ln2lo
+	WORD $0x4EAE1DD1 // v17 = p1
+	WORD $0x4E21CDB1 // s += p0*r
+	WORD $0x4EAF1DF5 // v21 = p2
+	WORD $0x4E21CE35 // t += s*r
+	WORD $0x4EB81F11 // v17 = p3
+	WORD $0x4E21CEB1 // s += t*r
+	WORD $0x4EB91F35 // v21 = p4
+	WORD $0x4E21CE35 // t += s*r
+	WORD $0x4EBA1F51 // v17 = p5
+	WORD $0x4E21CEB1 // s += t*r  (P(r))
+	WORD $0x6E21DC35 // t = r*r
+	WORD $0x4E3BD421 // v = r+1
+	WORD $0x4E35CE21 // v += P*r^2
+	WORD $0x4E21ABBD // n → int
+	WORD $0x4F3757BD // n << 23
+	WORD $0x4EBD8421 // v = v * 2^n (int add)
+	WORD $0x4E3BD421 // fadd v1 += 1
+	WORD $0x6E21FF61 // fdiv v1 = 1/v1
+	WORD $0x6E25DC21 // fmul v1 *= x
+	WORD $0x4EA21C46 // v6 = x (copy)
+	WORD $0x6EA0F842 // fneg v2
+	WORD $0x4E28F442 // fmax v2,lo
+	WORD $0x4EA9F442 // fmin v2,hi
+	WORD $0x6E2ADC5E // v30 = x*log2e
+	WORD $0x4E218BDE // frintn v30 (n)
+	WORD $0x4E2BCFC2 // r = x - n*ln2hi
+	WORD $0x4E2CCFC2 // r -= n*ln2lo
+	WORD $0x4EAE1DD2 // v18 = p1
+	WORD $0x4E22CDB2 // s += p0*r
+	WORD $0x4EAF1DF6 // v22 = p2
+	WORD $0x4E22CE56 // t += s*r
+	WORD $0x4EB81F12 // v18 = p3
+	WORD $0x4E22CED2 // s += t*r
+	WORD $0x4EB91F36 // v22 = p4
+	WORD $0x4E22CE56 // t += s*r
+	WORD $0x4EBA1F52 // v18 = p5
+	WORD $0x4E22CED2 // s += t*r  (P(r))
+	WORD $0x6E22DC56 // t = r*r
+	WORD $0x4E3BD442 // v = r+1
+	WORD $0x4E36CE42 // v += P*r^2
+	WORD $0x4E21ABDE // n → int
+	WORD $0x4F3757DE // n << 23
+	WORD $0x4EBE8442 // v = v * 2^n (int add)
+	WORD $0x4E3BD442 // fadd v2 += 1
+	WORD $0x6E22FF62 // fdiv v2 = 1/v2
+	WORD $0x6E26DC42 // fmul v2 *= x
+	WORD $0x4EA31C67 // v7 = x (copy)
+	WORD $0x6EA0F863 // fneg v3
+	WORD $0x4E28F463 // fmax v3,lo
+	WORD $0x4EA9F463 // fmin v3,hi
+	WORD $0x6E2ADC7F // v31 = x*log2e
+	WORD $0x4E218BFF // frintn v31 (n)
+	WORD $0x4E2BCFE3 // r = x - n*ln2hi
+	WORD $0x4E2CCFE3 // r -= n*ln2lo
+	WORD $0x4EAE1DD3 // v19 = p1
+	WORD $0x4E23CDB3 // s += p0*r
+	WORD $0x4EAF1DF7 // v23 = p2
+	WORD $0x4E23CE77 // t += s*r
+	WORD $0x4EB81F13 // v19 = p3
+	WORD $0x4E23CEF3 // s += t*r
+	WORD $0x4EB91F37 // v23 = p4
+	WORD $0x4E23CE77 // t += s*r
+	WORD $0x4EBA1F53 // v19 = p5
+	WORD $0x4E23CEF3 // s += t*r  (P(r))
+	WORD $0x6E23DC77 // t = r*r
+	WORD $0x4E3BD463 // v = r+1
+	WORD $0x4E37CE63 // v += P*r^2
+	WORD $0x4E21ABFF // n → int
+	WORD $0x4F3757FF // n << 23
+	WORD $0x4EBF8463 // v = v * 2^n (int add)
+	WORD $0x4E3BD463 // fadd v3 += 1
+	WORD $0x6E23FF63 // fdiv v3 = 1/v3
+	WORD $0x6E27DC63 // fmul v3 *= x
+	VST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R0)
+	SUB $16, R3
+	B loop16
+loop4:
+	CMP $4, R3
+	BLT done
+	VLD1.P 16(R1), [V0.S4]
+	WORD $0x4EA01C04 // v4 = x (copy)
+	WORD $0x6EA0F800 // fneg v0
+	WORD $0x4E28F400 // fmax v0,lo
+	WORD $0x4EA9F400 // fmin v0,hi
+	WORD $0x6E2ADC1C // v28 = x*log2e
+	WORD $0x4E218B9C // frintn v28 (n)
+	WORD $0x4E2BCF80 // r = x - n*ln2hi
+	WORD $0x4E2CCF80 // r -= n*ln2lo
+	WORD $0x4EAE1DD0 // v16 = p1
+	WORD $0x4E20CDB0 // s += p0*r
+	WORD $0x4EAF1DF4 // v20 = p2
+	WORD $0x4E20CE14 // t += s*r
+	WORD $0x4EB81F10 // v16 = p3
+	WORD $0x4E20CE90 // s += t*r
+	WORD $0x4EB91F34 // v20 = p4
+	WORD $0x4E20CE14 // t += s*r
+	WORD $0x4EBA1F50 // v16 = p5
+	WORD $0x4E20CE90 // s += t*r  (P(r))
+	WORD $0x6E20DC14 // t = r*r
+	WORD $0x4E3BD400 // v = r+1
+	WORD $0x4E34CE00 // v += P*r^2
+	WORD $0x4E21AB9C // n → int
+	WORD $0x4F37579C // n << 23
+	WORD $0x4EBC8400 // v = v * 2^n (int add)
+	WORD $0x4E3BD400 // fadd v0 += 1
+	WORD $0x6E20FF60 // fdiv v0 = 1/v0
+	WORD $0x6E24DC00 // fmul v0 *= x
+	VST1.P [V0.S4], 16(R0)
+	SUB $4, R3
+	B loop4
+done:
+	RET
+
 // func sigmoid_asm(dst, src []float32, n int, ...)
 TEXT ·sigmoid_asm(SB), NOSPLIT, $0-56
 	MOVD dst_base+0(FP), R0

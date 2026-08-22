@@ -137,6 +137,11 @@ func TestVek(t *testing.T) {
 			want[i] = 1 / (1 + expScalar(-wide[i]))
 		}
 		eqRel(t, "Sigmoid", out, want, 4e-7)
+		SiLU(out, wide)
+		for i := range want {
+			want[i] = wide[i] / (1 + expScalar(-wide[i]))
+		}
+		eqRel(t, "SiLU", out, want, 4e-7)
 	}
 }
 
@@ -180,6 +185,7 @@ func BenchmarkVek(b *testing.B) {
 	run("Add", func() { Add(out, x, y) })
 	run("Exp", func() { Exp(out, x) })
 	run("Dot", func() { _ = Dot(x, y) })
+	run("SiLU", func() { SiLU(out, x) })
 	run("Sigmoid", func() { Sigmoid(out, x) })
 }
 

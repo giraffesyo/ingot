@@ -14,7 +14,7 @@ import (
 // the graph optimizer through "ingot_*" attributes (see graph/optimize.go);
 // the ONNX loader never produces them.
 //
-//	ingot_act        string  relu | hardswish | hardsigmoid | sigmoid | clip | leakyrelu
+//	ingot_act        string  relu | hardswish | hardsigmoid | sigmoid | silu | clip | leakyrelu
 //	ingot_act_alpha  float   hardsigmoid alpha / clip min / leakyrelu alpha
 //	ingot_act_beta   float   hardsigmoid beta  / clip max
 //	ingot_post_scale float   default 1
@@ -30,7 +30,7 @@ func parseEpilogue(n NodeInfo) (epilogue, error) {
 	a := n.Attrs
 	e := epilogue{act: a.String("ingot_act", ""), alpha: a.Float("ingot_act_alpha", 0), beta: a.Float("ingot_act_beta", 0)}
 	switch e.act {
-	case "", "relu", "hardswish", "hardsigmoid", "sigmoid", "clip", "leakyrelu":
+	case "", "relu", "hardswish", "hardsigmoid", "sigmoid", "silu", "clip", "leakyrelu":
 	default:
 		return e, n.Errorf("unknown ingot_act %q", e.act)
 	}
@@ -55,6 +55,8 @@ func (e *epilogue) apply(row []float32) {
 		vek.HardSigmoid(row, row, e.alpha, e.beta)
 	case "sigmoid":
 		sigmoidVec(row, row)
+	case "silu":
+		vek.SiLU(row, row)
 	case "clip":
 		vek.Clip(row, row, e.alpha, e.beta)
 	case "leakyrelu":

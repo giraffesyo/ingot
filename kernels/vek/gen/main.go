@@ -208,6 +208,16 @@ func main() {
 
 	// exp / sigmoid: see expBody.
 	g.unary("exp", 56, expPrep, func(g *gen, v, s int) { expBody(g, v, s, s+4, s+12) })
+	// silu: x * sigmoid(x). v4..v7 hold the input copy (free: consts live in
+	// v8-v15/v24-v27, scratch in v16-v23/v28-v31).
+	g.unary("silu", 56, expPrep, func(g *gen, v, s int) {
+		g.w("\tWORD $0x%08X // v%d = x (copy)", orr(4+v, v), 4+v)
+		g.w("\tWORD $0x%08X // fneg v%d", fneg(v, v), v)
+		expBody(g, v, s, s+4, s+12)
+		g.w("\tWORD $0x%08X // fadd v%d += 1", fadd(v, v, 27), v)
+		g.w("\tWORD $0x%08X // fdiv v%d = 1/v%d", fdiv(v, 27, v), v, v)
+		g.w("\tWORD $0x%08X // fmul v%d *= x", fmul(v, v, 4+v), v)
+	})
 	g.unary("sigmoid", 56, expPrep, func(g *gen, v, s int) {
 		g.w("\tWORD $0x%08X // fneg v%d", fneg(v, v), v)
 		expBody(g, v, s, s+4, s+12)
