@@ -1,6 +1,9 @@
 package ocr
 
 import (
+	"fmt"
+	"image"
+	_ "image/png"
 	"os"
 	"sort"
 	"testing"
@@ -112,4 +115,37 @@ func TestOCRProfile(t *testing.T) {
 		return
 	}
 	t.Fatalf("unknown OCR_PROFILE %q", want)
+}
+
+// BenchmarkPipeline runs detection + recognition end-to-end on a corpus image,
+// with recognition batching on (default) and off.
+func BenchmarkPipeline(b *testing.B) {
+	const dir = "../../testdata/ocr"
+	if _, err := os.Stat(dir + "/det.onnx"); err != nil {
+		b.Skip("PP-OCR models not present")
+	}
+	p, err := NewPipeline(dir+"/det.onnx", dir+"/rec.onnx", dir+"/rec_dict.txt")
+	if err != nil {
+		b.Fatal(err)
+	}
+	f, err := os.Open(dir + "/corpus/img_006.png")
+	if err != nil {
+		b.Skip(err)
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, bs := range []int{1, DefaultRecBatch} {
+		b.Run(fmt.Sprintf("recbatch=%d", bs), func(b *testing.B) {
+			p.RecBatch = bs
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := p.Run(img); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
