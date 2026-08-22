@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/giraffesyo/ingot/graph"
+	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/onnx"
 	"github.com/giraffesyo/ingot/tensor"
 )
@@ -25,6 +26,13 @@ var ocrBenchShapes = []struct {
 	{"det_960", "det.onnx", tensor.Shape{1, 3, 960, 960}},
 	{"rec_320", "rec.onnx", tensor.Shape{1, 3, 48, 320}},
 	{"rec_b8_320", "rec.onnx", tensor.Shape{8, 3, 48, 320}},
+}
+
+func init() {
+	// Benchmark knob: OCR_PAR_SPIN_NS overrides the helper spin window.
+	if v := os.Getenv("OCR_PAR_SPIN_NS"); v != "" {
+		fmt.Sscan(v, &par.SpinNS)
+	}
 }
 
 func loadOCRSession(tb testing.TB, model string) (*graph.Session, string) {

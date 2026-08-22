@@ -5,13 +5,18 @@
 //   - MaxWorkers-1 helper goroutines are started lazily on first use and live
 //     for the life of the process. The calling goroutine always participates
 //     (worker id 0), so a region never waits on a goroutine spawn.
-//   - Helpers spin-poll for new work for a short while (SpinNS) before parking,
-//     so back-to-back regions — the normal case during inference — hand off in
-//     ~100ns instead of paying a thread wake-up (tens of µs on macOS).
-//   - Work is offered through a buffered channel; a helper that picks up a job
-//     after its region has closed just drops it. The caller never blocks on a
-//     helper that has not started, so nested and concurrent Run calls cannot
-//     deadlock — the caller simply does more of the work itself.
+//   - Helpers spin for a short while (SpinNS) watching a generation counter
+//     before parking, so back-to-back regions — the normal case during
+//     inference — hand off in ~100ns instead of paying a thread wake-up (tens
+//     of µs on macOS). Spinning touches only atomics: no channel or scheduler
+//     locks, which at 16+ helpers otherwise collapse into runtime mutex
+//     contention (runtime.lock2/usleep dominated profiles before this design).
+//   - A region publishes its job through an atomic pointer + generation bump;
+//     only helpers that have parked are woken (buffered channel). A helper that
+//     picks up a job after its region has closed just drops it. The caller
+//     never blocks on a helper that has not started, so nested and concurrent
+//     Run calls cannot deadlock — the caller simply does more of the work
+//     itself.
 //   - Indices are distributed dynamically via an atomic counter in chunks of
 //     `grain`, which balances uneven work and heterogeneous cores.
 //
@@ -55,42 +60,55 @@ type job struct {
 
 var (
 	once     sync.Once
-	jobs     chan *job
 	nworkers int
 	jobPool  = sync.Pool{New: func() any { return new(job) }}
+
+	cur    atomic.Pointer[job] // most recently published job (nil once closed)
+	gen    atomic.Uint64       // bumped on every publish; helpers spin on it
+	parked atomic.Int32        // helpers blocked on wake
+	wake   chan struct{}       // one token per parked helper to wake
 )
 
 func start() {
 	nworkers = max(MaxWorkers, 1)
-	jobs = make(chan *job, nworkers)
+	wake = make(chan struct{}, nworkers)
 	for w := 1; w < nworkers; w++ {
 		go worker(w)
 	}
 }
 
+// spinCheck is how many spin iterations pass between clock reads.
+const spinCheck = 1024
+
 func worker(w int) {
+	var seen uint64
 	for {
-		var j *job
-		// Spin-poll, then block.
-		deadline := time.Now().UnixNano() + SpinNS
-		for {
-			select {
-			case j = <-jobs:
-			default:
+		// Wait for a new generation: spin on the atomic, then park.
+		if gen.Load() == seen {
+			deadline := time.Now().UnixNano() + SpinNS
+			spins := 0
+			for gen.Load() == seen {
+				spins++
+				if spins%spinCheck != 0 {
+					continue
+				}
+				if time.Now().UnixNano() > deadline {
+					parked.Add(1)
+					if gen.Load() == seen {
+						<-wake
+					}
+					parked.Add(-1)
+					break
+				}
 			}
-			if j != nil {
-				break
-			}
-			if time.Now().UnixNano() > deadline {
-				j = <-jobs
-				break
-			}
-			runtime.Gosched()
+			continue // re-check gen (wake may be spurious)
 		}
-		// Claim: bump active, then re-check closed (see Run for the protocol).
-		if j.closed.Load() {
+		seen = gen.Load()
+		j := cur.Load()
+		if j == nil || j.closed.Load() {
 			continue
 		}
+		// Claim: bump active, then re-check closed (see Run for the protocol).
 		j.active.Add(1)
 		if j.closed.Load() {
 			j.active.Add(-1)
@@ -152,22 +170,29 @@ func Run(n, grain int, t Task) {
 	j.n, j.grain, j.task = n, grain, t
 	j.next.Store(0)
 	j.closed.Store(false)
-	for sent := 0; sent < helpers; sent++ {
-		select {
-		case jobs <- j:
-		default:
-			sent = helpers // buffer full: enough offers outstanding
+	// Publish: spinning helpers see the generation change and pick up cur;
+	// parked helpers (if any) get one wake token each, up to the number of
+	// helpers this region can use.
+	cur.Store(j)
+	gen.Add(1)
+	if p := int(parked.Load()); p > 0 {
+		for i := 0; i < min(p, helpers); i++ {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
 		}
 	}
 	j.run(0)
 	// Close the job: helpers that have not claimed it yet will drop it; wait
 	// for those that have.
 	j.closed.Store(true)
-	for j.active.Load() != 0 {
-		runtime.Gosched()
+	cur.CompareAndSwap(j, nil)
+	for spins := 0; j.active.Load() != 0; spins++ {
+		if spins%64 == 63 {
+			runtime.Gosched()
+		}
 	}
-	// Drain our own stale offers if they're still sitting in the channel so
-	// they don't make helpers spin on dead jobs (best effort).
 	j.task = nil
 	jobPool.Put(j)
 }
