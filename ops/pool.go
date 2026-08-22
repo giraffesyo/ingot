@@ -91,12 +91,47 @@ func (o *poolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	xf, of := x.F32(), out.F32()
 	pt, pl := pads[0], pads[1]
 	isMax := o.kind == "max"
+	// Interior output columns: every tap in-bounds for ow in [owLo, owHi).
+	owLo, owHi := 0, 0
+	if KW > 0 && sw > 0 {
+		owLo = (pl + sw - 1) / sw
+		owHi = (W + pl - KW) / sw
+		if owHi >= OW {
+			owHi = OW - 1
+		}
+		owHi++ // exclusive
+	}
 	par.For(N*C, 1, func(nc, _ int) {
 		xc := xf[nc*H*W : (nc+1)*H*W]
 		oc := of[nc*OH*OW : (nc+1)*OH*OW]
 		for oh := 0; oh < OH; oh++ {
 			h0 := oh*sh - pt
+			khLo, khHi := max(0, -h0), min(KH, H-h0)
+			if isMax && !o.countIncludePad && owHi > owLo && khHi > khLo {
+				// Max pooling fast path: interior columns with no bounds checks;
+				// each tap row is a sliding-window max over the input row.
+				orow := oc[oh*OW : (oh+1)*OW]
+				for ow := owLo; ow < owHi; ow++ {
+					orow[ow] = float32(math.Inf(-1))
+				}
+				for kh := khLo; kh < khHi; kh++ {
+					row := xc[(h0+kh)*W : (h0+kh+1)*W]
+					for ow := owLo; ow < owHi; ow++ {
+						w0 := ow*sw - pl
+						m := orow[ow]
+						for kw := 0; kw < KW; kw++ {
+							if v := row[w0+kw]; v > m {
+								m = v
+							}
+						}
+						orow[ow] = m
+					}
+				}
+			}
 			for ow := 0; ow < OW; ow++ {
+				if isMax && !o.countIncludePad && ow >= owLo && ow < owHi && khHi > khLo {
+					continue // done above
+				}
 				w0 := ow*sw - pl
 				if isMax {
 					m := float32(math.Inf(-1))
