@@ -105,7 +105,60 @@ func binaryFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor {
 	if out := blockBroadcastFast(ctx, a, b, kind); out != nil {
 		return out
 	}
+	// Row broadcast: the small operand equals a trailing suffix of the big
+	// operand's shape (bias add [N,T,C]+[C], LayerNorm scale, ...): each row of
+	// the big operand combines with the whole small operand.
+	if out := rowBroadcastFast(ctx, a, b, kind); out != nil {
+		return out
+	}
 	return nil
+}
+
+// rowBroadcastFast handles a·b where the smaller operand (leading 1s dropped)
+// equals a trailing suffix of the larger's shape, using same-shape vek kernels
+// per row. Order-dependent ops (- /) are only taken when the big operand is
+// on the left.
+func rowBroadcastFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor {
+	big, small, swapped := a, b, false
+	if a.Numel() < b.Numel() {
+		big, small, swapped = b, a, true
+	}
+	if swapped && (kind == '-' || kind == '/') {
+		return nil
+	}
+	bs, ss := big.Shape(), small.Shape()
+	for len(ss) > 0 && ss[0] == 1 {
+		ss = ss[1:]
+	}
+	if len(ss) == 0 || len(ss) > len(bs) {
+		return nil
+	}
+	for i := range ss {
+		if ss[i] != bs[len(bs)-len(ss)+i] {
+			return nil
+		}
+	}
+	row := small.Numel()
+	nRows := big.Numel() / row
+	if nRows < 2 {
+		return nil
+	}
+	out := ctx.NewUninit(tensor.F32, bs...)
+	of, bigf, smf := out.F32(), big.F32(), small.F32()
+	par.For(nRows, max(1, unaryChunk/row), func(r, _ int) {
+		d, x := of[r*row:(r+1)*row], bigf[r*row:(r+1)*row]
+		switch kind {
+		case '+':
+			vek.Add(d, x, smf)
+		case '*':
+			vek.Mul(d, x, smf)
+		case '-':
+			vek.Sub(d, x, smf)
+		case '/':
+			vek.Div(d, x, smf)
+		}
+	})
+	return out
 }
 
 // blockBroadcastFast handles a·b where the smaller operand broadcasts over a
@@ -403,10 +456,11 @@ func (o *clipOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 	}
 	x := in[0]
+	if x.DType() != tensor.F32 {
+		return nil, o.n.Errorf("unsupported dtype %s", x.DType())
+	}
 	out := ctx.NewUninit(tensor.F32, x.Shape()...)
 	xf, of := x.F32(), out.F32()
-	for i := range of {
-		of[i] = min(hi, max(lo, xf[i]))
-	}
+	binParallel(len(of), func(l, h int) { vek.Clip(of[l:h], xf[l:h], lo, hi) })
 	return []*tensor.Tensor{out}, nil
 }

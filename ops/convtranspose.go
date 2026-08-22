@@ -1,13 +1,15 @@
 package ops
 
 import (
+	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
 )
 
 // convTransposeOp implements 2-D ConvTranspose (NCHW). Weight layout is
-// [C_in, C_out/group, kH, kW]. Computed by scatter-accumulate, parallelised
-// over output channels so writes never race.
+// [C_in, C_out/group, kH, kW]. Computed as GEMM (Wᵀ·X → column matrix) followed
+// by col2im scatter, parallelised over output channels so writes never race.
 type convTransposeOp struct {
 	n         NodeInfo
 	group     int
@@ -71,52 +73,106 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 	if OH <= 0 || OW <= 0 {
 		return nil, o.n.Errorf("non-positive output %dx%d", OH, OW)
 	}
-	out := ctx.New(tensor.F32, N, Cout, OH, OW) // zeroed: we scatter-add
+	HW := H * W
+	KK := CoutG * KH * KW
+	overlap := KH > sh || KW > sw || pt != 0 || pl != 0 || pb != 0 || pr != 0 || dh != 1 || dw != 1 || len(o.outShape) == 4
+	var out *tensor.Tensor
+	if overlap {
+		out = ctx.New(tensor.F32, N, Cout, OH, OW) // zeroed: we scatter-add
+	} else {
+		out = ctx.NewUninit(tensor.F32, N, Cout, OH, OW) // every output written exactly once
+	}
 	xf, wf, of := x.F32(), w.F32(), out.F32()
 
-	// Parallel over (n, out-channel): each task owns one output plane.
-	par.For(N*Cout, 1, func(idx, _ int) {
-		n := idx / Cout
-		oc := idx % Cout
-		g := oc / CoutG
-		ocg := oc % CoutG
-		op := of[(n*Cout+oc)*OH*OW : (n*Cout+oc+1)*OH*OW]
-		if bias != nil {
-			b := bias[oc]
-			for i := range op {
-				op[i] = b
-			}
-		}
-		for icg := 0; icg < CinG; icg++ {
-			ic := g*CinG + icg
-			ip := xf[(n*Cin+ic)*H*W:]
-			// weight for (ic, ocg): [KH, KW]
-			wp := wf[((ic*CoutG)+ocg)*KH*KW:]
-			for ih := 0; ih < H; ih++ {
-				for iw := 0; iw < W; iw++ {
-					v := ip[ih*W+iw]
-					if v == 0 {
-						continue
-					}
+	// GEMM + col2im (the standard formulation, cf. Caffe/ORT):
+	//   col[(ocg*KH+kh)*KW+kw][ih*W+iw] = Σ_ic W[ic][ocg][kh][kw] · X[ic][ih][iw]
+	// i.e. col = W_gᵀ[KK×CinG] · X_g[CinG×HW], then each col row is scattered
+	// onto the output plane at stride s with offset (kh·d − pad).
+	col := ctx.NewUninit(tensor.F32, KK, HW)
+	cf := col.F32()
+	for n := 0; n < N; n++ {
+		for g := 0; g < G; g++ {
+			gemm.SgemmT(true, false, KK, HW, CinG, 1, wf[g*CinG*KK:], KK, xf[(n*Cin+g*CinG)*HW:], HW, 0, cf, HW)
+			// Parallel over output channels: each task owns one output plane.
+			par.For(CoutG, 1, func(ocg, _ int) {
+				oc := g*CoutG + ocg
+				op := of[(n*Cout+oc)*OH*OW : (n*Cout+oc+1)*OH*OW]
+				var b float32
+				if bias != nil {
+					b = bias[oc]
+				}
+				if !overlap {
+					// Non-overlapping k≤s, no pad: out[ih*sh+kh][iw*sw+kw] = col + b.
 					for kh := 0; kh < KH; kh++ {
-						oh := ih*sh - pt + kh*dh
-						if oh < 0 || oh >= OH {
-							continue
-						}
-						wr := wp[kh*KW : kh*KW+KW]
-						orow := op[oh*OW:]
 						for kw := 0; kw < KW; kw++ {
-							ow := iw*sw - pl + kw*dw
-							if ow < 0 || ow >= OW {
+							cr := cf[((ocg*KH+kh)*KW+kw)*HW:]
+							for ih := 0; ih < H; ih++ {
+								orow := op[(ih*sh+kh)*OW+kw:]
+								src := cr[ih*W : (ih+1)*W]
+								if sw == 1 {
+									vek.AddScalar(orow[:W], src, b)
+									continue
+								}
+								for iw, v := range src {
+									orow[iw*sw] = v + b
+								}
+							}
+						}
+					}
+					// Rows/cols of the output not covered by any tap (kh<sh-1 when KH<sh, or
+					// output_padding) must still be written: fill with bias.
+					if KH < sh || KW < sw || o.outPad != [2]int{} {
+						for oh := 0; oh < OH; oh++ {
+							kh := oh % sh
+							ih := oh / sh
+							if ih < H && kh < KH {
+								// covered row; only the tail columns may be uncovered
+								orow := op[oh*OW : (oh+1)*OW]
+								for ow := 0; ow < OW; ow++ {
+									if ow/sw >= W || ow%sw >= KW {
+										orow[ow] = b
+									}
+								}
 								continue
 							}
-							orow[ow] += v * wr[kw]
+							orow := op[oh*OW : (oh+1)*OW]
+							for i := range orow {
+								orow[i] = b
+							}
+						}
+					}
+					return
+				}
+				if bias != nil {
+					for i := range op {
+						op[i] = b
+					}
+				}
+				for kh := 0; kh < KH; kh++ {
+					for kw := 0; kw < KW; kw++ {
+						cr := cf[((ocg*KH+kh)*KW+kw)*HW:]
+						for ih := 0; ih < H; ih++ {
+							oh := ih*sh - pt + kh*dh
+							if oh < 0 || oh >= OH {
+								continue
+							}
+							orow := op[oh*OW : (oh+1)*OW]
+							src := cr[ih*W : (ih+1)*W]
+							for iw, v := range src {
+								ow := iw*sw - pl + kw*dw
+								if ow >= 0 && ow < OW {
+									orow[ow] += v
+								}
+							}
 						}
 					}
 				}
-			}
+			})
 		}
-	})
+	}
+	if ctx.Pool != nil {
+		ctx.Pool.Put(col)
+	}
 	return []*tensor.Tensor{out}, nil
 }
 
