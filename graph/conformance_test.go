@@ -250,7 +250,7 @@ func TestZoo(t *testing.T) {
 }
 
 func BenchmarkModels(b *testing.B) {
-	for _, name := range []string{"tiny_conv", "tiny_transformer", "mobilenet_v3_small"} {
+	for _, name := range discoverModels(b) {
 		b.Run(name, func(b *testing.B) {
 			s, man := loadSession(b, name)
 			feeds := map[string]*tensor.Tensor{}
