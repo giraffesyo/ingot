@@ -50,7 +50,9 @@
 - [x] ≤2× ONNX Runtime CPU on PP-OCRv4 det + rec, documented (docs/PERF.md):
       MT det 0.37–0.47× ORT, rec 0.43–0.49×; 1T 1.0–1.5× (ORT uses SME on M4+)
 - [x] vek.Exp/Sigmoid (NEON + AVX2) → Softmax, Sigmoid, Exp op (2.8 Gelem/s 1T)
-- [ ] GELU/Tanh/SiLU SIMD; fused attention; layernorm SIMD
+- [x] SiLU/Erf/GELU SIMD kernels + pattern fusion (ingot.SiLU/Gelu); Dot; GEMV
+- [ ] Tanh SIMD; fused attention; layernorm SIMD; Winograd/direct 3×3 for small
+      spatial convs (resnetish 4× ORT); fused depthwise+pointwise block (mnv2 1T)
 - [ ] int8 GEMM (SDOT/UDOT on arm64, VNNI on amd64), bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)

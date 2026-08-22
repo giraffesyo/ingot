@@ -516,3 +516,56 @@ two passes of the existing stride-1 row kernel with KH×ceil(K/2) and
 KH×floor(K/2) taps (new generated shapes 3x2, 3x1, 5x3, 5x2; `vek.DwRowS1`).
 det Conv.3 (32 ch, 320²→160²) 432 → 245 µs MT; det_640 8.9 → 8.3 ms; mnv3 1T
 3.95 → 3.47 ms, MT ~1.26 ms.
+
+
+## Phase 4, round 2c — the zoo vs ONNX Runtime (2026-08-22)
+
+`graph.BenchmarkModels` now covers every zoo model and `tools/export/zootime.py`
+times the same manifests in ORT. This is the first time the general models
+were measured against ORT at all — and it immediately found gaps the OCR
+models hide. Apple Silicon, µs; ORT 1.29.
+
+| model | ours MT | ORT MT | ratio | ours 1T | ORT 1T | ratio |
+|---|---|---|---|---|---|---|
+| bertish (2-layer encoder) | 100 | 71 | 1.4× | 65 | 36 | 1.8× |
+| efficientnet_b0 | **3760** | 3053 | 1.23× | 16070 | 10720 | 1.5× |
+| llmblock (decoder block) | 42 | 35 | 1.2× | 24 | 17.5 | 1.4× |
+| mobilenet_v2 | 2185 | 1873 | 1.17× | 10130 | 4213 | 2.4× |
+| mobilenet_v3_small | 1300–1450 | 1078 | 1.2–1.35× | 3260 | 2632 | 1.24× |
+| resnetish | **380** | 96 | 4.0× | 328 | 82 | 4.0× |
+| segnet | 45–60 | 34 | 1.3–1.7× | 46 | 31.5 | 1.45× |
+| tiny_conv | 32 | 28 | 1.15× | 33 | 19.5 | 1.7× |
+| tiny_transformer | 28–36 | 43 | **0.7–0.8×** | 19 | 17.8 | 1.1× |
+| vit | 125 | 87 | 1.4× | 81 | 48 | 1.7× |
+
+(Sub-millisecond models vary ±20% run to run even on a quiet machine.)
+
+What this round changed (each with its own commit):
+- **GEMV** (m=1 GEMM streams B; mnv3 classifier 10 → 61 GFLOPS).
+- **Tiny ops stay on the caller** — convs under ~5 µs, GAP/broadcast/reduce
+  under 32K elements — and `par.Run` wakes at most one parked helper per ~4
+  chunks of work (a wake costs the caller 5–10 µs on macOS). tiny_conv 283 →
+  32 µs, resnetish 533 → 380 µs.
+- **Stride-2 depthwise** NEON/AVX2 (de-interleave + KH×KW row kernels);
+  **Dot** kernel (transB GEMV); mnv3 1T 3.95 → 3.26 ms.
+- **SiLU** fusion + kernel and parallel trailing **ReduceMean**: efficientnet
+  5.7 → 3.8 ms, 239 → 125 nodes.
+- **Erf/Gelu** kernels + erf-GELU pattern fusion: bertish 91 → 83 nodes,
+  106 → 100 µs; vit 130 → 125; tiny_transformer 34 → 28 (now under ORT).
+- Batched small MatMuls run in parallel over the batch (neutral on these tiny
+  attention shapes; structural).
+
+Tried and rejected this round (measured, all slower): tree wake-up, pool sizes
+12/16/17, spin windows > 50 µs, adaptive spin window.
+
+Where the remaining gaps are:
+- **resnetish 4×** and **mobilenet_v2 1T 2.4×**: the 3×3/depthwise conv paths on
+  small spatial sizes at 1T — im2col per row-tile plus per-call overhead
+  dominates 1–2 MFLOP convs. Winograd F(2,3) or a direct 3×3 kernel, and a
+  fused depthwise+pointwise block, are the levers.
+- **bertish/vit/llmblock 1.4–1.8×**: per-op overhead (~1 µs/node: Tensor
+  structs, shape clones, pool locks), scalar LayerNorm, Transpose copies, small
+  MatMuls. A fused attention op and LayerNorm SIMD are the roadmap items.
+- **segnet**: ConvTranspose GEMM+col2im on tiny shapes.
+
+PP-OCRv4 is unaffected by this round (det_640 8.3–8.7 ms, rec_320 2.8 ms).
