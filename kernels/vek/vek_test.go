@@ -142,6 +142,32 @@ func TestVek(t *testing.T) {
 			want[i] = wide[i] / (1 + expScalar(-wide[i]))
 		}
 		eqRel(t, "SiLU", out, want, 4e-7)
+
+		// Erf / Gelu: absolute error bound (A&S 7.1.26 is 1.5e-7 absolute).
+		erfIn := make([]float32, n)
+		for i := range erfIn {
+			erfIn[i] = a[i] * 6
+		}
+		Erf(out, erfIn)
+		for i := range want {
+			want[i] = float32(math.Erf(float64(erfIn[i])))
+		}
+		eqAbs(t, "Erf", out, want, 1e-6)
+		Gelu(out, erfIn)
+		for i := range want {
+			x := float64(erfIn[i])
+			want[i] = float32(0.5 * x * (1 + math.Erf(x/math.Sqrt2)))
+		}
+		eqAbs(t, "Gelu", out, want, 2e-6)
+	}
+}
+
+func eqAbs(t *testing.T, name string, got, want []float32, tol float64) {
+	t.Helper()
+	for i := range want {
+		if math.Abs(float64(got[i]-want[i])) > tol {
+			t.Fatalf("%s[%d]: got %g want %g", name, i, got[i], want[i])
+		}
 	}
 }
 
@@ -186,6 +212,8 @@ func BenchmarkVek(b *testing.B) {
 	run("Exp", func() { Exp(out, x) })
 	run("Dot", func() { _ = Dot(x, y) })
 	run("SiLU", func() { SiLU(out, x) })
+	run("Erf", func() { Erf(out, x) })
+	run("Gelu", func() { Gelu(out, x) })
 	run("Sigmoid", func() { Sigmoid(out, x) })
 }
 

@@ -30,8 +30,11 @@ func fcvtns(d, n int) uint32  { return 0x4E21A800 | u(n)<<5 | u(d) }            
 func shl23(d, n int) uint32   { return 0x4F375400 | u(n)<<5 | u(d) }            // Vd.4S = Vn.4S << 23
 func addi(d, n, m int) uint32 { return 0x4EA08400 | u(m)<<16 | u(n)<<5 | u(d) } // integer add .4S
 func fneg(d, n int) uint32    { return 0x6EA0F800 | u(n)<<5 | u(d) }
-func dupW(d, wn int) uint32   { return 0x4E040C00 | u(wn)<<5 | u(d) } // Vd.4S=dup(Wn)
-func movi0(d int) uint32      { return 0x4F000400 | u(d) }            // Vd.4S=0
+func fabs(d, n int) uint32    { return 0x4EA0F800 | u(n)<<5 | u(d) }
+func vand(d, n, m int) uint32 { return 0x4E201C00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd = Vn & Vm
+func vorr(d, n, m int) uint32 { return 0x4EA01C00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd = Vn | Vm
+func dupW(d, wn int) uint32   { return 0x4E040C00 | u(wn)<<5 | u(d) }           // Vd.4S=dup(Wn)
+func movi0(d int) uint32      { return 0x4F000400 | u(d) }                      // Vd.4S=0
 func u(x int) uint32          { return uint32(x) }
 func fbits(f float64) uint32  { return math.Float32bits(float32(f)) }
 
@@ -128,6 +131,51 @@ func (g *gen) unary(name string, frame int, prep func(*gen), body func(*gen, int
 	g.w("done:")
 	g.w("\tRET")
 	g.w("")
+}
+
+// unaryN is unary with nvec (1, 2 or 4) vectors per main-loop iteration; the
+// body gets (v, s): input/output vector v (0..nvec-1) and a scratch base s =
+// 16+v. Fewer vectors per iteration leave more registers for constants.
+func (g *gen) unaryN(name string, frame, nvec int, prep func(*gen), body func(*gen, int, int)) {
+	g.w("// func %s_asm(dst, src []float32, n int, ...)", name)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-%d", name, frame)
+	g.w("\tMOVD dst_base+0(FP), R0")
+	g.w("\tMOVD src_base+24(FP), R1")
+	g.w("\tMOVD n+48(FP), R3")
+	if prep != nil {
+		prep(g)
+	}
+	if nvec > 1 {
+		g.w("loopN:")
+		g.w("\tCMP $%d, R3", 4*nvec)
+		g.w("\tBLT loop4")
+		g.w("\tVLD1.P %d(R1), [%s]", 16*nvec, vregListS(0, nvec))
+		for i := 0; i < nvec; i++ {
+			body(g, i, 16+i)
+		}
+		g.w("\tVST1.P [%s], %d(R0)", vregListS(0, nvec), 16*nvec)
+		g.w("\tSUB $%d, R3", 4*nvec)
+		g.w("\tB loopN")
+	}
+	g.w("loop4:")
+	g.w("\tCMP $4, R3")
+	g.w("\tBLT done")
+	g.w("\tVLD1.P 16(R1), [V0.S4]")
+	body(g, 0, 16)
+	g.w("\tVST1.P [V0.S4], 16(R0)")
+	g.w("\tSUB $4, R3")
+	g.w("\tB loop4")
+	g.w("done:")
+	g.w("\tRET")
+	g.w("")
+}
+
+func vregListS(base, n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("V%d.S4", base+i)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func main() {
@@ -227,6 +275,23 @@ func main() {
 
 	g.axpy()
 	g.dot()
+
+	// erf: two vectors per iteration (register budget), see erfBody.
+	g.unaryN("erf", 56, 2, erfPrep, func(g *gen, v, s int) {
+		erfBody(g, v, 4+v, s, s+4, s+12, s+2)
+	})
+	// gelu(x) = 0.5·x·(1+erf(x/√2)): one vector per iteration.
+	g.unaryN("gelu", 56, 1, func(g *gen) {
+		erfPrep(g)
+		g.dupConst(1, 0.70710678118654752, "1/sqrt2")
+		g.dupConst(31, 0.5, "0.5")
+	}, func(g *gen, v, s int) {
+		g.w("\tWORD $0x%08X // v5 = x/sqrt2", fmul(5, v, 1))
+		erfBody(g, 5, 4, s, s+4, s+12, s+2)
+		g.w("\tWORD $0x%08X // v5 += 1", fadd(5, 5, 27))
+		g.w("\tWORD $0x%08X // v%d = x*(1+erf)", fmul(v, v, 5), v)
+		g.w("\tWORD $0x%08X // v%d *= 0.5", fmul(v, v, 31), v)
+	})
 
 	// Depthwise row kernels: square stride-1 taps, and the even/odd sub-kernels
 	// the stride-2 path uses after de-interleaving columns (3x3 → 3x2 + 3x1,
@@ -414,4 +479,49 @@ func (g *gen) dot() {
 	g.w("\tVST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)")
 	g.w("\tRET")
 	g.w("")
+}
+
+// Erf: Abramowitz–Stegun 7.1.26, |err| ≤ 1.5e-7 absolute:
+//
+//	erf(x) = sign(x)·(1 − t·(a1 + t(a2 + t(a3 + t(a4 + t·a5))))·e^{−x²}),
+//	t = 1/(1+p|x|).
+//
+// Register plan (2 vectors/iter): data v0,v1; |x| v4,v5; scratch s=16/17,
+// t=20/21, u=28/29, u2=18/19; exp consts v8-15,v24-27; erf consts P=v2,
+// A1=v3, A2=v6, A3=v7, A4=v22, A5=v23, SIGN=v30.
+func erfPrep(g *gen) {
+	expPrep(g)
+	g.dupConst(2, 0.3275911, "p")
+	g.dupConst(3, 0.254829592, "a1")
+	g.dupConst(6, -0.284496736, "a2")
+	g.dupConst(7, 1.421413741, "a3")
+	g.dupConst(22, -1.453152027, "a4")
+	g.dupConst(23, 1.061405429, "a5")
+	g.w("\tMOVD $%d, R9 // sign mask (0x80000000)", math.MinInt32)
+	g.w("\tWORD $0x%08X // dup v30.4s, w9", dupW(30, 9))
+}
+
+// erfBody: x ← erf(x), using w (gets |x| then the sign), s, t, u, u2 as scratch.
+func erfBody(g *gen, x, w, s, t, u, u2 int) {
+	g.w("\tWORD $0x%08X // w = |x|", fabs(w, x))
+	g.w("\tWORD $0x%08X // u = x^2", fmul(u, w, w))
+	g.w("\tWORD $0x%08X // u = -x^2", fneg(u, u))
+	expBody(g, u, s, t, u2) // u = e^{-x^2}
+	g.w("\tWORD $0x%08X // t = 1", orr(t, 27))
+	g.w("\tWORD $0x%08X // t += p*|x|", fmla(t, w, 2))
+	g.w("\tWORD $0x%08X // t = 1/t", fdiv(t, 27, t))
+	g.w("\tWORD $0x%08X // s = a5", orr(s, 23))
+	g.w("\tWORD $0x%08X // u2 = a4", orr(u2, 22))
+	g.w("\tWORD $0x%08X // u2 += s*t", fmla(u2, s, t))
+	g.w("\tWORD $0x%08X // s = a3", orr(s, 7))
+	g.w("\tWORD $0x%08X // s += u2*t", fmla(s, u2, t))
+	g.w("\tWORD $0x%08X // u2 = a2", orr(u2, 6))
+	g.w("\tWORD $0x%08X // u2 += s*t", fmla(u2, s, t))
+	g.w("\tWORD $0x%08X // s = a1", orr(s, 3))
+	g.w("\tWORD $0x%08X // s += u2*t", fmla(s, u2, t))
+	g.w("\tWORD $0x%08X // s *= t", fmul(s, s, t))
+	g.w("\tWORD $0x%08X // s *= e^{-x^2}", fmul(s, s, u))
+	g.w("\tWORD $0x%08X // w = sign(x)", vand(w, x, 30))
+	g.w("\tWORD $0x%08X // x = 1 - s", fsub(x, 27, s))
+	g.w("\tWORD $0x%08X // x |= sign", vorr(x, x, w))
 }

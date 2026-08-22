@@ -15,6 +15,7 @@ import (
 //   - fuse-hardswish:   Add(x,3) → Clip(0,6) → Mul(x,·) → Div(·,6)  ⇒  ingot.HardSwish(x)
 //     (the opset<14 decomposition emitted by Paddle2ONNX and torch).
 //   - fuse-silu:        Mul(x, Sigmoid(x))  ⇒  ingot.SiLU(x)  (torch SiLU/Swish export).
+//   - fuse-gelu:        x·0.5·(1+Erf(x/√2)) in any association  ⇒  ingot.Gelu(x).
 //   - fold-conv-affine: Conv/ConvTranspose → {Mul,Add,Sub by scalar or per-channel
 //     const | BatchNormalization}  ⇒  folded into W and bias (exact in f64).
 //   - fuse-conv-act:    Conv/ConvTranspose → {Relu,HardSwish,HardSigmoid,Sigmoid,
@@ -30,6 +31,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = false
 		changed = fuseHardSwish(g, stats) || changed
 		changed = fuseSiLU(g, stats) || changed
+		changed = fuseGelu(g, stats) || changed
 		changed = foldConvAffine(g, stats) || changed
 		changed = fuseConvAct(g, stats) || changed
 		changed = foldPostAffine(g, stats) || changed
@@ -634,6 +636,125 @@ func fuseSiLU(g *Graph, stats map[string]int) bool {
 			}
 		}
 		stats["fuse-silu"]++
+		changed = true
+	}
+	g.compact(dead)
+	if changed {
+		if g.Opsets == nil {
+			g.Opsets = map[string]int{}
+		}
+		g.Opsets[ingotDomain] = 1
+	}
+	return changed
+}
+
+// fuseGelu rewrites the erf-GELU decomposition torch emits —
+// Div(x,√2) [or Mul(x,1/√2)] → Erf → Add(·,1) → Mul with x and 0.5 in either
+// order/association — into ingot.Gelu(x).
+func fuseGelu(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	const sqrt2 = 1.4142135
+	for _, e := range g.Nodes {
+		if dead[e] || e.Domain != "" || e.OpType != "Erf" || len(e.Outputs) != 1 || e.Outputs[0] == nil {
+			continue
+		}
+		d := e.Inputs[0].Producer
+		if d == nil || dead[d] || g.soleConsumer(e.Inputs[0]) != e {
+			continue
+		}
+		dx, dc, right, ok := binaryWithConst(d)
+		if !ok {
+			continue
+		}
+		switch {
+		case d.OpType == "Div" && right && math.Abs(float64(dc)-sqrt2) < 1e-5:
+		case d.OpType == "Mul" && math.Abs(float64(dc)-1/sqrt2) < 1e-6:
+		default:
+			continue
+		}
+		x := dx
+		a := g.soleConsumer(e.Outputs[0])
+		if a == nil || dead[a] || a.OpType != "Add" || a.Domain != "" {
+			continue
+		}
+		ax, ac, _, ok := binaryWithConst(a)
+		if !ok || ac != 1 || ax != e.Outputs[0] {
+			continue
+		}
+		// After Add: two Muls combining with x and 0.5 in some order.
+		m1 := g.soleConsumer(a.Outputs[0])
+		if m1 == nil || dead[m1] || m1.OpType != "Mul" || m1.Domain != "" || len(m1.Inputs) != 2 {
+			continue
+		}
+		other := m1.Inputs[0]
+		if other == a.Outputs[0] {
+			other = m1.Inputs[1]
+		}
+		var last *Node
+		var halfNode *Node // the Mul by 0.5 (may be m1's other input producer, or m1's consumer)
+		switch {
+		case other.Const != nil:
+			// m1 = 0.5*(1+erf); m2 = x*m1 (either order)
+			if c, ok := scalarConst(other); !ok || c != 0.5 {
+				continue
+			}
+			m2 := g.soleConsumer(m1.Outputs[0])
+			if m2 == nil || dead[m2] || m2.OpType != "Mul" || m2.Domain != "" || len(m2.Inputs) != 2 {
+				continue
+			}
+			if !((m2.Inputs[0] == x && m2.Inputs[1] == m1.Outputs[0]) || (m2.Inputs[1] == x && m2.Inputs[0] == m1.Outputs[0])) {
+				continue
+			}
+			last = m2
+		case other == x:
+			// m1 = x*(1+erf); m2 = m1*0.5
+			m2 := g.soleConsumer(m1.Outputs[0])
+			if m2 == nil || dead[m2] || m2.OpType != "Mul" || m2.Domain != "" {
+				continue
+			}
+			mx, mc, _, ok := binaryWithConst(m2)
+			if !ok || mc != 0.5 || mx != m1.Outputs[0] {
+				continue
+			}
+			last = m2
+		default:
+			// other = Mul(x, 0.5) (or Mul(0.5, x)), sole consumer m1
+			h := other.Producer
+			if h == nil || dead[h] || h.OpType != "Mul" || h.Domain != "" || g.soleConsumer(other) != m1 {
+				continue
+			}
+			hx, hc, _, ok := binaryWithConst(h)
+			if !ok || hc != 0.5 || hx != x {
+				continue
+			}
+			halfNode = h
+			last = m1
+		}
+		out := last.Outputs[0]
+		n := &Node{Name: last.Name + "_gelu", OpType: "Gelu", Domain: ingotDomain, Attrs: ops.Attrs{}, Inputs: []*Value{x}, Outputs: []*Value{out}}
+		toDrop := []*Node{d, e, a, m1}
+		if halfNode != nil {
+			toDrop = append(toDrop, halfNode)
+		}
+		if last != m1 {
+			toDrop = append(toDrop, last)
+		}
+		for _, nn := range toDrop {
+			g.dropNode(nn)
+			dead[nn] = true
+		}
+		g.Values[out.Name] = out
+		out.Producer = n
+		x.Consumers = append(x.Consumers, n)
+		for i, nn := range g.Nodes {
+			if nn == last {
+				g.Nodes[i] = n
+				break
+			}
+		}
+		delete(dead, last)
+		stats["fuse-gelu"]++
 		changed = true
 	}
 	g.compact(dead)

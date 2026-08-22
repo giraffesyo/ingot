@@ -391,7 +391,7 @@ func init() {
 	un("Sqrt", 6, func(x float32) float32 { return float32(math.Sqrt(float64(x))) })
 	un("Abs", 6, func(x float32) float32 { return float32(math.Abs(float64(x))) })
 	un("Neg", 6, func(x float32) float32 { return -x })
-	un("Erf", 9, func(x float32) float32 { return float32(math.Erf(float64(x))) })
+	Register("", "Erf", 9, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.Erf}, nil })
 	un("Reciprocal", 6, func(x float32) float32 { return 1 / x })
 	un("Floor", 6, func(x float32) float32 { return float32(math.Floor(float64(x))) })
 	un("Ceil", 6, func(x float32) float32 { return float32(math.Ceil(float64(x))) })
@@ -422,8 +422,9 @@ func init() {
 		if n.Attrs.String("approximate", "none") == "tanh" {
 			return &unaryOp{n, vecOf(geluTanh)}, nil
 		}
-		return &unaryOp{n, vecOf(gelu)}, nil
+		return &unaryOp{n, vek.Gelu}, nil
 	})
+	Register("ingot", "Gelu", 1, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.Gelu}, nil })
 	Register("", "Identity", 1, func(n NodeInfo) (Op, error) { return identityOp{n}, nil })
 	Register("", "Clip", 11, func(n NodeInfo) (Op, error) { return &clipOp{n: n}, nil })
 	Register("", "Clip", 6, func(n NodeInfo) (Op, error) {

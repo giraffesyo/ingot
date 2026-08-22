@@ -2,6 +2,8 @@
 
 package vek
 
+import "math"
+
 func vecLen(dst, a, b []float32) int {
 	n := len(dst)
 	if len(a) < n {
@@ -149,5 +151,20 @@ func SiLU(dst, src []float32) {
 	for i := 0; i < min(len(dst), len(src)); i++ {
 		x := src[i]
 		dst[i] = x / (1 + expScalar(-x))
+	}
+}
+
+// Erf computes dst = erf(src).
+func Erf(dst, src []float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		dst[i] = float32(math.Erf(float64(src[i])))
+	}
+}
+
+// Gelu computes dst = 0.5·src·(1+erf(src/√2)).
+func Gelu(dst, src []float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		x := src[i]
+		dst[i] = 0.5 * x * (1 + float32(math.Erf(float64(x)/math.Sqrt2)))
 	}
 }
