@@ -2,6 +2,7 @@ package ops
 
 import (
 	"fmt"
+	"github.com/giraffesyo/ingot/kernels/par"
 
 	"github.com/giraffesyo/ingot/tensor"
 )
@@ -314,14 +315,32 @@ func (o *concatOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	}
 	dst := out.Bytes()
 	rowOut := oshape[axis] * inner * esz
-	for oi := 0; oi < outer; oi++ {
-		pos := oi * rowOut
-		for _, t := range in {
-			chunk := t.Dim(axis) * inner * esz
-			copy(dst[pos:pos+chunk], t.Bytes()[oi*chunk:(oi+1)*chunk])
-			pos += chunk
-		}
+	// Each (outer index, input) pair is one contiguous copy; split large
+	// copies into pieces so the memcpy bandwidth of several cores is used.
+	const piece = 256 << 10
+	offs := make([]int, len(in)+1)
+	for i, t := range in {
+		offs[i+1] = offs[i] + t.Dim(axis)*inner*esz
 	}
+	maxChunk := 0
+	for _, t := range in {
+		maxChunk = max(maxChunk, t.Dim(axis)*inner*esz)
+	}
+	pieces := max(1, (maxChunk+piece-1)/piece)
+	par.For(outer*len(in)*pieces, 1, func(t, _ int) {
+		pc := t % pieces
+		t /= pieces
+		ii := t % len(in)
+		oi := t / len(in)
+		chunk := offs[ii+1] - offs[ii]
+		lo := pc * piece
+		if lo >= chunk {
+			return
+		}
+		hi := min(lo+piece, chunk)
+		pos := oi*rowOut + offs[ii]
+		copy(dst[pos+lo:pos+hi], in[ii].Bytes()[oi*chunk+lo:oi*chunk+hi])
+	})
 	return []*tensor.Tensor{out}, nil
 }
 

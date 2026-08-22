@@ -379,6 +379,8 @@ func init() {
 	Register("", "Relu", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.Relu}, nil })
 	Register("", "Sigmoid", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, sigmoidVec}, nil })
 	Register("", "HardSwish", 14, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.HardSwish}, nil })
+	// Runtime-internal fused op produced by the graph optimizer (domain "ingot").
+	Register("ingot", "HardSwish", 1, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.HardSwish}, nil })
 	un("Tanh", 6, func(x float32) float32 { return float32(math.Tanh(float64(x))) })
 	un("Exp", 6, func(x float32) float32 { return float32(math.Exp(float64(x))) })
 	un("Log", 6, func(x float32) float32 { return float32(math.Log(float64(x))) })

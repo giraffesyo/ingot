@@ -19,6 +19,7 @@ type convTransposeOp struct {
 	outPad    [2]int
 	outShape  []int64
 	autoPad   string
+	epi       epilogue
 }
 
 func buildConvTranspose(n NodeInfo) (Op, error) {
@@ -35,6 +36,10 @@ func buildConvTranspose(n NodeInfo) (Op, error) {
 	o.pads = [4]int{int(pa[0]), int(pa[1]), int(pa[2]), int(pa[3])}
 	o.outPad = [2]int{int(op[0]), int(op[1])}
 	o.outShape = n.Attrs.Ints("output_shape", nil)
+	var err error
+	if o.epi, err = parseEpilogue(n); err != nil {
+		return nil, err
+	}
 	return o, nil
 }
 
@@ -93,20 +98,27 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 	for n := 0; n < N; n++ {
 		for g := 0; g < G; g++ {
 			gemm.SgemmT(true, false, KK, HW, CinG, 1, wf[g*CinG*KK:], KK, xf[(n*Cin+g*CinG)*HW:], HW, 0, cf, HW)
-			// Parallel over output channels: each task owns one output plane.
-			par.For(CoutG, 1, func(ocg, _ int) {
-				oc := g*CoutG + ocg
-				op := of[(n*Cout+oc)*OH*OW : (n*Cout+oc+1)*OH*OW]
-				var b float32
-				if bias != nil {
-					b = bias[oc]
-				}
-				if !overlap {
-					// Non-overlapping k≤s, no pad: out[ih*sh+kh][iw*sw+kw] = col + b.
+			if !overlap {
+				// Non-overlapping k≤s, no pad: out[ih*sh+kh][iw*sw+kw] = col + b. Each
+				// output element is written exactly once, so tasks can be (channel,
+				// input-row chunk) pairs: chunk c of channel ocg owns input rows
+				// [c*rows, (c+1)*rows) and hence output rows [c*rows*sh, ...).
+				rows := max(1, (32768 / max(1, KH*KW*W)))
+				nChunks := (H + rows - 1) / rows
+				par.For(CoutG*nChunks, 1, func(t, _ int) {
+					ocg, ch := t/nChunks, t%nChunks
+					ih0 := ch * rows
+					ih1 := min(ih0+rows, H)
+					oc := g*CoutG + ocg
+					op := of[(n*Cout+oc)*OH*OW : (n*Cout+oc+1)*OH*OW]
+					var b float32
+					if bias != nil {
+						b = bias[oc]
+					}
 					for kh := 0; kh < KH; kh++ {
 						for kw := 0; kw < KW; kw++ {
 							cr := cf[((ocg*KH+kh)*KW+kw)*HW:]
-							for ih := 0; ih < H; ih++ {
+							for ih := ih0; ih < ih1; ih++ {
 								orow := op[(ih*sh+kh)*OW+kw:]
 								src := cr[ih*W : (ih+1)*W]
 								if sw == 1 {
@@ -119,15 +131,13 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 							}
 						}
 					}
-					// Rows/cols of the output not covered by any tap (kh<sh-1 when KH<sh, or
+					// Output rows/cols not covered by any tap (KH<sh, KW<sw, or
 					// output_padding) must still be written: fill with bias.
 					if KH < sh || KW < sw || o.outPad != [2]int{} {
-						for oh := 0; oh < OH; oh++ {
+						for oh := ih0 * sh; oh < min(ih1*sh, OH); oh++ {
 							kh := oh % sh
-							ih := oh / sh
-							if ih < H && kh < KH {
-								// covered row; only the tail columns may be uncovered
-								orow := op[oh*OW : (oh+1)*OW]
+							orow := op[oh*OW : (oh+1)*OW]
+							if kh < KH {
 								for ow := 0; ow < OW; ow++ {
 									if ow/sw >= W || ow%sw >= KW {
 										orow[ow] = b
@@ -135,13 +145,34 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 								}
 								continue
 							}
-							orow := op[oh*OW : (oh+1)*OW]
 							for i := range orow {
 								orow[i] = b
 							}
 						}
+						if ch == nChunks-1 {
+							for oh := H * sh; oh < OH; oh++ {
+								orow := op[oh*OW : (oh+1)*OW]
+								for i := range orow {
+									orow[i] = b
+								}
+							}
+						}
 					}
-					return
+					o.epi.apply(op[ih0*sh*OW : min(ih1*sh, OH)*OW])
+					if ch == nChunks-1 && H*sh < OH {
+						o.epi.apply(op[H*sh*OW:])
+					}
+				})
+				continue
+			}
+			// Overlapping taps: scatter-accumulate, one task per output plane so
+			// writes never race.
+			par.For(CoutG, 1, func(ocg, _ int) {
+				oc := g*CoutG + ocg
+				op := of[(n*Cout+oc)*OH*OW : (n*Cout+oc+1)*OH*OW]
+				var b float32
+				if bias != nil {
+					b = bias[oc]
 				}
 				if bias != nil {
 					for i := range op {
@@ -167,6 +198,7 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 						}
 					}
 				}
+				o.epi.apply(op)
 			})
 		}
 	}

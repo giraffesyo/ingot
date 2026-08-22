@@ -185,9 +185,22 @@ func (o *globalPoolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 			of[nc] = m
 			return
 		}
-		var sum float32
-		for _, v := range src {
-			sum += v
+		// 8 independent accumulators: a single chain is latency-bound.
+		var s0, s1, s2, s3, s4, s5, s6, s7 float32
+		i := 0
+		for ; i+8 <= len(src); i += 8 {
+			s0 += src[i]
+			s1 += src[i+1]
+			s2 += src[i+2]
+			s3 += src[i+3]
+			s4 += src[i+4]
+			s5 += src[i+5]
+			s6 += src[i+6]
+			s7 += src[i+7]
+		}
+		sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+		for ; i < len(src); i++ {
+			sum += src[i]
 		}
 		of[nc] = sum / float32(P)
 	})

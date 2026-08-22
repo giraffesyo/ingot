@@ -22,6 +22,7 @@ type convOp struct {
 	pads      [4]int // top, left, bottom, right
 	autoPad   string
 	kshape    []int64 // may be nil (infer from W)
+	epi       epilogue
 }
 
 func buildConv(n NodeInfo) (Op, error) {
@@ -36,6 +37,10 @@ func buildConv(n NodeInfo) (Op, error) {
 	o.strides = [2]int{int(st[0]), int(st[1])}
 	o.dilations = [2]int{int(di[0]), int(di[1])}
 	o.pads = [4]int{int(pa[0]), int(pa[1]), int(pa[2]), int(pa[3])}
+	var err error
+	if o.epi, err = parseEpilogue(n); err != nil {
+		return nil, err
+	}
 	return o, nil
 }
 
@@ -143,7 +148,7 @@ func (o *convOp) pointwise(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg
 				gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P:], P, 0, of[(n*M+g*Mg)*P:], P)
 			}
 		}
-		addBias(of, bias, N, M, P)
+		o.finish(of, bias, N, M, P)
 		return
 	}
 	par.For(N*G*nChunks, 1, func(t, _ int) {
@@ -154,12 +159,7 @@ func (o *convOp) pointwise(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg
 		pc := min(Pc, P-p0)
 		dst := of[(n*M+g*Mg)*P+p0:]
 		gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P+p0:], P, 0, dst, P)
-		if bias != nil {
-			for m := 0; m < Mg; m++ {
-				row := dst[m*P : m*P+pc]
-				vek.AddScalar(row, row, bias[g*Mg+m])
-			}
-		}
+		o.finishTile(dst, bias, g*Mg, Mg, P, pc)
 	})
 }
 
@@ -189,7 +189,7 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 		if ctx.Pool != nil {
 			ctx.Pool.Put(col)
 		}
-		addBias(of, bias, N, M, P)
+		o.finish(of, bias, N, M, P)
 		return
 	}
 	nw := par.Workers()
@@ -208,12 +208,7 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 		o.im2colRows(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OW, oh0, oh1, pads)
 		dst := of[(n*M+g*Mg)*P+oh0*OW:]
 		gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, cf, pc, 0, dst, P)
-		if bias != nil {
-			for m := 0; m < Mg; m++ {
-				row := dst[m*P : m*P+pc]
-				vek.AddScalar(row, row, bias[g*Mg+m])
-			}
-		}
+		o.finishTile(dst, bias, g*Mg, Mg, P, pc)
 	})
 	if ctx.Pool != nil {
 		for _, b := range bufs {
@@ -222,13 +217,33 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 	}
 }
 
-func addBias(of, bias []float32, N, M, P int) {
-	if bias == nil {
+// finishTile applies bias + epilogue to a tile of Mg output rows (channels
+// m0..m0+Mg) of width pc within rows of stride P.
+func (o *convOp) finishTile(dst, bias []float32, m0, Mg, P, pc int) {
+	if bias == nil && !o.epi.active() {
+		return
+	}
+	for m := 0; m < Mg; m++ {
+		row := dst[m*P : m*P+pc]
+		if bias != nil {
+			vek.AddScalar(row, row, bias[m0+m])
+		}
+		o.epi.apply(row)
+	}
+}
+
+// finish applies bias + epilogue over a whole [N,M,P] output, in parallel
+// over channel planes (used by the paths that run a parallel GEMM directly).
+func (o *convOp) finish(of, bias []float32, N, M, P int) {
+	if bias == nil && !o.epi.active() {
 		return
 	}
 	par.For(N*M, max(1, unaryChunk/max(P, 1)), func(i, _ int) {
 		row := of[i*P : (i+1)*P]
-		vek.AddScalar(row, row, bias[i%M])
+		if bias != nil {
+			vek.AddScalar(row, row, bias[i%M])
+		}
+		o.epi.apply(row)
 	})
 }
 
@@ -359,6 +374,7 @@ func (o *convOp) depthwise(x, w, bias, out []float32, N, C, H, W, KH, KW, OH, OW
 				}
 			}
 		}
+		o.epi.apply(out[nc*OH*OW : (nc+1)*OH*OW])
 	})
 }
 
@@ -427,6 +443,7 @@ func (o *convOp) depthwiseS1(ctx *Ctx, x, w, bias, out []float32, N, C, H, W, K,
 				row[cc] += acc
 			}
 		}
+		o.epi.apply(oc)
 	})
 	if ctx.Pool != nil {
 		ctx.Pool.Put(scratch)
