@@ -480,3 +480,28 @@ ratio 1.25).
 Method notes: profile MT runs with `-cpuprofile` — lock contention is invisible
 in per-op timings; and re-run any benchmark three times (first-run variance of
 ±20% was seen even on a quiet machine).
+
+### Round 2b — small models: GEMV and "don't wake the pool"
+
+`graph.BenchmarkModels` after round 2 exposed the small-model overheads the OCR
+models hide: mobilenet_v3_small's two batch-1 classifier GEMMs ran at 10 GFLOPS
+(packing a whole weight matrix for one output row), and tiny_conv had gone
+90 → 283 µs because its 14 tiny convs each opened a parallel region that woke
+17 parked helpers (~5-10 µs per wake on macOS, paid serially by the caller).
+
+- `gemm` m=1 → GEMV: stream B directly (axpy into L1 chunks of y / dot per
+  output row), parallel over chunks/rows. 576×1024: 35 → 19 µs (61 GFLOPS,
+  memory-bound).
+- Convs under ~5 µs of MACs, GAP and broadcast ops under 32K elements run
+  entirely on the caller — no region, no wake.
+- Tried: tree wake-up (caller wakes one helper, helpers fan out two each).
+  Measured *worse* on mnv3 (1.3 → 1.6–2.3 ms) and tiny_transformer: helpers
+  arrive later and the region finishes before they help. Direct wake-all stays.
+  Also tried: pool of 12/16/17 instead of 18 — fewer parks but slower overall;
+  18 stays.
+
+| model | morning | now | ORT MT | ratio |
+|---|---|---|---|---|
+| tiny_conv | 90 µs | **37 µs** | — | |
+| tiny_transformer | 40 µs | **33 µs** | — | |
+| mobilenet_v3_small | 3.44 ms | **1.3 ms** | 1.12 | 1.15× (1T 4.4 vs 2.71) |
