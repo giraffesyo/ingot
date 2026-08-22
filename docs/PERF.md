@@ -128,6 +128,30 @@ reports the selection.
 
 Open on x86: MT scaling + MC/KC/NC blocking tuning on a quiet machine; and an Intel-CPU A/B of the AVX-512 kernel.
 
+### Native x86 from CI (Intel Xeon Platinum 8370C, Ice Lake, GitHub-hosted runner)
+
+The CI bench job (`.github/workflows/ci.yml`) runs the kernels natively on a
+standard GitHub Linux runner — an Intel Xeon Platinum 8370C @ 2.8 GHz (Ice Lake,
+true AVX-512: avx512f/vnni/bw/...), 4 vCPU. First clean-ish native-x86 numbers:
+
+| kernel | GFLOPS |
+|---|---|
+| AVX2 6×16 micro-kernel (1 core) | 106 |
+| AVX-512 6×16 micro-kernel (1 core) | 85 |
+| scalar generic | 3.0 |
+| full Sgemm sq512 / sq1024 / sq2048 (4 vCPU) | 143 / 157 / 161 |
+
+**AVX-512 loses to AVX2 even here (85 vs 106)** — on this Ice Lake part because of
+Intel's AVX-512 frequency downclocking. Combined with the Zen 4 result (parity,
+double-pumped 256-bit units), the AVX-512 kernel fails to beat AVX2 on *both*
+microarchitectures tested. This confirms the evidence-based default: **AVX2 is the
+amd64 fast path; AVX-512 stays opt-in** (`OCR_GEMM_KERNEL=avx512`) pending a part
+where it actually wins. The AVX2 micro-kernel at 106 GFLOPS/core is ~95% of this
+Xeon's ~112 GFLOPS AVX2 core peak — near-peak on Intel too, not just Apple Silicon.
+
+(These come from a shared CI runner, so treat as ballpark, not tuned peak — but
+they're native, unthrottled x86, which retires the "unmeasured" caveat for good.)
+
 Method note: always sanity-check the box first — `uptime` (load avg) and a
 dependent-add loop for effective clock. On 2026-08-21 the first measurements were taken while the machine was under heavy
 background load, pinning it at ~1.4 GHz effective.
