@@ -379,7 +379,7 @@ func (o *convOp) depthwiseS1(ctx *Ctx, x, w, bias, out []float32, N, C, H, W, K,
 		}
 	})
 	workers := par.Workers()
-	scratch := ctx.New(tensor.F32, workers, Hp, Wp) // zeroed: borders stay 0
+	scratch := ctx.NewUninit(tensor.F32, workers, Hp, Wp)
 	sf := scratch.F32()
 	plane := Hp * Wp
 	grain := max(1, 20000/max(OH*OW*K*K, 1))
@@ -388,9 +388,16 @@ func (o *convOp) depthwiseS1(ctx *Ctx, x, w, bias, out []float32, N, C, H, W, K,
 		xc := x[nc*H*W : (nc+1)*H*W]
 		oc := out[nc*OH*OW : (nc+1)*OH*OW]
 		pad := sf[wk*plane : (wk+1)*plane]
-		// Copy this channel into the padded interior.
+		// Zero the border (top/bottom rows, left/right columns) and copy this
+		// channel into the padded interior. Only the border is cleared: the
+		// interior is fully overwritten.
+		clear(pad[:pt*Wp])
+		clear(pad[(pt+H)*Wp:])
 		for i := 0; i < H; i++ {
-			copy(pad[(pt+i)*Wp+pl:(pt+i)*Wp+pl+W], xc[i*W:(i+1)*W])
+			row := pad[(pt+i)*Wp : (pt+i+1)*Wp]
+			clear(row[:pl])
+			copy(row[pl:pl+W], xc[i*W:(i+1)*W])
+			clear(row[pl+W:])
 		}
 		var b float32
 		if bias != nil {
@@ -421,6 +428,9 @@ func (o *convOp) depthwiseS1(ctx *Ctx, x, w, bias, out []float32, N, C, H, W, K,
 			}
 		}
 	})
+	if ctx.Pool != nil {
+		ctx.Pool.Put(scratch)
+	}
 }
 
 func init() {
