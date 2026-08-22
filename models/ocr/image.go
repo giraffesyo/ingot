@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"github.com/giraffesyo/ingot/kernels/par"
 	"image"
 	"math"
 
@@ -41,47 +42,76 @@ func preprocessDet(img image.Image, limit int) (*tensor.Tensor, float64, float64
 	return t, float64(nw) / float64(W), float64(nh) / float64(H)
 }
 
-// resizeBilinear returns a packed RGB (3 bytes/pixel) buffer of size nw*nh,
-// bilinearly resampled from img. align_corners=false convention.
-func resizeBilinear(img image.Image, nw, nh int) []uint8 {
+// toRGB returns img as a packed RGB (3 bytes/pixel) buffer plus its width and
+// height. *image.RGBA / *image.NRGBA are read straight from Pix; other image
+// types go through image.At once (not once per resampled tap).
+func toRGB(img image.Image) ([]uint8, int, int) {
 	b := img.Bounds()
 	W, H := b.Dx(), b.Dy()
+	out := make([]uint8, W*H*3)
+	var pix []uint8
+	var stride int
+	switch im := img.(type) {
+	case *image.RGBA:
+		pix, stride = im.Pix, im.Stride
+	case *image.NRGBA:
+		pix, stride = im.Pix, im.Stride
+	}
+	if pix != nil {
+		for y := 0; y < H; y++ {
+			row := pix[y*stride : y*stride+W*4]
+			o := out[y*W*3 : (y+1)*W*3]
+			for x := 0; x < W; x++ {
+				o[x*3], o[x*3+1], o[x*3+2] = row[x*4], row[x*4+1], row[x*4+2]
+			}
+		}
+		return out, W, H
+	}
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			o := (y*W + x) * 3
+			out[o], out[o+1], out[o+2] = uint8(r>>8), uint8(g>>8), uint8(bl>>8)
+		}
+	}
+	return out, W, H
+}
+
+// resizeBilinear returns a packed RGB (3 bytes/pixel) buffer of size nw*nh,
+// bilinearly resampled from img. align_corners=false convention. Rows are
+// resampled in parallel from a packed copy of the source.
+func resizeBilinear(img image.Image, nw, nh int) []uint8 {
+	src, W, H := toRGB(img)
 	out := make([]uint8, nw*nh*3)
 	sx := float64(W) / float64(nw)
 	sy := float64(H) / float64(nh)
-	at := func(x, y int) (float64, float64, float64) {
-		r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
-		return float64(r >> 8), float64(g >> 8), float64(bl >> 8)
+	// Precompute x taps.
+	xs0 := make([]int, nw)
+	xs1 := make([]int, nw)
+	wxs := make([]float32, nw)
+	for ox := 0; ox < nw; ox++ {
+		fx := (float64(ox)+0.5)*sx - 0.5
+		x0 := int(math.Floor(fx))
+		wxs[ox] = float32(fx - float64(x0))
+		xs0[ox] = clampI(x0, 0, W-1) * 3
+		xs1[ox] = clampI(x0+1, 0, W-1) * 3
 	}
-	for oy := 0; oy < nh; oy++ {
+	par.For(nh, max(1, 4096/max(nw, 1)), func(oy, _ int) {
 		fy := (float64(oy)+0.5)*sy - 0.5
 		y0 := int(math.Floor(fy))
-		wy := fy - float64(y0)
-		y1 := y0 + 1
-		y0 = clampI(y0, 0, H-1)
-		y1 = clampI(y1, 0, H-1)
+		wy := float32(fy - float64(y0))
+		r0 := src[clampI(y0, 0, H-1)*W*3:]
+		r1 := src[clampI(y0+1, 0, H-1)*W*3:]
+		dst := out[oy*nw*3 : (oy+1)*nw*3]
 		for ox := 0; ox < nw; ox++ {
-			fx := (float64(ox)+0.5)*sx - 0.5
-			x0 := int(math.Floor(fx))
-			wx := fx - float64(x0)
-			x1 := x0 + 1
-			x0 = clampI(x0, 0, W-1)
-			x1 = clampI(x1, 0, W-1)
-			r00, g00, b00 := at(x0, y0)
-			r10, g10, b10 := at(x1, y0)
-			r01, g01, b01 := at(x0, y1)
-			r11, g11, b11 := at(x1, y1)
-			lerp := func(a, b, c, d float64) float64 {
-				top := a*(1-wx) + b*wx
-				bot := c*(1-wx) + d*wx
-				return top*(1-wy) + bot*wy
+			x0, x1, wx := xs0[ox], xs1[ox], wxs[ox]
+			for c := 0; c < 3; c++ {
+				top := float32(r0[x0+c])*(1-wx) + float32(r0[x1+c])*wx
+				bot := float32(r1[x0+c])*(1-wx) + float32(r1[x1+c])*wx
+				dst[ox*3+c] = u8(float64(top*(1-wy) + bot*wy))
 			}
-			o := (oy*nw + ox) * 3
-			out[o] = u8(lerp(r00, r10, r01, r11))
-			out[o+1] = u8(lerp(g00, g10, g01, g11))
-			out[o+2] = u8(lerp(b00, b10, b01, b11))
 		}
-	}
+	})
 	return out
 }
 
