@@ -88,11 +88,10 @@ Observations:
 
 ### Native x86 measurement (x86-64 (Zen 4), Linux)
 
-Measured on a real x86 box, retiring the "unmeasured
-on native x86" caveat. **Important:** the box was under heavy unrelated
-background load (heavy background load), so multi-thread numbers
-are contention-noise and omitted; single-thread figures are CPU-pinned (`taskset
--c 0`) but still a *lower bound* under that load.
+Measured on a real x86 box, retiring the "unmeasured on native x86" caveat.
+**Important:** the box was under heavy background load (heavy background load),
+so multi-thread numbers are contention-noise and omitted; single-thread figures
+are CPU-pinned (`taskset -c 0`) but still a *lower bound* under that load.
 
 | kernel (1T, pinned, under load) | GFLOPS |
 |---|---|
@@ -127,12 +126,11 @@ correct and opt-in via `OCR_GEMM_KERNEL=avx512` (also `avx2`/`generic`), to be
 A/B'd on an Intel true-512 box before defaulting anywhere. `gemm.ActiveKernel`
 reports the selection.
 
-Open on x86: MT scaling + MC/KC/NC blocking tuning on a quiet machine (the box is
-otherwise busy); and an Intel-CPU A/B of the AVX-512 kernel.
+Open on x86: MT scaling + MC/KC/NC blocking tuning on a quiet machine; and an Intel-CPU A/B of the AVX-512 kernel.
 
 Method note: always sanity-check the box first — `uptime` (load avg) and a
-dependent-add loop for effective clock. On 2026-08-21 the first measurements were
-taken with the machine under heavy background load, at ~1.4 GHz effective.
+dependent-add loop for effective clock. On 2026-08-21 the first measurements were taken while the machine was under heavy
+background load, pinning it at ~1.4 GHz effective.
 
 
 ## End-to-end models (`graph`)
