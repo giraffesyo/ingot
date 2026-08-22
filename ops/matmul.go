@@ -2,6 +2,7 @@ package ops
 
 import (
 	"github.com/giraffesyo/ingot/kernels/gemm"
+	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/tensor"
 )
 
@@ -107,10 +108,10 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	if nb == 1 {
 		gemm.Sgemm(M, N, K, 1, af, K, bf, N, 0, of, N)
 	} else {
-		// Fast path: same batch shapes → contiguous slabs.
+		// Per-batch matrix offsets (batch dims may broadcast).
 		sa := broadcastStrides(batchA, batch)
 		sb := broadcastStrides(batchB, batch)
-		// Convert batch strides (in batch elements) to element offsets of matrices.
+		offs := make([][2]int, nb)
 		idx := make([]int, len(batch))
 		for bi := 0; bi < nb; bi++ {
 			offA, offB := 0, 0
@@ -118,13 +119,24 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 				offA += idx[d] * sa[d]
 				offB += idx[d] * sb[d]
 			}
-			gemm.Sgemm(M, N, K, 1, af[offA*M*K:], K, bf[offB*K*N:], N, 0, of[bi*M*N:], N)
+			offs[bi] = [2]int{offA * M * K, offB * K * N}
 			for d := len(idx) - 1; d >= 0; d-- {
 				idx[d]++
 				if idx[d] < batch[d] {
 					break
 				}
 				idx[d] = 0
+			}
+		}
+		// Small per-matrix GEMMs (attention heads: T×T·T×d) are run serially
+		// in parallel over the batch; large ones use the parallel GEMM in turn.
+		if M*N*K <= 1<<18 && nb > 1 {
+			par.For(nb, max(1, (1<<17)/max(M*N*K, 1)), func(bi, _ int) {
+				gemm.SgemmSerial(M, N, K, 1, af[offs[bi][0]:], K, bf[offs[bi][1]:], N, 0, of[bi*M*N:], N)
+			})
+		} else {
+			for bi := 0; bi < nb; bi++ {
+				gemm.Sgemm(M, N, K, 1, af[offs[bi][0]:], K, bf[offs[bi][1]:], N, 0, of[bi*M*N:], N)
 			}
 		}
 	}
