@@ -1,0 +1,115 @@
+package ocr
+
+import (
+	"os"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/giraffesyo/ingot/graph"
+	"github.com/giraffesyo/ingot/onnx"
+	"github.com/giraffesyo/ingot/tensor"
+)
+
+// Fixed input shapes for model-level benchmarks (match tools/export/orttime.py
+// so "ours vs ORT" numbers are like-for-like).
+var ocrBenchShapes = []struct {
+	name  string
+	model string
+	shape tensor.Shape
+}{
+	{"det_640", "det.onnx", tensor.Shape{1, 3, 640, 640}},
+	{"det_960", "det.onnx", tensor.Shape{1, 3, 960, 960}},
+	{"rec_320", "rec.onnx", tensor.Shape{1, 3, 48, 320}},
+	{"rec_b8_320", "rec.onnx", tensor.Shape{8, 3, 48, 320}},
+}
+
+func loadOCRSession(tb testing.TB, model string) (*graph.Session, string) {
+	tb.Helper()
+	path := "../../testdata/ocr/" + model
+	if _, err := os.Stat(path); err != nil {
+		tb.Skip("PP-OCR models not present")
+	}
+	m, err := onnx.DecodeFile(path)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	g, err := graph.FromONNX(m)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	s, err := graph.Compile(g)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return s, g.Inputs[0].Name
+}
+
+func BenchmarkOCRModels(b *testing.B) {
+	for _, c := range ocrBenchShapes {
+		b.Run(c.name, func(b *testing.B) {
+			s, in := loadOCRSession(b, c.model)
+			x := tensor.New(tensor.F32, c.shape...)
+			for i := range x.F32() {
+				x.F32()[i] = float32(i%97)/97 - 0.5
+			}
+			feeds := map[string]*tensor.Tensor{in: x}
+			if _, err := s.Run(feeds); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := s.Run(feeds); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// TestOCRProfile prints a per-op breakdown: OCR_PROFILE=det_640 go test -run TestOCRProfile -v
+func TestOCRProfile(t *testing.T) {
+	want := os.Getenv("OCR_PROFILE")
+	if want == "" {
+		t.Skip("set OCR_PROFILE=<det_640|det_960|rec_320|rec_b8_320>")
+	}
+	for _, c := range ocrBenchShapes {
+		if c.name != want {
+			continue
+		}
+		s, in := loadOCRSession(t, c.model)
+		x := tensor.New(tensor.F32, c.shape...)
+		feeds := map[string]*tensor.Tensor{in: x}
+		for i := 0; i < 3; i++ {
+			if _, err := s.Run(feeds); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.Profile = true
+		const runs = 20
+		start := time.Now()
+		for i := 0; i < runs; i++ {
+			if _, err := s.Run(feeds); err != nil {
+				t.Fatal(err)
+			}
+		}
+		total := time.Since(start)
+		t.Logf("%s: %v/run over %d runs", c.name, total/runs, runs)
+		for _, st := range s.Stats() {
+			t.Logf("  %-22s n=%3d  %8.1f µs/run  %5.1f%%", st.OpType, st.Count, float64(st.Total.Microseconds())/runs, 100*float64(st.Total)/float64(total))
+		}
+		if os.Getenv("OCR_PROFILE_NODES") != "" {
+			ns := s.NodeStats()
+			sort.Slice(ns, func(i, j int) bool { return ns[i].Total > ns[j].Total })
+			for i, ns := range ns {
+				if i >= 40 {
+					break
+				}
+				t.Logf("    %-8s %-40s %8.1f µs", ns.Node.OpType, ns.Node.Name, float64(ns.Total.Microseconds())/runs)
+			}
+		}
+		return
+	}
+	t.Fatalf("unknown OCR_PROFILE %q", want)
+}
