@@ -17,3 +17,6 @@
 !/testdata/ocr/corpus/
 
 det_boxes.png
+
+# Private local notes (benchmarking environment, machine specifics) — never commit
+/docs/private.md
