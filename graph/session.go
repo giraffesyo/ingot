@@ -93,9 +93,17 @@ type step struct {
 	out  []int // value ids (-1 for nil)
 }
 
-// Compile resolves every node against the ops registry. It returns an error
-// listing all unsupported ops rather than stopping at the first.
+// Compile optimises g in place (see Optimize) and resolves every node against
+// the ops registry. It returns an error listing all unsupported ops rather than
+// stopping at the first.
 func Compile(g *Graph) (*Session, error) {
+	Optimize(g)
+	return CompileRaw(g)
+}
+
+// CompileRaw is Compile without the optimizer: the graph runs node-for-node as
+// loaded. Useful for A/B-testing rewrites and for debugging.
+func CompileRaw(g *Graph) (*Session, error) {
 	s := &Session{g: g, pool: tensor.NewPool(), nval: len(g.Values)}
 	s.uses = make([]int, s.nval)
 	var missing []string
