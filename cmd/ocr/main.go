@@ -55,15 +55,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	for i, b := range boxes {
-		if recog != nil {
-			text, conf, rerr := recog.Recognize(img, b)
-			if rerr != nil {
-				fmt.Fprintln(os.Stderr, "recognize:", rerr)
-				continue
-			}
-			fmt.Printf("  box %d  det=%.2f rec=%.2f  %q\n", i, b.Score, conf, text)
-		} else {
+	if recog != nil {
+		// One batched forward per group of similar-width boxes (see ocr.Pipeline).
+		p := &ocr.Pipeline{Det: d, Rec: recog, RecBatch: ocr.DefaultRecBatch, RecPadRatio: ocr.DefaultRecPadRatio}
+		texts, confs, rerr := p.RecognizeBoxes(img, boxes)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "recognize:", rerr)
+			os.Exit(1)
+		}
+		for i, b := range boxes {
+			fmt.Printf("  box %d  det=%.2f rec=%.2f  %q\n", i, b.Score, confs[i], texts[i])
+		}
+	} else {
+		for i, b := range boxes {
 			fmt.Printf("  box %d score=%.2f pts=%v\n", i, b.Score, b.Pts)
 		}
 	}

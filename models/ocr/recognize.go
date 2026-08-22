@@ -64,17 +64,55 @@ func loadDict(path string) ([]string, error) {
 // Recognize crops the box from img, runs recognition, and returns the decoded
 // text and mean confidence.
 func (r *Recognizer) Recognize(img image.Image, box Box) (string, float64, error) {
-	in := cropToTensor(img, box, r.height)
-	outs, err := r.sess.Run(map[string]*tensor.Tensor{r.inName: in})
+	texts, confs, err := r.RecognizeBatch(img, []Box{box})
 	if err != nil {
 		return "", 0, err
 	}
+	return texts[0], confs[0], nil
+}
+
+// RecognizeBatch recognises several boxes in one forward pass. Each crop is
+// resized to the model height at its own aspect ratio; narrower crops are
+// right-padded (with the normalised mid-grey value 0, as PP-OCR does) to the
+// widest crop in the batch. Callers get the best throughput by grouping boxes
+// of similar width (see Pipeline).
+func (r *Recognizer) RecognizeBatch(img image.Image, boxes []Box) ([]string, []float64, error) {
+	if len(boxes) == 0 {
+		return nil, nil, nil
+	}
+	H := r.height
+	widths := make([]int, len(boxes))
+	Wmax := 0
+	for i, b := range boxes {
+		widths[i] = cropWidth(b, H)
+		Wmax = max(Wmax, widths[i])
+	}
+	in := tensor.New(tensor.F32, len(boxes), 3, H, Wmax) // zeroed: padding is 0
+	f := in.F32()
+	for i, b := range boxes {
+		cropInto(f[i*3*H*Wmax:(i+1)*3*H*Wmax], img, b, H, widths[i], Wmax)
+	}
+	outs, err := r.sess.Run(map[string]*tensor.Tensor{r.inName: in})
+	if err != nil {
+		return nil, nil, err
+	}
 	out := outs[r.outName]
 	os := out.Shape()
-	if os.Rank() != 3 {
-		return "", 0, fmt.Errorf("recognizer: unexpected output %v", os)
+	if os.Rank() != 3 || os[0] != len(boxes) {
+		return nil, nil, fmt.Errorf("recognizer: unexpected output %v for batch %d", os, len(boxes))
 	}
-	return r.ctcDecode(out.F32(), os[1], os[2])
+	T, C := os[1], os[2]
+	of := out.F32()
+	texts := make([]string, len(boxes))
+	confs := make([]float64, len(boxes))
+	for i := range boxes {
+		t, c, err := r.ctcDecode(of[i*T*C:(i+1)*T*C], T, C)
+		if err != nil {
+			return nil, nil, err
+		}
+		texts[i], confs[i] = t, c
+	}
+	return texts, confs, nil
 }
 
 // ctcDecode performs greedy CTC decoding over a [1,T,C] probability tensor.
@@ -106,24 +144,49 @@ func (r *Recognizer) ctcDecode(p []float32, T, C int) (string, float64, error) {
 	return sb.String(), conf, nil
 }
 
+// cropWidth is the model-input width for a box at height H: its aspect ratio
+// (using the longer of the two edges in each direction), at least 4.
+func cropWidth(box Box, H int) int {
+	p := box.Pts
+	cw := math.Max(dist(p[0], p[1]), dist(p[3], p[2]))
+	ch := math.Max(dist(p[0], p[3]), dist(p[1], p[2]))
+	return int(math.Max(4, math.Round(float64(H)*cw/math.Max(ch, 1))))
+}
+
 // cropToTensor perspective-crops the quad from img to a height-H strip and
 // returns a normalised [1,3,H,W] tensor (RGB, (x/255-0.5)/0.5).
 func cropToTensor(img image.Image, box Box, H int) *tensor.Tensor {
-	p := box.Pts
-	wTop := dist(p[0], p[1])
-	wBot := dist(p[3], p[2])
-	hL := dist(p[0], p[3])
-	hR := dist(p[1], p[2])
-	cw := math.Max(wTop, wBot)
-	ch := math.Max(hL, hR)
-	W := int(math.Max(4, math.Round(float64(H)*cw/math.Max(ch, 1))))
+	W := cropWidth(box, H)
 	t := tensor.New(tensor.F32, 1, 3, H, W)
-	f := t.F32()
-	plane := H * W
+	cropInto(t.F32(), img, box, H, W, W)
+	return t
+}
+
+// cropInto writes the normalised crop of box (resized to H×W) into the
+// [3,H,Wstride] planes at dst; columns ≥ W are left untouched (the caller
+// zeroes them for padding). Pixels are sampled with a bilinear corner blend
+// (exact for parallelograms) and nearest-pixel lookup, reading *image.RGBA /
+// *image.NRGBA pixel buffers directly when possible.
+func cropInto(dst []float32, img image.Image, box Box, H, W, Wstride int) {
+	p := box.Pts
+	plane := H * Wstride
 	b := img.Bounds()
+	bw, bh := b.Dx(), b.Dy()
+	var pix []uint8
+	var stride int
+	switch im := img.(type) {
+	case *image.RGBA:
+		pix, stride = im.Pix, im.Stride
+	case *image.NRGBA:
+		pix, stride = im.Pix, im.Stride
+	}
 	sample := func(x, y float64) (float64, float64, float64) {
-		xi := clampI(int(x+0.5), 0, b.Dx()-1)
-		yi := clampI(int(y+0.5), 0, b.Dy()-1)
+		xi := clampI(int(x+0.5), 0, bw-1)
+		yi := clampI(int(y+0.5), 0, bh-1)
+		if pix != nil {
+			o := yi*stride + xi*4
+			return float64(pix[o]), float64(pix[o+1]), float64(pix[o+2])
+		}
 		r, g, bl, _ := img.At(b.Min.X+xi, b.Min.Y+yi).RGBA()
 		return float64(r >> 8), float64(g >> 8), float64(bl >> 8)
 	}
@@ -131,7 +194,6 @@ func cropToTensor(img image.Image, box Box, H int) *tensor.Tensor {
 		v := (float64(oy) + 0.5) / float64(H)
 		for ox := 0; ox < W; ox++ {
 			u := (float64(ox) + 0.5) / float64(W)
-			// bilinear blend of the four corners (exact for parallelograms)
 			topx := p[0].X*(1-u) + p[1].X*u
 			topy := p[0].Y*(1-u) + p[1].Y*u
 			botx := p[3].X*(1-u) + p[2].X*u
@@ -139,13 +201,12 @@ func cropToTensor(img image.Image, box Box, H int) *tensor.Tensor {
 			sx := topx*(1-v) + botx*v
 			sy := topy*(1-v) + boty*v
 			rr, gg, bb := sample(sx, sy)
-			o := oy*W + ox
-			f[o] = float32(rr/255*2 - 1)
-			f[plane+o] = float32(gg/255*2 - 1)
-			f[2*plane+o] = float32(bb/255*2 - 1)
+			o := oy*Wstride + ox
+			dst[o] = float32(rr/255*2 - 1)
+			dst[plane+o] = float32(gg/255*2 - 1)
+			dst[2*plane+o] = float32(bb/255*2 - 1)
 		}
 	}
-	return t
 }
 
 func dist(a, b Point) float64 { return math.Hypot(a.X-b.X, a.Y-b.Y) }

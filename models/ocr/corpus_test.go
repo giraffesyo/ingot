@@ -2,6 +2,7 @@ package ocr
 
 import (
 	"encoding/json"
+	"fmt"
 	"image"
 	_ "image/png"
 	"math"
@@ -95,6 +96,12 @@ func TestCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := NewPipeline(dir+"/det.onnx", dir+"/rec.onnx", dir+"/rec_dict.txt")
+	if v := os.Getenv("OCR_REC_BATCH"); v != "" {
+		fmt.Sscan(v, &p.RecBatch)
+	}
+	if v := os.Getenv("OCR_REC_PAD_RATIO"); v != "" {
+		fmt.Sscan(v, &p.RecPadRatio)
+	}
 	if err != nil {
 		t.Skip(err)
 	}
