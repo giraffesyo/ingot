@@ -176,7 +176,10 @@ func Run(n, grain int, t Task) {
 	cur.Store(j)
 	gen.Add(1)
 	if p := int(parked.Load()); p > 0 {
-		for i := 0; i < min(p, helpers); i++ {
+		// Waking a parked helper costs the caller ~5-10 µs on macOS — a few
+		// chunks of work. Wake only as many as can earn that back: grain is
+		// sized to a few µs per chunk, so at most one helper per ~4 chunks.
+		for i := 0; i < min(p, helpers, max(1, tasks/4)); i++ {
 			select {
 			case wake <- struct{}{}:
 			default:
