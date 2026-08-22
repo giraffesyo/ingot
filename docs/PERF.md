@@ -115,9 +115,20 @@ all pass on Zen4 with results **identical to arm64** (corpus F1 0.917, exact-mat
 0.919, CER 0.013 — same as NEON). The AVX2 GEMM + vek + depthwise path is proven
 on real hardware, not just Rosetta.
 
-Open on x86: (1) MT scaling + blocking tuning on a quiet machine; (2) an **AVX-512**
-kernel — this Zen4 has `avx512f`; a 16-wide / 32-register kernel could roughly
-double the micro-kernel throughput (needs its own runtime CPU guard).
+**AVX-512 (written, measured, NOT defaulted).** An AVX-512 6×16 kernel exists
+(`ukernel_amd64_avx512.s`, two accumulator banks for ILP), correctness-verified on
+Zen4. On this Zen4 it is **throughput-parity with AVX2** (~74 vs ~80 GFLOPS 1T, in
+the noise) — the expected result, because Zen4 runs 512-bit ops on *double-pumped
+256-bit* execution units, so there is no FLOP gain over AVX2; the win is only fewer
+instructions / more registers. AVX-512 beats AVX2 on CPUs with true 512-bit
+datapaths (Intel server), and can *downclock* on some Intel parts. So the
+evidence-based call: **AVX2 stays the amd64 default**; the AVX-512 kernel is kept
+correct and opt-in via `OCR_GEMM_KERNEL=avx512` (also `avx2`/`generic`), to be
+A/B'd on an Intel true-512 box before defaulting anywhere. `gemm.ActiveKernel`
+reports the selection.
+
+Open on x86: MT scaling + MC/KC/NC blocking tuning on a quiet machine (the box is
+otherwise busy); and an Intel-CPU A/B of the AVX-512 kernel.
 
 Method note: always sanity-check the box first — `uptime` (load avg) and a
 dependent-add loop for effective clock. On 2026-08-21 the first measurements were
