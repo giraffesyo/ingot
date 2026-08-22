@@ -89,9 +89,11 @@ are semantics-preserving and verified by the zoo conformance suite and
 `TestOptimizeAB` (optimised vs raw outputs on every model):
 
 - `Add(x,3)→Clip(0,6)→Mul(x,·)→Div(·,6)` ⇒ `ingot.HardSwish` (opset<14 exports)
+- `Mul(x, Sigmoid(x))` ⇒ `ingot.SiLU`; `x·0.5·(1+Erf(x/√2))` (any association)
+  ⇒ `ingot.Gelu`
 - Conv/ConvTranspose followed by scalar or per-channel Mul/Add/Sub, or by
   BatchNormalization ⇒ folded into weights/bias
-- Conv/ConvTranspose followed by Relu/HardSwish/HardSigmoid/Sigmoid/Clip/
+- Conv/ConvTranspose followed by Relu/HardSwish/SiLU/HardSigmoid/Sigmoid/Clip/
   LeakyRelu ⇒ activation in the conv epilogue (`ingot_act` attrs)
 - Conv(act) followed by scalar Mul/Add/Sub/Div ⇒ epilogue scale/shift
 
