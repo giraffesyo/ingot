@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/giraffesyo/ocr/ops"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/ops"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // Session is a compiled, runnable graph.

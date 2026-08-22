@@ -3,8 +3,8 @@ package ops
 import (
 	"math"
 
-	"github.com/giraffesyo/ocr/kernels/par"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // layerNormOp: normalise over dims [axis, rank) with per-element scale/bias.

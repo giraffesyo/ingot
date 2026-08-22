@@ -1,8 +1,8 @@
 package ops
 
 import (
-	"github.com/giraffesyo/ocr/kernels/par"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // convTransposeOp implements 2-D ConvTranspose (NCHW). Weight layout is

@@ -3,7 +3,7 @@ package ops
 import (
 	"fmt"
 
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // broadcastShape computes the NumPy-style broadcast of two shapes.

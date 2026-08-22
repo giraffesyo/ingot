@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"image"
 
-	"github.com/giraffesyo/ocr/graph"
-	"github.com/giraffesyo/ocr/onnx"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/graph"
+	"github.com/giraffesyo/ingot/onnx"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // Detector runs a DBNet-style text detector and returns text boxes.

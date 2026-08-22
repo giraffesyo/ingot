@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // mkOp builds an op via the registry at the given opset with attributes and

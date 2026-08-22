@@ -5,7 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 func randT(r *rand.Rand, shape ...int) *tensor.Tensor {

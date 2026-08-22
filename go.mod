@@ -1,4 +1,4 @@
-module github.com/giraffesyo/ocr
+module github.com/giraffesyo/ingot
 
 go 1.26.7
 

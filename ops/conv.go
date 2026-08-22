@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/giraffesyo/ocr/kernels/gemm"
-	"github.com/giraffesyo/ocr/kernels/par"
-	"github.com/giraffesyo/ocr/kernels/vek"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/kernels/gemm"
+	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // convOp implements 2-D Conv (NCHW) via im2col + GEMM, with fast paths for

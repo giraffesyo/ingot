@@ -1,6 +1,6 @@
 package ops
 
-import "github.com/giraffesyo/ocr/tensor"
+import "github.com/giraffesyo/ingot/tensor"
 
 // AttrKind enumerates attribute value kinds (mirrors ONNX AttributeType).
 type AttrKind uint8

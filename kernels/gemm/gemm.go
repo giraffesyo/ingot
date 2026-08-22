@@ -3,7 +3,7 @@ package gemm
 import (
 	"sync"
 
-	"github.com/giraffesyo/ocr/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/par"
 )
 
 // gemmCtx is the per-call state shared by all workers. It doubles as the

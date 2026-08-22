@@ -1,15 +1,21 @@
-# ocr — pure-Go SOTA OCR on a pure-Go inference runtime
+# ingot — a pure-Go ONNX inference runtime
+
+*ingot: **in**-**Go** **t**ensors — a general-purpose, cgo-free ONNX CPU
+inference engine with hand-written near-peak SIMD kernels. OCR is its flagship
+consumer, not its purpose.*
 
 ## Mission
 
-Build world-class (PaddleOCR-v5 / SVTRv2 / PARSeq-class accuracy) OCR in **pure Go**:
-no cgo, no external runtimes, static binaries, wasm-capable. Accuracy comes from
-Python-trained weights; this repo owns **inference**. The runtime is designed as a
-general ONNX CPU inference engine — OCR is the first model family and drives op
-priorities, but nothing in `tensor/`, `graph/`, `ops/`, `kernels/` may be OCR-specific.
+Build a **general-purpose ONNX CPU inference runtime in pure Go**: no cgo, no
+external runtimes, static binaries, wasm-capable. Accuracy comes from Python-trained
+weights; this repo owns **inference**. It runs any ONNX model that uses supported
+ops — CNNs, ViTs, BERT/transformer encoders, decoder LLM blocks — verified against
+ONNX Runtime. OCR (`models/ocr`, DBNet + PP-OCR) is the first and flagship consumer
+and drives op priorities, but nothing in `tensor/`, `graph/`, `ops/`, `kernels/`
+may be model-specific.
 
 **We are obsessed with performance.** Target: ≤2× ONNX Runtime CPU latency on the
-same hardware for DBNet++ and SVTR/PARSeq. Every kernel ships with a benchmark.
+same hardware. Every kernel ships with a benchmark.
 No regression merges.
 
 ## Non-negotiables

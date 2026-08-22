@@ -4,7 +4,7 @@ import (
 	"image"
 	"math"
 
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // DetNormMean/Std are the PP-OCR detection normalisation constants (ImageNet,
