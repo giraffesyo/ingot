@@ -41,7 +41,7 @@ Full 1T table after NEON kernel:
 
 After intra-block parallelism (MT unless noted; ranges = quiet box vs. ~2 cores busy with other apps):
 
-| shape | 1T | MT | MT (2 cores busy) | note |
+| shape | 1T | MT | MT (some cores busy) | note |
 |---|---|---|---|---|
 | sq512 | 118.7 | 494–616 | | |
 | sq1024 | — | 693–765 | | |
