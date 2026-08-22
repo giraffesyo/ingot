@@ -153,15 +153,6 @@ func cropWidth(box Box, H int) int {
 	return int(math.Max(4, math.Round(float64(H)*cw/math.Max(ch, 1))))
 }
 
-// cropToTensor perspective-crops the quad from img to a height-H strip and
-// returns a normalised [1,3,H,W] tensor (RGB, (x/255-0.5)/0.5).
-func cropToTensor(img image.Image, box Box, H int) *tensor.Tensor {
-	W := cropWidth(box, H)
-	t := tensor.New(tensor.F32, 1, 3, H, W)
-	cropInto(t.F32(), img, box, H, W, W)
-	return t
-}
-
 // cropInto writes the normalised crop of box (resized to H×W) into the
 // [3,H,Wstride] planes at dst; columns ≥ W are left untouched (the caller
 // zeroes them for padding). Pixels are sampled with a bilinear corner blend
