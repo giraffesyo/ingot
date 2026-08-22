@@ -105,6 +105,12 @@ var benchShapes = []struct {
 	// attention/linear (SVTR-ish): tokens × dim
 	{"lin_m256_n768_k192", 256, 768, 192},
 	{"attn_m256_n256_k64", 256, 256, 64},
+	// small-M / small-K shapes from PP-OCR det: pointwise convs at high
+	// resolution, the 3×3 head conv, and the k2s2 ConvTranspose-as-GEMM
+	{"pw_m32_n102400_k16", 32, 102400, 16},
+	{"pw_m48_n25600_k48", 48, 25600, 48},
+	{"conv3x3_m24_n25600_k864", 24, 25600, 864},
+	{"deconv_m4_n102400_k24", 4, 102400, 24},
 }
 
 func BenchmarkSgemm(b *testing.B) {
