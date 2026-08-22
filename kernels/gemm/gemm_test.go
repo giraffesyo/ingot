@@ -111,6 +111,10 @@ var benchShapes = []struct {
 	{"pw_m48_n25600_k48", 48, 25600, 48},
 	{"conv3x3_m24_n25600_k864", 24, 25600, 864},
 	{"deconv_m4_n102400_k24", 4, 102400, 24},
+	// PP-OCR rec (SVTR-LCNet) pointwise convs: large M/K, small N
+	{"rec_m240_n960_k240", 240, 960, 240},
+	{"rec_m480_n240_k480", 480, 240, 480},
+	{"rec_m480_n40_k480", 480, 40, 480},
 }
 
 func BenchmarkSgemm(b *testing.B) {

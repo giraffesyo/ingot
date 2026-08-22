@@ -13,8 +13,10 @@
 ## Phase 2 — ONNX → graph → run
 - [x] `onnx`: dependency-free protobuf decode → structs
 - [x] `graph`: IR, ONNX→IR builder, const folding (Constant nodes), executor with
-      pooled refcounted intermediates, per-op profiler. TODO: shape inference pass,
-      conv+BN fusion, static memory planner.
+      pooled refcounted intermediates, per-op profiler. Optimizer passes
+      (graph/optimize.go): HardSwish fusion, conv affine/BN folding, conv
+      epilogue (activation + post-affine). TODO: shape inference pass, static
+      memory planner.
 - [x] ops: ~80 ops incl. Conv, MatMul/Gemm, elementwise+broadcast, BatchNorm/
       LayerNorm/InstanceNorm, Softmax, Reshape/Transpose/Concat/Slice/Gather/Split/
       Tile, MaxPool/AvgPool/Global*, reductions, ArgMax/Min, Cast/Where/Expand/
@@ -24,11 +26,13 @@
       (≤1.2e-5 max abs err). Harness in graph/conformance_test.go, exporter in tools/export.
 
 ## Phase 3 — OCR
-- [ ] DBNet++ port (PaddleOCR / OpenOCR export), DB postproc (polygons, unclip)
-- [ ] text crop + perspective rectify
-- [ ] SVTR recognizer, CTC decode; then PARSeq (AR decode w/ KV cache)
-- [ ] eval harness: ICDAR15, TotalText, IIIT5K, SVT, Union14M
-- [ ] `cmd/ocr` end-to-end
+- [x] PP-OCRv4 detector (DBNet) on the runtime, DB postproc (min-area rect, unclip)
+- [x] text crop + perspective rectify (bilinear corner blend)
+- [x] PP-OCRv4 recognizer (SVTR-LCNet), greedy CTC decode; TODO: PARSeq (AR
+      decode w/ KV cache), beam/LM decode, angle classifier, rec batching
+- [x] eval harness: synthetic corpus (P/R/F1, CER) as regression gate;
+      TODO: ICDAR15, TotalText, IIIT5K, SVT, Union14M
+- [x] `cmd/ocr` end-to-end
 
 ## Phase 4 — performance
 - [x] NEON elementwise kernels (kernels/vek): relu/hardswish/hardsigmoid/clip/
@@ -37,11 +41,19 @@
 - [x] NEON depthwise kernel (stride-1 3×3/5×5, pad-then-convolve): hot dw convs
       480→150 µs, mnv3 6.5→4.5 ms 1T. TODO: stride-2 depthwise (still scalar),
       GEMV for classifier (batch-1 FC), implicit-GEMM for the regular conv.
-- [ ] fused attention, softmax/layernorm SIMD
+- [x] GEMM small-M fast path + work-sized task grains (pointwise-conv shapes 9×);
+      tiled im2col conv with in-cache epilogue; ConvTranspose as GEMM+col2im
+- [x] operator fusion: HardSwish, conv+BN/affine folding, conv epilogue
+      (bias+activation+post-affine) — det 330→102 nodes, rec 440→206
+- [x] amd64 AVX2 vek + gemm kernels (AVX-512 opt-in; loses on Zen4/Ice Lake)
+- [x] ≤2× ONNX Runtime CPU on PP-OCRv4 det + rec, documented (docs/PERF.md):
+      MT det 0.58–0.82× ORT, rec ~1.0×; 1T 1.2–1.8× (ORT uses SME on M4+)
+- [ ] vek.Exp → softmax/sigmoid/GELU SIMD; fused attention; layernorm SIMD
 - [ ] int8 GEMM (SDOT/UDOT on arm64, VNNI on amd64), bf16
-- [ ] operator fusion (conv/GEMM epilogue folds bias+activation), in-place, buffer reuse
-- [ ] amd64 AVX2/AVX-512 vek + gemm kernels via avo
-- [ ] ≤2× ONNX Runtime CPU on DBNet++ + SVTR, documented
+- [ ] weight pre-packing at load; in-place ops; static memory planner
+- [ ] SME GEMM micro-kernel (Apple M4+ / Armv9 SME2) — the only way to match
+      ORT single-threaded on that hardware
+- [ ] rec batching in the OCR pipeline
 
 ## Coverage (breadth)
 - [x] model zoo conformance harness (graph.TestZoo, auto-discovers manifests)
