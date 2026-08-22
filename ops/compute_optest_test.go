@@ -70,6 +70,9 @@ func TestConvVariants(t *testing.T) {
 		{1, 3, 12, 12, 5, 5, 5, 1, 2, 2, 1, 1, 2, 2}, // 5x5 stride2
 		{1, 4, 6, 6, 4, 1, 1, 1, 1, 1, 1, 1, 0, 0},   // pointwise
 		{1, 4, 8, 8, 4, 3, 3, 1, 1, 1, 1, 1, 0, 0},   // valid pad
+		{1, 6, 11, 13, 6, 5, 5, 6, 2, 2, 1, 1, 2, 2}, // depthwise 5x5 stride 2
+		{2, 8, 10, 17, 8, 3, 3, 8, 2, 2, 1, 1, 1, 1}, // depthwise 3x3 stride 2, odd width
+		{1, 6, 9, 9, 6, 3, 3, 6, 2, 2, 1, 1, 0, 0},   // depthwise 3x3 stride 2, no pad
 	}
 	for ci, c := range cfgs {
 		x := rnd(c.N * c.C * c.H * c.W)

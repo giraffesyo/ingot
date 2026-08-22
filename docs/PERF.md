@@ -505,3 +505,14 @@ models hide: mobilenet_v3_small's two batch-1 classifier GEMMs ran at 10 GFLOPS
 | tiny_conv | 90 µs | **37 µs** | — | |
 | tiny_transformer | 40 µs | **33 µs** | — | |
 | mobilenet_v3_small | 3.44 ms | **1.3 ms** | 1.12 | 1.15× (1T 4.4 vs 2.71) |
+
+### Stride-2 depthwise (NEON/AVX2)
+
+The stride-2 depthwise layers (mnv3 features.2/4/9; PP-OCR det Conv.3/7/11/21)
+were the last scalar conv path. Rather than a strided-load kernel, the padded
+plane's columns are de-interleaved once per channel into even/odd half planes;
+a stride-2 tap then reads the half planes at stride 1, so each output row is
+two passes of the existing stride-1 row kernel with KH×ceil(K/2) and
+KH×floor(K/2) taps (new generated shapes 3x2, 3x1, 5x3, 5x2; `vek.DwRowS1`).
+det Conv.3 (32 ch, 320²→160²) 432 → 245 µs MT; det_640 8.9 → 8.3 ms; mnv3 1T
+3.95 → 3.47 ms, MT ~1.26 ms.

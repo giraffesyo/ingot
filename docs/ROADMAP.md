@@ -39,8 +39,9 @@
       leakyrelu/add/sub/mul/div/scalar — 7-8× scalar; SE block-broadcast fast path.
       mnv3 5.05→3.93 ms MT.
 - [x] NEON depthwise kernel (stride-1 3×3/5×5, pad-then-convolve): hot dw convs
-      480→150 µs, mnv3 6.5→4.5 ms 1T. TODO: stride-2 depthwise (still scalar),
-      GEMV for classifier (batch-1 FC), implicit-GEMM for the regular conv.
+      480→150 µs, mnv3 6.5→4.5 ms 1T. Stride-2 depthwise via column
+      de-interleave + 3x2/3x1 (5x3/5x2) row kernels; GEMV for batch-1 FC.
+      TODO: implicit-GEMM for the regular conv.
 - [x] GEMM small-M fast path + work-sized task grains (pointwise-conv shapes 9×);
       tiled im2col conv with in-cache epilogue; ConvTranspose as GEMM+col2im
 - [x] operator fusion: HardSwish, conv+BN/affine folding, conv epilogue

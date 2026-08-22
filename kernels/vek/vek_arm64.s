@@ -963,3 +963,201 @@ loop:
 done:
 	RET
 
+// func dwconv3x2s1_asm(dst, src []float32, wpacked []float32, ncols, W int)
+TEXT ·dwconv3x2s1_asm(SB), NOSPLIT, $0-88
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wpacked_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $2, R4, R4 // row stride in bytes
+	VLD1 (R2), [V25.S4, V26.S4]
+loop:
+	CMP $4, R3
+	BLT done
+	VLD1 (R0), [V0.S4] // acc = dst[c..c+4]
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991020 // fmla v0 += v1 * v25.s[0] (w0)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FB91020 // fmla v0 += v1 * v25.s[1] (w1)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991820 // fmla v0 += v1 * v25.s[2] (w2)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FB91820 // fmla v0 += v1 * v25.s[3] (w3)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9A1020 // fmla v0 += v1 * v26.s[0] (w4)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBA1020 // fmla v0 += v1 * v26.s[1] (w5)
+	VST1.P [V0.S4], 16(R0)
+	ADD $16, R1, R1
+	SUB $4, R3, R3
+	B loop
+done:
+	RET
+
+// func dwconv3x1s1_asm(dst, src []float32, wpacked []float32, ncols, W int)
+TEXT ·dwconv3x1s1_asm(SB), NOSPLIT, $0-88
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wpacked_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $2, R4, R4 // row stride in bytes
+	VLD1 (R2), [V25.S4]
+loop:
+	CMP $4, R3
+	BLT done
+	VLD1 (R0), [V0.S4] // acc = dst[c..c+4]
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991020 // fmla v0 += v1 * v25.s[0] (w0)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FB91020 // fmla v0 += v1 * v25.s[1] (w1)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991820 // fmla v0 += v1 * v25.s[2] (w2)
+	VST1.P [V0.S4], 16(R0)
+	ADD $16, R1, R1
+	SUB $4, R3, R3
+	B loop
+done:
+	RET
+
+// func dwconv5x3s1_asm(dst, src []float32, wpacked []float32, ncols, W int)
+TEXT ·dwconv5x3s1_asm(SB), NOSPLIT, $0-88
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wpacked_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $2, R4, R4 // row stride in bytes
+	VLD1 (R2), [V25.S4, V26.S4, V27.S4, V28.S4]
+loop:
+	CMP $4, R3
+	BLT done
+	VLD1 (R0), [V0.S4] // acc = dst[c..c+4]
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991020 // fmla v0 += v1 * v25.s[0] (w0)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FB91020 // fmla v0 += v1 * v25.s[1] (w1)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991820 // fmla v0 += v1 * v25.s[2] (w2)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FB91820 // fmla v0 += v1 * v25.s[3] (w3)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9A1020 // fmla v0 += v1 * v26.s[0] (w4)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBA1020 // fmla v0 += v1 * v26.s[1] (w5)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9A1820 // fmla v0 += v1 * v26.s[2] (w6)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBA1820 // fmla v0 += v1 * v26.s[3] (w7)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9B1020 // fmla v0 += v1 * v27.s[0] (w8)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBB1020 // fmla v0 += v1 * v27.s[1] (w9)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9B1820 // fmla v0 += v1 * v27.s[2] (w10)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBB1820 // fmla v0 += v1 * v27.s[3] (w11)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9C1020 // fmla v0 += v1 * v28.s[0] (w12)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBC1020 // fmla v0 += v1 * v28.s[1] (w13)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9C1820 // fmla v0 += v1 * v28.s[2] (w14)
+	VST1.P [V0.S4], 16(R0)
+	ADD $16, R1, R1
+	SUB $4, R3, R3
+	B loop
+done:
+	RET
+
+// func dwconv5x2s1_asm(dst, src []float32, wpacked []float32, ncols, W int)
+TEXT ·dwconv5x2s1_asm(SB), NOSPLIT, $0-88
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wpacked_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $2, R4, R4 // row stride in bytes
+	VLD1 (R2), [V25.S4, V26.S4, V27.S4]
+loop:
+	CMP $4, R3
+	BLT done
+	VLD1 (R0), [V0.S4] // acc = dst[c..c+4]
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991020 // fmla v0 += v1 * v25.s[0] (w0)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FB91020 // fmla v0 += v1 * v25.s[1] (w1)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F991820 // fmla v0 += v1 * v25.s[2] (w2)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FB91820 // fmla v0 += v1 * v25.s[3] (w3)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9A1020 // fmla v0 += v1 * v26.s[0] (w4)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBA1020 // fmla v0 += v1 * v26.s[1] (w5)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9A1820 // fmla v0 += v1 * v26.s[2] (w6)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBA1820 // fmla v0 += v1 * v26.s[3] (w7)
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4F9B1020 // fmla v0 += v1 * v27.s[0] (w8)
+	ADD $4, R6, R6
+	VLD1 (R6), [V1.S4]
+	WORD $0x4FBB1020 // fmla v0 += v1 * v27.s[1] (w9)
+	VST1.P [V0.S4], 16(R0)
+	ADD $16, R1, R1
+	SUB $4, R3, R3
+	B loop
+done:
+	RET
+

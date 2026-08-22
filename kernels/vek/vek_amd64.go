@@ -56,6 +56,18 @@ func dwconv3x3s1_asm(dst, src, wpacked []float32, ncols, W int)
 //go:noescape
 func dwconv5x5s1_asm(dst, src, wpacked []float32, ncols, W int)
 
+//go:noescape
+func dwconv3x2s1_asm(dst, src, wpacked []float32, ncols, W int)
+
+//go:noescape
+func dwconv3x1s1_asm(dst, src, wpacked []float32, ncols, W int)
+
+//go:noescape
+func dwconv5x3s1_asm(dst, src, wpacked []float32, ncols, W int)
+
+//go:noescape
+func dwconv5x2s1_asm(dst, src, wpacked []float32, ncols, W int)
+
 func vecLen(dst, a, b []float32) int {
 	n := len(dst)
 	if len(a) < n {
@@ -211,12 +223,12 @@ func Axpy(dst, src []float32, a float32) {
 func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) {
 	m := ncols &^ 7
 	dwconv3x3s1_asm(dst, src, wpacked, m, W)
-	dwTail(dst, src, wpacked, m, ncols, W, 3)
+	dwTail(dst, src, wpacked, m, ncols, W, 3, 3)
 }
 func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) {
 	m := ncols &^ 7
 	dwconv5x5s1_asm(dst, src, wpacked, m, W)
-	dwTail(dst, src, wpacked, m, ncols, W, 5)
+	dwTail(dst, src, wpacked, m, ncols, W, 5, 5)
 }
 
 func clamp01(x float32) float32 {
@@ -248,4 +260,30 @@ func Sigmoid(dst, src []float32) {
 	for i := m; i < n; i++ {
 		dst[i] = 1 / (1 + expScalar(-src[i]))
 	}
+}
+
+// DwRowS1 adds a stride-1 KHxKW depthwise conv into dst for ncols output
+// columns (all taps in-bounds; dst pre-filled). wpacked holds KH*KW weights
+// row-major, padded to a multiple of the lane count. Supported shapes have a
+// SIMD kernel (3x3, 5x5 and the stride-2 sub-kernels 3x2, 3x1, 5x3, 5x2);
+// anything else runs scalar.
+func DwRowS1(dst, src, wpacked []float32, ncols, W, KH, KW int) {
+	m := ncols &^ 7
+	switch {
+	case KH == 3 && KW == 3:
+		dwconv3x3s1_asm(dst, src, wpacked, m, W)
+	case KH == 5 && KW == 5:
+		dwconv5x5s1_asm(dst, src, wpacked, m, W)
+	case KH == 3 && KW == 2:
+		dwconv3x2s1_asm(dst, src, wpacked, m, W)
+	case KH == 3 && KW == 1:
+		dwconv3x1s1_asm(dst, src, wpacked, m, W)
+	case KH == 5 && KW == 3:
+		dwconv5x3s1_asm(dst, src, wpacked, m, W)
+	case KH == 5 && KW == 2:
+		dwconv5x2s1_asm(dst, src, wpacked, m, W)
+	default:
+		m = 0
+	}
+	dwTail(dst, src, wpacked, m, ncols, W, KH, KW)
 }
