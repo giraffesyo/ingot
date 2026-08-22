@@ -12,7 +12,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // Ctx is per-session execution state passed to every op.

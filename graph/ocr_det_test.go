@@ -7,9 +7,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/giraffesyo/ocr/graph"
-	"github.com/giraffesyo/ocr/onnx"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/graph"
+	"github.com/giraffesyo/ingot/onnx"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 func readF32(t *testing.T, path string) []float32 {

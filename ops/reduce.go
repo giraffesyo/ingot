@@ -3,7 +3,7 @@ package ops
 import (
 	"math"
 
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 type reduceOp struct {

@@ -16,7 +16,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/giraffesyo/ocr/models/ocr"
+	"github.com/giraffesyo/ingot/models/ocr"
 )
 
 func main() {

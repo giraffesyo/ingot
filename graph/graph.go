@@ -9,8 +9,8 @@ package graph
 import (
 	"fmt"
 
-	"github.com/giraffesyo/ocr/ops"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/ops"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // Value is a named tensor edge.

@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/giraffesyo/ocr/graph"
-	"github.com/giraffesyo/ocr/onnx"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/graph"
+	"github.com/giraffesyo/ingot/onnx"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // TestSessionConcurrentRun runs one compiled Session from many goroutines at

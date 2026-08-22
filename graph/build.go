@@ -3,9 +3,9 @@ package graph
 import (
 	"fmt"
 
-	"github.com/giraffesyo/ocr/onnx"
-	"github.com/giraffesyo/ocr/ops"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/onnx"
+	"github.com/giraffesyo/ingot/ops"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // FromONNX converts a decoded ONNX model into a Graph. Initializers become

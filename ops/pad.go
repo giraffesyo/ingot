@@ -1,7 +1,7 @@
 package ops
 
 import (
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // padOp implements Pad in constant, reflect, and edge modes over any rank.

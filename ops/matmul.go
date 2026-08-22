@@ -1,8 +1,8 @@
 package ops
 
 import (
-	"github.com/giraffesyo/ocr/kernels/gemm"
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/kernels/gemm"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 // gemmOp: Y = alpha*op(A)·op(B) + beta*C, A [M×K], B [K×N], C broadcastable to [M×N].

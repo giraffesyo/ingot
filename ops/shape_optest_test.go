@@ -3,7 +3,7 @@ package ops
 import (
 	"testing"
 
-	"github.com/giraffesyo/ocr/tensor"
+	"github.com/giraffesyo/ingot/tensor"
 )
 
 func TestSliceNegStep(t *testing.T) {
