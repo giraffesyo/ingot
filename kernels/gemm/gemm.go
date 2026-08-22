@@ -49,19 +49,47 @@ const macroTaskMACs = 192 * 1024
 // smallMMaxA bounds the packed-A footprint (floats) of the small-M path.
 const smallMMaxA = 1 << 18
 
-var ctxPool = sync.Pool{New: func() any {
-	g := &gemmCtx{
-		a: make([]float32, (MC+MR)*KC),
-		b: make([]float32, KC*(NC+NR)),
+// ctxPool is a free list of gemmCtx. It is a plain stack (not sync.Pool) so
+// the contexts — several MB each — survive GC and steady-state calls allocate
+// nothing; its size is bounded by the peak number of concurrent GEMMs.
+var ctxPool = struct {
+	mu   sync.Mutex
+	free []*gemmCtx
+}{}
+
+func getCtx() *gemmCtx {
+	ctxPool.mu.Lock()
+	n := len(ctxPool.free)
+	if n > 0 {
+		g := ctxPool.free[n-1]
+		ctxPool.free = ctxPool.free[:n-1]
+		ctxPool.mu.Unlock()
+		return g
 	}
+	ctxPool.mu.Unlock()
+	g := &gemmCtx{}
 	g.tiles = make([][]float32, par.Workers())
 	g.bpans = make([][]float32, par.Workers())
 	for i := range g.tiles {
 		g.tiles[i] = make([]float32, MR*NR)
-		g.bpans[i] = make([]float32, KC*NR)
 	}
 	return g
-}}
+}
+
+func putCtx(g *gemmCtx) {
+	ctxPool.mu.Lock()
+	ctxPool.free = append(ctxPool.free, g)
+	ctxPool.mu.Unlock()
+}
+
+// ensureBlocked allocates the packed A block / B panel buffers used by the
+// general (blocked) path on first use of this context.
+func (g *gemmCtx) ensureBlocked() {
+	if g.a == nil {
+		g.a = make([]float32, (MC+MR)*KC)
+		g.b = make([]float32, KC*(NC+NR))
+	}
+}
 
 // Sgemm computes C = alpha*A·B + beta*C for row-major A[m×k], B[k×n], C[m×n]
 // with leading dimensions lda, ldb, ldc.
@@ -106,8 +134,8 @@ func sgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 	}
 	firstOverwrite := beta == 0
 
-	g := ctxPool.Get().(*gemmCtx)
-	defer ctxPool.Put(g)
+	g := getCtx()
+	defer putCtx(g)
 	g.alpha, g.lda, g.ldb, g.ldc = alpha, lda, ldb, ldc
 	g.transA, g.transB = transA, transB
 
@@ -120,6 +148,7 @@ func sgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 		g.smallM(m, n, k, a, b, c, firstOverwrite, workers)
 		return
 	}
+	g.ensureBlocked()
 
 	for j0 := 0; j0 < n; j0 += NC {
 		g.nc = min(NC, n-j0)
@@ -253,6 +282,10 @@ func (g *gemmCtx) smallMTask(t, w int) {
 	jp := t
 	nr := min(NR, g.nc-jp*NR)
 	bp := g.bpans[w]
+	if bp == nil {
+		bp = make([]float32, KC*NR)
+		g.bpans[w] = bp
+	}
 	ldc := g.ldc
 	nkb := (g.kc + KC - 1) / KC
 	for kb := 0; kb < nkb; kb++ {

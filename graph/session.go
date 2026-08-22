@@ -234,8 +234,11 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 				continue
 			}
 			if isOutput[id] {
-				// Detach from pool so the caller owns it.
+				// Detach from pool so the caller owns it; the pooled original
+				// goes straight back.
+				orig := t
 				t = t.Clone()
+				s.pool.Put(orig)
 			}
 			vals[id] = t
 			pooled[id] = !isOutput[id]
