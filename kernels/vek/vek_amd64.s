@@ -32,6 +32,96 @@ DATA c_p4<>+0(SB)/4, $0.16666665459
 GLOBL c_p4<>(SB), RODATA|NOPTR, $4
 DATA c_p5<>+0(SB)/4, $0.50000001201
 GLOBL c_p5<>(SB), RODATA|NOPTR, $4
+DATA c_erfp8<>+0(SB)/4, $0.3275911
+DATA c_erfp8<>+4(SB)/4, $0.3275911
+DATA c_erfp8<>+8(SB)/4, $0.3275911
+DATA c_erfp8<>+12(SB)/4, $0.3275911
+DATA c_erfp8<>+16(SB)/4, $0.3275911
+DATA c_erfp8<>+20(SB)/4, $0.3275911
+DATA c_erfp8<>+24(SB)/4, $0.3275911
+DATA c_erfp8<>+28(SB)/4, $0.3275911
+GLOBL c_erfp8<>(SB), RODATA|NOPTR, $32
+DATA c_erfa1_8<>+0(SB)/4, $0.254829592
+DATA c_erfa1_8<>+4(SB)/4, $0.254829592
+DATA c_erfa1_8<>+8(SB)/4, $0.254829592
+DATA c_erfa1_8<>+12(SB)/4, $0.254829592
+DATA c_erfa1_8<>+16(SB)/4, $0.254829592
+DATA c_erfa1_8<>+20(SB)/4, $0.254829592
+DATA c_erfa1_8<>+24(SB)/4, $0.254829592
+DATA c_erfa1_8<>+28(SB)/4, $0.254829592
+GLOBL c_erfa1_8<>(SB), RODATA|NOPTR, $32
+DATA c_erfa2_8<>+0(SB)/4, $-0.284496736
+DATA c_erfa2_8<>+4(SB)/4, $-0.284496736
+DATA c_erfa2_8<>+8(SB)/4, $-0.284496736
+DATA c_erfa2_8<>+12(SB)/4, $-0.284496736
+DATA c_erfa2_8<>+16(SB)/4, $-0.284496736
+DATA c_erfa2_8<>+20(SB)/4, $-0.284496736
+DATA c_erfa2_8<>+24(SB)/4, $-0.284496736
+DATA c_erfa2_8<>+28(SB)/4, $-0.284496736
+GLOBL c_erfa2_8<>(SB), RODATA|NOPTR, $32
+DATA c_erfa3_8<>+0(SB)/4, $1.421413741
+DATA c_erfa3_8<>+4(SB)/4, $1.421413741
+DATA c_erfa3_8<>+8(SB)/4, $1.421413741
+DATA c_erfa3_8<>+12(SB)/4, $1.421413741
+DATA c_erfa3_8<>+16(SB)/4, $1.421413741
+DATA c_erfa3_8<>+20(SB)/4, $1.421413741
+DATA c_erfa3_8<>+24(SB)/4, $1.421413741
+DATA c_erfa3_8<>+28(SB)/4, $1.421413741
+GLOBL c_erfa3_8<>(SB), RODATA|NOPTR, $32
+DATA c_erfa4_8<>+0(SB)/4, $-1.453152027
+DATA c_erfa4_8<>+4(SB)/4, $-1.453152027
+DATA c_erfa4_8<>+8(SB)/4, $-1.453152027
+DATA c_erfa4_8<>+12(SB)/4, $-1.453152027
+DATA c_erfa4_8<>+16(SB)/4, $-1.453152027
+DATA c_erfa4_8<>+20(SB)/4, $-1.453152027
+DATA c_erfa4_8<>+24(SB)/4, $-1.453152027
+DATA c_erfa4_8<>+28(SB)/4, $-1.453152027
+GLOBL c_erfa4_8<>(SB), RODATA|NOPTR, $32
+DATA c_erfa5_8<>+0(SB)/4, $1.061405429
+DATA c_erfa5_8<>+4(SB)/4, $1.061405429
+DATA c_erfa5_8<>+8(SB)/4, $1.061405429
+DATA c_erfa5_8<>+12(SB)/4, $1.061405429
+DATA c_erfa5_8<>+16(SB)/4, $1.061405429
+DATA c_erfa5_8<>+20(SB)/4, $1.061405429
+DATA c_erfa5_8<>+24(SB)/4, $1.061405429
+DATA c_erfa5_8<>+28(SB)/4, $1.061405429
+GLOBL c_erfa5_8<>(SB), RODATA|NOPTR, $32
+DATA c_abs8<>+0(SB)/4, $0x7fffffff
+DATA c_abs8<>+4(SB)/4, $0x7fffffff
+DATA c_abs8<>+8(SB)/4, $0x7fffffff
+DATA c_abs8<>+12(SB)/4, $0x7fffffff
+DATA c_abs8<>+16(SB)/4, $0x7fffffff
+DATA c_abs8<>+20(SB)/4, $0x7fffffff
+DATA c_abs8<>+24(SB)/4, $0x7fffffff
+DATA c_abs8<>+28(SB)/4, $0x7fffffff
+GLOBL c_abs8<>(SB), RODATA|NOPTR, $32
+DATA c_sign8<>+0(SB)/4, $0x80000000
+DATA c_sign8<>+4(SB)/4, $0x80000000
+DATA c_sign8<>+8(SB)/4, $0x80000000
+DATA c_sign8<>+12(SB)/4, $0x80000000
+DATA c_sign8<>+16(SB)/4, $0x80000000
+DATA c_sign8<>+20(SB)/4, $0x80000000
+DATA c_sign8<>+24(SB)/4, $0x80000000
+DATA c_sign8<>+28(SB)/4, $0x80000000
+GLOBL c_sign8<>(SB), RODATA|NOPTR, $32
+DATA c_invsqrt2_8<>+0(SB)/4, $0.7071067811865476
+DATA c_invsqrt2_8<>+4(SB)/4, $0.7071067811865476
+DATA c_invsqrt2_8<>+8(SB)/4, $0.7071067811865476
+DATA c_invsqrt2_8<>+12(SB)/4, $0.7071067811865476
+DATA c_invsqrt2_8<>+16(SB)/4, $0.7071067811865476
+DATA c_invsqrt2_8<>+20(SB)/4, $0.7071067811865476
+DATA c_invsqrt2_8<>+24(SB)/4, $0.7071067811865476
+DATA c_invsqrt2_8<>+28(SB)/4, $0.7071067811865476
+GLOBL c_invsqrt2_8<>(SB), RODATA|NOPTR, $32
+DATA c_half8<>+0(SB)/4, $0.5
+DATA c_half8<>+4(SB)/4, $0.5
+DATA c_half8<>+8(SB)/4, $0.5
+DATA c_half8<>+12(SB)/4, $0.5
+DATA c_half8<>+16(SB)/4, $0.5
+DATA c_half8<>+20(SB)/4, $0.5
+DATA c_half8<>+24(SB)/4, $0.5
+DATA c_half8<>+28(SB)/4, $0.5
+GLOBL c_half8<>(SB), RODATA|NOPTR, $32
 
 // func add_asm(dst, a, b []float32, n int)
 TEXT ·add_asm(SB), NOSPLIT, $0-80
@@ -888,6 +978,153 @@ done:
 	VMOVUPS Y1, 32(DI)
 	VMOVUPS Y2, 64(DI)
 	VMOVUPS Y3, 96(DI)
+	VZEROUPPER
+	RET
+
+// func erf_asm(dst, src []float32, n int, ...)
+TEXT ·erf_asm(SB), NOSPLIT, $0-56
+	MOVQ dst_base+0(FP), DI
+	MOVQ src_base+24(FP), SI
+	MOVQ n+48(FP), CX
+	VBROADCASTSS c_explo<>(SB), Y4
+	VBROADCASTSS c_exphi<>(SB), Y5
+	VBROADCASTSS c_log2e<>(SB), Y6
+	VBROADCASTSS c_ln2hi<>(SB), Y7
+	VBROADCASTSS c_ln2lo<>(SB), Y8
+	VBROADCASTSS c_p0<>(SB), Y9
+	VBROADCASTSS c_p1<>(SB), Y10
+	VBROADCASTSS c_p2<>(SB), Y11
+	VBROADCASTSS c_p3<>(SB), Y12
+	VBROADCASTSS c_p4<>(SB), Y13
+	VBROADCASTSS c_p5<>(SB), Y14
+	VBROADCASTSS c_one<>(SB), Y15
+loop:
+	CMPQ CX, $8
+	JL done
+	VMOVUPS (SI), Y0
+	VANDPS c_abs8<>(SB), Y0, Y1     // |x|
+	VMULPS Y1, Y1, Y0              // x^2
+	VXORPS c_sign8<>(SB), Y0, Y0    // -x^2
+	VMAXPS Y4, Y0, Y0          // clamp lo
+	VMINPS Y5, Y0, Y0          // clamp hi
+	VMULPS Y6, Y0, Y1          // x*log2e
+	VROUNDPS $0, Y1, Y1        // n = round-to-nearest
+	VFNMADD231PS Y7, Y1, Y0    // r = x - n*ln2hi
+	VFNMADD231PS Y8, Y1, Y0    // r -= n*ln2lo
+	VMOVUPS Y10, Y2            // p1
+	VFMADD231PS Y9, Y0, Y2     // p0*r + p1
+	VMOVUPS Y11, Y3            // p2
+	VFMADD231PS Y2, Y0, Y3
+	VMOVUPS Y12, Y2            // p3
+	VFMADD231PS Y3, Y0, Y2
+	VMOVUPS Y13, Y3            // p4
+	VFMADD231PS Y2, Y0, Y3
+	VMOVUPS Y14, Y2            // p5
+	VFMADD231PS Y3, Y0, Y2     // P(r)
+	VMULPS Y0, Y0, Y3          // r^2
+	VADDPS Y15, Y0, Y0         // r+1
+	VFMADD231PS Y3, Y2, Y0     // += P*r^2
+	VCVTPS2DQ Y1, Y1           // n → int
+	VPSLLD $23, Y1, Y1
+	VPADDD Y1, Y0, Y0          // * 2^n
+	VMOVUPS (SI), Y1
+	VANDPS c_abs8<>(SB), Y1, Y1     // |x| again
+	VMOVUPS Y15, Y2                // 1
+	VFMADD231PS c_erfp8<>(SB), Y1, Y2 // 1 + p|x|
+	VDIVPS Y2, Y15, Y2             // t
+	VMOVUPS c_erfa5_8<>(SB), Y3
+	VFMADD213PS c_erfa4_8<>(SB), Y2, Y3 // a5 t + a4
+	VFMADD213PS c_erfa3_8<>(SB), Y2, Y3
+	VFMADD213PS c_erfa2_8<>(SB), Y2, Y3
+	VFMADD213PS c_erfa1_8<>(SB), Y2, Y3
+	VMULPS Y2, Y3, Y3              // t*poly
+	VMULPS Y3, Y0, Y0              // *e^{-x^2}
+	VSUBPS Y0, Y15, Y0             // 1 - ...
+	VMOVUPS (SI), Y1
+	VANDPS c_sign8<>(SB), Y1, Y1    // sign(x)
+	VORPS Y1, Y0, Y0
+	VMOVUPS Y0, (DI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP loop
+done:
+	VZEROUPPER
+	RET
+
+// func gelu_asm(dst, src []float32, n int, ...)
+TEXT ·gelu_asm(SB), NOSPLIT, $0-56
+	MOVQ dst_base+0(FP), DI
+	MOVQ src_base+24(FP), SI
+	MOVQ n+48(FP), CX
+	VBROADCASTSS c_explo<>(SB), Y4
+	VBROADCASTSS c_exphi<>(SB), Y5
+	VBROADCASTSS c_log2e<>(SB), Y6
+	VBROADCASTSS c_ln2hi<>(SB), Y7
+	VBROADCASTSS c_ln2lo<>(SB), Y8
+	VBROADCASTSS c_p0<>(SB), Y9
+	VBROADCASTSS c_p1<>(SB), Y10
+	VBROADCASTSS c_p2<>(SB), Y11
+	VBROADCASTSS c_p3<>(SB), Y12
+	VBROADCASTSS c_p4<>(SB), Y13
+	VBROADCASTSS c_p5<>(SB), Y14
+	VBROADCASTSS c_one<>(SB), Y15
+loop:
+	CMPQ CX, $8
+	JL done
+	VMOVUPS (SI), Y0
+	VMULPS c_invsqrt2_8<>(SB), Y0, Y0 // x/sqrt2
+	VANDPS c_abs8<>(SB), Y0, Y1     // |x|
+	VMULPS Y1, Y1, Y0              // x^2
+	VXORPS c_sign8<>(SB), Y0, Y0    // -x^2
+	VMAXPS Y4, Y0, Y0          // clamp lo
+	VMINPS Y5, Y0, Y0          // clamp hi
+	VMULPS Y6, Y0, Y1          // x*log2e
+	VROUNDPS $0, Y1, Y1        // n = round-to-nearest
+	VFNMADD231PS Y7, Y1, Y0    // r = x - n*ln2hi
+	VFNMADD231PS Y8, Y1, Y0    // r -= n*ln2lo
+	VMOVUPS Y10, Y2            // p1
+	VFMADD231PS Y9, Y0, Y2     // p0*r + p1
+	VMOVUPS Y11, Y3            // p2
+	VFMADD231PS Y2, Y0, Y3
+	VMOVUPS Y12, Y2            // p3
+	VFMADD231PS Y3, Y0, Y2
+	VMOVUPS Y13, Y3            // p4
+	VFMADD231PS Y2, Y0, Y3
+	VMOVUPS Y14, Y2            // p5
+	VFMADD231PS Y3, Y0, Y2     // P(r)
+	VMULPS Y0, Y0, Y3          // r^2
+	VADDPS Y15, Y0, Y0         // r+1
+	VFMADD231PS Y3, Y2, Y0     // += P*r^2
+	VCVTPS2DQ Y1, Y1           // n → int
+	VPSLLD $23, Y1, Y1
+	VPADDD Y1, Y0, Y0          // * 2^n
+	VMOVUPS (SI), Y1
+	VMULPS c_invsqrt2_8<>(SB), Y1, Y1
+	VANDPS c_abs8<>(SB), Y1, Y1     // |x| again
+	VMOVUPS Y15, Y2                // 1
+	VFMADD231PS c_erfp8<>(SB), Y1, Y2 // 1 + p|x|
+	VDIVPS Y2, Y15, Y2             // t
+	VMOVUPS c_erfa5_8<>(SB), Y3
+	VFMADD213PS c_erfa4_8<>(SB), Y2, Y3 // a5 t + a4
+	VFMADD213PS c_erfa3_8<>(SB), Y2, Y3
+	VFMADD213PS c_erfa2_8<>(SB), Y2, Y3
+	VFMADD213PS c_erfa1_8<>(SB), Y2, Y3
+	VMULPS Y2, Y3, Y3              // t*poly
+	VMULPS Y3, Y0, Y0              // *e^{-x^2}
+	VSUBPS Y0, Y15, Y0             // 1 - ...
+	VMOVUPS (SI), Y1
+	VANDPS c_sign8<>(SB), Y1, Y1    // sign(x)
+	VORPS Y1, Y0, Y0
+	VADDPS Y15, Y0, Y0             // 1+erf
+	VMULPS (SI), Y0, Y0            // *x
+	VMULPS c_half8<>(SB), Y0, Y0    // *0.5
+	VMOVUPS Y0, (DI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP loop
+done:
 	VZEROUPPER
 	RET
 

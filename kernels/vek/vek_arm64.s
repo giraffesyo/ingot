@@ -1018,6 +1018,295 @@ done:
 	VST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)
 	RET
 
+// func erf_asm(dst, src []float32, n int, ...)
+TEXT ·erf_asm(SB), NOSPLIT, $0-56
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD n+48(FP), R3
+	MOVD $-1028740017, R9 // lo = -87.33654
+	WORD $0x4E040D28 // dup v8.4s, w9
+	MOVD $1118879909, R9 // hi = 88.37626
+	WORD $0x4E040D29 // dup v9.4s, w9
+	MOVD $1069066811, R9 // log2e = 1.4426950408889634
+	WORD $0x4E040D2A // dup v10.4s, w9
+	MOVD $-1087275008, R9 // -ln2hi = -0.693359375
+	WORD $0x4E040D2B // dup v11.4s, w9
+	MOVD $962494595, R9 // -ln2lo = 0.00021219444
+	WORD $0x4E040D2C // dup v12.4s, w9
+	MOVD $961571175, R9 // p0 = 0.000198756915
+	WORD $0x4E040D2D // dup v13.4s, w9
+	MOVD $985088974, R9 // p1 = 0.0013981999507
+	WORD $0x4E040D2E // dup v14.4s, w9
+	MOVD $1007192328, R9 // p2 = 0.0083334519073
+	WORD $0x4E040D2F // dup v15.4s, w9
+	MOVD $1026206145, R9 // p3 = 0.041665795894
+	WORD $0x4E040D38 // dup v24.4s, w9
+	MOVD $1042983594, R9 // p4 = 0.16666665459
+	WORD $0x4E040D39 // dup v25.4s, w9
+	MOVD $1056964608, R9 // p5 = 0.50000001201
+	WORD $0x4E040D3A // dup v26.4s, w9
+	MOVD $1065353216, R9 // 1.0 = 1
+	WORD $0x4E040D3B // dup v27.4s, w9
+	MOVD $1051179525, R9 // p = 0.3275911
+	WORD $0x4E040D22 // dup v2.4s, w9
+	MOVD $1048738054, R9 // a1 = 0.254829592
+	WORD $0x4E040D23 // dup v3.4s, w9
+	MOVD $-1097750130, R9 // a2 = -0.284496736
+	WORD $0x4E040D26 // dup v6.4s, w9
+	MOVD $1068888291, R9 // a3 = 1.421413741
+	WORD $0x4E040D27 // dup v7.4s, w9
+	MOVD $-1078329117, R9 // a4 = -1.453152027
+	WORD $0x4E040D36 // dup v22.4s, w9
+	MOVD $1065868322, R9 // a5 = 1.061405429
+	WORD $0x4E040D37 // dup v23.4s, w9
+	MOVD $-2147483648, R9 // sign mask (0x80000000)
+	WORD $0x4E040D3E // dup v30.4s, w9
+loopN:
+	CMP $8, R3
+	BLT loop4
+	VLD1.P 32(R1), [V0.S4, V1.S4]
+	WORD $0x4EA0F804 // w = |x|
+	WORD $0x6E24DC9C // u = x^2
+	WORD $0x6EA0FB9C // u = -x^2
+	WORD $0x4E28F79C // fmax v28,lo
+	WORD $0x4EA9F79C // fmin v28,hi
+	WORD $0x6E2ADF92 // v18 = x*log2e
+	WORD $0x4E218A52 // frintn v18 (n)
+	WORD $0x4E2BCE5C // r = x - n*ln2hi
+	WORD $0x4E2CCE5C // r -= n*ln2lo
+	WORD $0x4EAE1DD0 // v16 = p1
+	WORD $0x4E3CCDB0 // s += p0*r
+	WORD $0x4EAF1DF4 // v20 = p2
+	WORD $0x4E3CCE14 // t += s*r
+	WORD $0x4EB81F10 // v16 = p3
+	WORD $0x4E3CCE90 // s += t*r
+	WORD $0x4EB91F34 // v20 = p4
+	WORD $0x4E3CCE14 // t += s*r
+	WORD $0x4EBA1F50 // v16 = p5
+	WORD $0x4E3CCE90 // s += t*r  (P(r))
+	WORD $0x6E3CDF94 // t = r*r
+	WORD $0x4E3BD79C // v = r+1
+	WORD $0x4E34CE1C // v += P*r^2
+	WORD $0x4E21AA52 // n → int
+	WORD $0x4F375652 // n << 23
+	WORD $0x4EB2879C // v = v * 2^n (int add)
+	WORD $0x4EBB1F74 // t = 1
+	WORD $0x4E22CC94 // t += p*|x|
+	WORD $0x6E34FF74 // t = 1/t
+	WORD $0x4EB71EF0 // s = a5
+	WORD $0x4EB61ED2 // u2 = a4
+	WORD $0x4E34CE12 // u2 += s*t
+	WORD $0x4EA71CF0 // s = a3
+	WORD $0x4E34CE50 // s += u2*t
+	WORD $0x4EA61CD2 // u2 = a2
+	WORD $0x4E34CE12 // u2 += s*t
+	WORD $0x4EA31C70 // s = a1
+	WORD $0x4E34CE50 // s += u2*t
+	WORD $0x6E34DE10 // s *= t
+	WORD $0x6E3CDE10 // s *= e^{-x^2}
+	WORD $0x4E3E1C04 // w = sign(x)
+	WORD $0x4EB0D760 // x = 1 - s
+	WORD $0x4EA41C00 // x |= sign
+	WORD $0x4EA0F825 // w = |x|
+	WORD $0x6E25DCBD // u = x^2
+	WORD $0x6EA0FBBD // u = -x^2
+	WORD $0x4E28F7BD // fmax v29,lo
+	WORD $0x4EA9F7BD // fmin v29,hi
+	WORD $0x6E2ADFB3 // v19 = x*log2e
+	WORD $0x4E218A73 // frintn v19 (n)
+	WORD $0x4E2BCE7D // r = x - n*ln2hi
+	WORD $0x4E2CCE7D // r -= n*ln2lo
+	WORD $0x4EAE1DD1 // v17 = p1
+	WORD $0x4E3DCDB1 // s += p0*r
+	WORD $0x4EAF1DF5 // v21 = p2
+	WORD $0x4E3DCE35 // t += s*r
+	WORD $0x4EB81F11 // v17 = p3
+	WORD $0x4E3DCEB1 // s += t*r
+	WORD $0x4EB91F35 // v21 = p4
+	WORD $0x4E3DCE35 // t += s*r
+	WORD $0x4EBA1F51 // v17 = p5
+	WORD $0x4E3DCEB1 // s += t*r  (P(r))
+	WORD $0x6E3DDFB5 // t = r*r
+	WORD $0x4E3BD7BD // v = r+1
+	WORD $0x4E35CE3D // v += P*r^2
+	WORD $0x4E21AA73 // n → int
+	WORD $0x4F375673 // n << 23
+	WORD $0x4EB387BD // v = v * 2^n (int add)
+	WORD $0x4EBB1F75 // t = 1
+	WORD $0x4E22CCB5 // t += p*|x|
+	WORD $0x6E35FF75 // t = 1/t
+	WORD $0x4EB71EF1 // s = a5
+	WORD $0x4EB61ED3 // u2 = a4
+	WORD $0x4E35CE33 // u2 += s*t
+	WORD $0x4EA71CF1 // s = a3
+	WORD $0x4E35CE71 // s += u2*t
+	WORD $0x4EA61CD3 // u2 = a2
+	WORD $0x4E35CE33 // u2 += s*t
+	WORD $0x4EA31C71 // s = a1
+	WORD $0x4E35CE71 // s += u2*t
+	WORD $0x6E35DE31 // s *= t
+	WORD $0x6E3DDE31 // s *= e^{-x^2}
+	WORD $0x4E3E1C25 // w = sign(x)
+	WORD $0x4EB1D761 // x = 1 - s
+	WORD $0x4EA51C21 // x |= sign
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	SUB $8, R3
+	B loopN
+loop4:
+	CMP $4, R3
+	BLT done
+	VLD1.P 16(R1), [V0.S4]
+	WORD $0x4EA0F804 // w = |x|
+	WORD $0x6E24DC9C // u = x^2
+	WORD $0x6EA0FB9C // u = -x^2
+	WORD $0x4E28F79C // fmax v28,lo
+	WORD $0x4EA9F79C // fmin v28,hi
+	WORD $0x6E2ADF92 // v18 = x*log2e
+	WORD $0x4E218A52 // frintn v18 (n)
+	WORD $0x4E2BCE5C // r = x - n*ln2hi
+	WORD $0x4E2CCE5C // r -= n*ln2lo
+	WORD $0x4EAE1DD0 // v16 = p1
+	WORD $0x4E3CCDB0 // s += p0*r
+	WORD $0x4EAF1DF4 // v20 = p2
+	WORD $0x4E3CCE14 // t += s*r
+	WORD $0x4EB81F10 // v16 = p3
+	WORD $0x4E3CCE90 // s += t*r
+	WORD $0x4EB91F34 // v20 = p4
+	WORD $0x4E3CCE14 // t += s*r
+	WORD $0x4EBA1F50 // v16 = p5
+	WORD $0x4E3CCE90 // s += t*r  (P(r))
+	WORD $0x6E3CDF94 // t = r*r
+	WORD $0x4E3BD79C // v = r+1
+	WORD $0x4E34CE1C // v += P*r^2
+	WORD $0x4E21AA52 // n → int
+	WORD $0x4F375652 // n << 23
+	WORD $0x4EB2879C // v = v * 2^n (int add)
+	WORD $0x4EBB1F74 // t = 1
+	WORD $0x4E22CC94 // t += p*|x|
+	WORD $0x6E34FF74 // t = 1/t
+	WORD $0x4EB71EF0 // s = a5
+	WORD $0x4EB61ED2 // u2 = a4
+	WORD $0x4E34CE12 // u2 += s*t
+	WORD $0x4EA71CF0 // s = a3
+	WORD $0x4E34CE50 // s += u2*t
+	WORD $0x4EA61CD2 // u2 = a2
+	WORD $0x4E34CE12 // u2 += s*t
+	WORD $0x4EA31C70 // s = a1
+	WORD $0x4E34CE50 // s += u2*t
+	WORD $0x6E34DE10 // s *= t
+	WORD $0x6E3CDE10 // s *= e^{-x^2}
+	WORD $0x4E3E1C04 // w = sign(x)
+	WORD $0x4EB0D760 // x = 1 - s
+	WORD $0x4EA41C00 // x |= sign
+	VST1.P [V0.S4], 16(R0)
+	SUB $4, R3
+	B loop4
+done:
+	RET
+
+// func gelu_asm(dst, src []float32, n int, ...)
+TEXT ·gelu_asm(SB), NOSPLIT, $0-56
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD n+48(FP), R3
+	MOVD $-1028740017, R9 // lo = -87.33654
+	WORD $0x4E040D28 // dup v8.4s, w9
+	MOVD $1118879909, R9 // hi = 88.37626
+	WORD $0x4E040D29 // dup v9.4s, w9
+	MOVD $1069066811, R9 // log2e = 1.4426950408889634
+	WORD $0x4E040D2A // dup v10.4s, w9
+	MOVD $-1087275008, R9 // -ln2hi = -0.693359375
+	WORD $0x4E040D2B // dup v11.4s, w9
+	MOVD $962494595, R9 // -ln2lo = 0.00021219444
+	WORD $0x4E040D2C // dup v12.4s, w9
+	MOVD $961571175, R9 // p0 = 0.000198756915
+	WORD $0x4E040D2D // dup v13.4s, w9
+	MOVD $985088974, R9 // p1 = 0.0013981999507
+	WORD $0x4E040D2E // dup v14.4s, w9
+	MOVD $1007192328, R9 // p2 = 0.0083334519073
+	WORD $0x4E040D2F // dup v15.4s, w9
+	MOVD $1026206145, R9 // p3 = 0.041665795894
+	WORD $0x4E040D38 // dup v24.4s, w9
+	MOVD $1042983594, R9 // p4 = 0.16666665459
+	WORD $0x4E040D39 // dup v25.4s, w9
+	MOVD $1056964608, R9 // p5 = 0.50000001201
+	WORD $0x4E040D3A // dup v26.4s, w9
+	MOVD $1065353216, R9 // 1.0 = 1
+	WORD $0x4E040D3B // dup v27.4s, w9
+	MOVD $1051179525, R9 // p = 0.3275911
+	WORD $0x4E040D22 // dup v2.4s, w9
+	MOVD $1048738054, R9 // a1 = 0.254829592
+	WORD $0x4E040D23 // dup v3.4s, w9
+	MOVD $-1097750130, R9 // a2 = -0.284496736
+	WORD $0x4E040D26 // dup v6.4s, w9
+	MOVD $1068888291, R9 // a3 = 1.421413741
+	WORD $0x4E040D27 // dup v7.4s, w9
+	MOVD $-1078329117, R9 // a4 = -1.453152027
+	WORD $0x4E040D36 // dup v22.4s, w9
+	MOVD $1065868322, R9 // a5 = 1.061405429
+	WORD $0x4E040D37 // dup v23.4s, w9
+	MOVD $-2147483648, R9 // sign mask (0x80000000)
+	WORD $0x4E040D3E // dup v30.4s, w9
+	MOVD $1060439283, R9 // 1/sqrt2 = 0.7071067811865476
+	WORD $0x4E040D21 // dup v1.4s, w9
+	MOVD $1056964608, R9 // 0.5 = 0.5
+	WORD $0x4E040D3F // dup v31.4s, w9
+loop4:
+	CMP $4, R3
+	BLT done
+	VLD1.P 16(R1), [V0.S4]
+	WORD $0x6E21DC05 // v5 = x/sqrt2
+	WORD $0x4EA0F8A4 // w = |x|
+	WORD $0x6E24DC9C // u = x^2
+	WORD $0x6EA0FB9C // u = -x^2
+	WORD $0x4E28F79C // fmax v28,lo
+	WORD $0x4EA9F79C // fmin v28,hi
+	WORD $0x6E2ADF92 // v18 = x*log2e
+	WORD $0x4E218A52 // frintn v18 (n)
+	WORD $0x4E2BCE5C // r = x - n*ln2hi
+	WORD $0x4E2CCE5C // r -= n*ln2lo
+	WORD $0x4EAE1DD0 // v16 = p1
+	WORD $0x4E3CCDB0 // s += p0*r
+	WORD $0x4EAF1DF4 // v20 = p2
+	WORD $0x4E3CCE14 // t += s*r
+	WORD $0x4EB81F10 // v16 = p3
+	WORD $0x4E3CCE90 // s += t*r
+	WORD $0x4EB91F34 // v20 = p4
+	WORD $0x4E3CCE14 // t += s*r
+	WORD $0x4EBA1F50 // v16 = p5
+	WORD $0x4E3CCE90 // s += t*r  (P(r))
+	WORD $0x6E3CDF94 // t = r*r
+	WORD $0x4E3BD79C // v = r+1
+	WORD $0x4E34CE1C // v += P*r^2
+	WORD $0x4E21AA52 // n → int
+	WORD $0x4F375652 // n << 23
+	WORD $0x4EB2879C // v = v * 2^n (int add)
+	WORD $0x4EBB1F74 // t = 1
+	WORD $0x4E22CC94 // t += p*|x|
+	WORD $0x6E34FF74 // t = 1/t
+	WORD $0x4EB71EF0 // s = a5
+	WORD $0x4EB61ED2 // u2 = a4
+	WORD $0x4E34CE12 // u2 += s*t
+	WORD $0x4EA71CF0 // s = a3
+	WORD $0x4E34CE50 // s += u2*t
+	WORD $0x4EA61CD2 // u2 = a2
+	WORD $0x4E34CE12 // u2 += s*t
+	WORD $0x4EA31C70 // s = a1
+	WORD $0x4E34CE50 // s += u2*t
+	WORD $0x6E34DE10 // s *= t
+	WORD $0x6E3CDE10 // s *= e^{-x^2}
+	WORD $0x4E3E1CA4 // w = sign(x)
+	WORD $0x4EB0D765 // x = 1 - s
+	WORD $0x4EA41CA5 // x |= sign
+	WORD $0x4E3BD4A5 // v5 += 1
+	WORD $0x6E25DC00 // v0 = x*(1+erf)
+	WORD $0x6E3FDC00 // v0 *= 0.5
+	VST1.P [V0.S4], 16(R0)
+	SUB $4, R3
+	B loop4
+done:
+	RET
+
 // func dwconv3x3s1_asm(dst, src []float32, wpacked []float32, ncols, W int)
 TEXT ·dwconv3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVD dst_base+0(FP), R0

@@ -2,6 +2,8 @@
 
 package vek
 
+import "math"
+
 //go:noescape
 func add_asm(dst, a, b []float32, n int)
 
@@ -52,6 +54,12 @@ func sigmoid_asm(dst, src []float32, n int)
 
 //go:noescape
 func silu_asm(dst, src []float32, n int)
+
+//go:noescape
+func erf_asm(dst, src []float32, n int)
+
+//go:noescape
+func gelu_asm(dst, src []float32, n int)
 
 //go:noescape
 func dot_asm(a, b []float32, n int, out []float32)
@@ -350,5 +358,26 @@ func SiLU(dst, src []float32) {
 	for i := m; i < n; i++ {
 		x := src[i]
 		dst[i] = x / (1 + expScalar(-x))
+	}
+}
+
+// Erf computes dst = erf(src) (abs error ≤ ~2e-7).
+func Erf(dst, src []float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 3
+	erf_asm(dst, src, m)
+	for i := m; i < n; i++ {
+		dst[i] = float32(math.Erf(float64(src[i])))
+	}
+}
+
+// Gelu computes dst = 0.5·src·(1+erf(src/√2)) (the exact, erf-based GELU).
+func Gelu(dst, src []float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 3
+	gelu_asm(dst, src, m)
+	for i := m; i < n; i++ {
+		x := src[i]
+		dst[i] = 0.5 * x * (1 + float32(math.Erf(float64(x)/math.Sqrt2)))
 	}
 }

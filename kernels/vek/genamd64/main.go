@@ -37,7 +37,60 @@ func (g *gen) header() {
 		g.w("DATA %s<>+0(SB)/4, $%v", c.sym, c.val)
 		g.w("GLOBL %s<>(SB), RODATA|NOPTR, $4", c.sym)
 	}
+	// 8-wide (32-byte) constants used as m256 operands by the erf/gelu kernels
+	// (no YMM registers are free while the exp constants are resident).
+	for _, c := range erfConsts {
+		for i := 0; i < 8; i++ {
+			if c.hex != 0 {
+				g.w("DATA %s<>+%d(SB)/4, $0x%08x", c.sym, i*4, c.hex)
+			} else {
+				g.w("DATA %s<>+%d(SB)/4, $%v", c.sym, i*4, c.val)
+			}
+		}
+		g.w("GLOBL %s<>(SB), RODATA|NOPTR, $32", c.sym)
+	}
 	g.w("")
+}
+
+// erfConsts: Abramowitz–Stegun 7.1.26 (|err| ≤ 1.5e-7) plus masks/scales.
+var erfConsts = []struct {
+	sym string
+	val float64
+	hex uint32
+}{
+	{"c_erfp8", 0.3275911, 0}, {"c_erfa1_8", 0.254829592, 0}, {"c_erfa2_8", -0.284496736, 0},
+	{"c_erfa3_8", 1.421413741, 0}, {"c_erfa4_8", -1.453152027, 0}, {"c_erfa5_8", 1.061405429, 0},
+	{"c_abs8", 0, 0x7fffffff}, {"c_sign8", 0, 0x80000000},
+	{"c_invsqrt2_8", 0.70710678118654752, 0}, {"c_half8", 0.5, 0},
+}
+
+// erfBody: Y0 ← erf(Y0); scale is the factor applied to x (1 for erf, 1/√2 for
+// gelu). Clobbers Y1..Y3. The input is re-read from (SI) for |x| and the sign
+// because expBody needs all three scratch registers.
+func erfBody(g *gen, scaled bool) {
+	g.w("\tVANDPS c_abs8<>(SB), Y0, Y1     // |x|")
+	g.w("\tVMULPS Y1, Y1, Y0              // x^2")
+	g.w("\tVXORPS c_sign8<>(SB), Y0, Y0    // -x^2")
+	expBody(g)
+	g.w("\tVMOVUPS (SI), Y1")
+	if scaled {
+		g.w("\tVMULPS c_invsqrt2_8<>(SB), Y1, Y1")
+	}
+	g.w("\tVANDPS c_abs8<>(SB), Y1, Y1     // |x| again")
+	g.w("\tVMOVUPS Y15, Y2                // 1")
+	g.w("\tVFMADD231PS c_erfp8<>(SB), Y1, Y2 // 1 + p|x|")
+	g.w("\tVDIVPS Y2, Y15, Y2             // t")
+	g.w("\tVMOVUPS c_erfa5_8<>(SB), Y3")
+	g.w("\tVFMADD213PS c_erfa4_8<>(SB), Y2, Y3 // a5 t + a4")
+	g.w("\tVFMADD213PS c_erfa3_8<>(SB), Y2, Y3")
+	g.w("\tVFMADD213PS c_erfa2_8<>(SB), Y2, Y3")
+	g.w("\tVFMADD213PS c_erfa1_8<>(SB), Y2, Y3")
+	g.w("\tVMULPS Y2, Y3, Y3              // t*poly")
+	g.w("\tVMULPS Y3, Y0, Y0              // *e^{-x^2}")
+	g.w("\tVSUBPS Y0, Y15, Y0             // 1 - ...")
+	g.w("\tVMOVUPS (SI), Y1")
+	g.w("\tVANDPS c_sign8<>(SB), Y1, Y1    // sign(x)")
+	g.w("\tVORPS Y1, Y0, Y0")
 }
 
 // Exp constants (Cephes expf): x clamped to [lo,hi]; n = round(x·log2e);
@@ -236,6 +289,15 @@ func main() {
 		g.dwconv(k[0], k[1])
 	}
 	g.dot()
+
+	g.unary("erf", 56, expPrep, func(g *gen) { erfBody(g, false) })
+	g.unary("gelu", 56, expPrep, func(g *gen) {
+		g.w("\tVMULPS c_invsqrt2_8<>(SB), Y0, Y0 // x/sqrt2")
+		erfBody(g, true)
+		g.w("\tVADDPS Y15, Y0, Y0             // 1+erf")
+		g.w("\tVMULPS (SI), Y0, Y0            // *x")
+		g.w("\tVMULPS c_half8<>(SB), Y0, Y0    // *0.5")
+	})
 
 	os.Stdout.WriteString(g.b.String())
 }
