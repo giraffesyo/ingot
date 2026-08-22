@@ -48,7 +48,8 @@
 - [x] amd64 AVX2 vek + gemm kernels (AVX-512 opt-in; loses on Zen4/Ice Lake)
 - [x] ≤2× ONNX Runtime CPU on PP-OCRv4 det + rec, documented (docs/PERF.md):
       MT det 0.58–0.82× ORT, rec ~1.0×; 1T 1.2–1.8× (ORT uses SME on M4+)
-- [ ] vek.Exp → softmax/sigmoid/GELU SIMD; fused attention; layernorm SIMD
+- [x] vek.Exp/Sigmoid (NEON + AVX2) → Softmax, Sigmoid, Exp op (2.8 Gelem/s 1T)
+- [ ] GELU/Tanh/SiLU SIMD; fused attention; layernorm SIMD
 - [ ] int8 GEMM (SDOT/UDOT on arm64, VNNI on amd64), bf16
 - [ ] weight pre-packing at load; in-place ops; static memory planner
 - [ ] SME GEMM micro-kernel (Apple M4+ / Armv9 SME2) — the only way to match

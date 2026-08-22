@@ -336,12 +336,7 @@ func hardSigmoidVec(alpha, beta float32) func(dst, src []float32) {
 	return func(dst, src []float32) { vek.HardSigmoid(dst, src, alpha, beta) }
 }
 
-func sigmoidVec(dst, src []float32) {
-	dst = dst[:len(src)]
-	for i, v := range src {
-		dst[i] = 1 / (1 + float32(math.Exp(float64(-v))))
-	}
-}
+func sigmoidVec(dst, src []float32) { vek.Sigmoid(dst, src) }
 
 func gelu(x float32) float32 {
 	return 0.5 * x * (1 + float32(math.Erf(float64(x)/math.Sqrt2)))
@@ -382,7 +377,7 @@ func init() {
 	// Runtime-internal fused op produced by the graph optimizer (domain "ingot").
 	Register("ingot", "HardSwish", 1, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.HardSwish}, nil })
 	un("Tanh", 6, func(x float32) float32 { return float32(math.Tanh(float64(x))) })
-	un("Exp", 6, func(x float32) float32 { return float32(math.Exp(float64(x))) })
+	Register("", "Exp", 6, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.Exp}, nil })
 	un("Log", 6, func(x float32) float32 { return float32(math.Log(float64(x))) })
 	un("Sqrt", 6, func(x float32) float32 { return float32(math.Sqrt(float64(x))) })
 	un("Abs", 6, func(x float32) float32 { return float32(math.Abs(float64(x))) })

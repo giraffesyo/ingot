@@ -45,6 +45,12 @@ func mulscalar_asm(dst, src []float32, n int, s float32)
 func axpy_asm(dst, src []float32, n int, a float32)
 
 //go:noescape
+func exp_asm(dst, src []float32, n int)
+
+//go:noescape
+func sigmoid_asm(dst, src []float32, n int)
+
+//go:noescape
 func dwconv3x3s1_asm(dst, src, wpacked []float32, ncols, W int)
 
 //go:noescape
@@ -250,4 +256,25 @@ func clamp01(x float32) float32 {
 		return 1
 	}
 	return x
+}
+
+// Exp computes dst = e^src. Inputs saturate at [-87.3, 88.4] (smallest normal
+// / ~2.3e38) instead of flushing to 0 / +Inf; relative error ~1e-7.
+func Exp(dst, src []float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 3
+	exp_asm(dst, src, m)
+	for i := m; i < n; i++ {
+		dst[i] = expScalar(src[i])
+	}
+}
+
+// Sigmoid computes dst = 1/(1+e^-src).
+func Sigmoid(dst, src []float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 3
+	sigmoid_asm(dst, src, m)
+	for i := m; i < n; i++ {
+		dst[i] = 1 / (1 + expScalar(-src[i]))
+	}
 }

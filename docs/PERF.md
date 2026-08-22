@@ -397,10 +397,27 @@ The 1T rec profile otherwise: Conv 86% (GEMM-bound at ~100 GFLOPS), Softmax
 6.6% (scalar `math.Exp` — a vectorised exp kernel is the next cheap win),
 MatMul 4.7%.
 
+### vek.Exp / vek.Sigmoid (NEON + AVX2)
+
+Cephes-style expf: clamp → n = round(x·log2e) → r = x − n·ln2 (hi/lo) →
+1 + r + r²·P₅(r) → ×2ⁿ by integer-adding n<<23 to the float bits. Saturates at
+[−87.3, 88.4] (smallest normal / 2.3e38) instead of 0 / +Inf; rel err ~1e-7
+(tested at 4e-7 against math.Exp incl. the bounds). Sigmoid = 1/(1+exp(−x))
+with a vector divide. New NEON encodings (FRINTN, FCVTNS, SHL, ADD.4S, FNEG)
+verified against clang before use. 1T, 200k elements, Apple Silicon:
+
+| kernel | scalar (math.Exp) | SIMD |
+|---|---|---|
+| Exp | ~0.2 Gelem/s | 2.8 Gelem/s |
+| Sigmoid | ~0.2 | 1.5 |
+
+Wired into Softmax/LogSoftmax (row exp + 4-way sum), Sigmoid (op and conv
+epilogue) and the Exp op. Model-level effect to be measured on a quiet machine
+(the first measurement coincided with a load-18 spike from another build).
+
 ### Remaining per-op gaps worth taking next
 
-- `vek.Exp` (NEON/AVX2 polynomial): Softmax, Sigmoid, SiLU, GELU, LayerNorm
-  tails. rec Softmax 1.24 ms 1T → ~0.1.
+- SiLU/GELU/Tanh via vek.Exp; FRECPE+Newton instead of FDIV in Sigmoid.
 - rec batching in `models/ocr` (one forward per box today; b8 GEMMs run at
   2–4× the per-image efficiency).
 - Resize/GAP/FPN Add/Concat in det: ~1.8 ms of memory-bound small ops; fuse

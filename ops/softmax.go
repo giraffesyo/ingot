@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
 )
 
@@ -79,23 +80,27 @@ func softmaxRow(x, y []float32, logsm bool) {
 			m = v
 		}
 	}
-	var sum float32
-	for i, v := range x {
-		e := float32(math.Exp(float64(v - m)))
-		y[i] = e
-		sum += e
+	// y = exp(x - m) with the SIMD exp; sum with independent accumulators.
+	vek.AddScalar(y, x, -m)
+	vek.Exp(y, y)
+	var s0, s1, s2, s3 float32
+	i := 0
+	for ; i+4 <= len(y); i += 4 {
+		s0 += y[i]
+		s1 += y[i+1]
+		s2 += y[i+2]
+		s3 += y[i+3]
+	}
+	sum := (s0 + s1) + (s2 + s3)
+	for ; i < len(y); i++ {
+		sum += y[i]
 	}
 	if logsm {
 		ls := float32(math.Log(float64(sum)))
-		for i, v := range x {
-			y[i] = v - m - ls
-		}
+		vek.AddScalar(y, x, -m-ls)
 		return
 	}
-	inv := 1 / sum
-	for i := range y {
-		y[i] *= inv
-	}
+	vek.MulScalar(y, y, 1/sum)
 }
 
 func init() {
