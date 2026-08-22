@@ -168,6 +168,21 @@ const (
 // GEMM is used directly.
 func (o *convOp) pointwise(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg, M, K, P int) {
 	pk := o.packedWeights(wf, G, Mg, K)
+	if N*G*Mg*K*P < 2*convTaskMACs {
+		// Tiny: entirely on the caller, no parallel regions.
+		for n := 0; n < N; n++ {
+			for g := 0; g < G; g++ {
+				dst := of[(n*M+g*Mg)*P:]
+				if pk != nil {
+					gemm.SgemmPackedA(pk[g], P, xf[(n*C+g*Cg)*P:], P, 0, dst, P, false)
+				} else {
+					gemm.SgemmSerial(Mg, P, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P:], P, 0, dst, P)
+				}
+				o.finishTile(dst, bias, g*Mg, Mg, P, P)
+			}
+		}
+		return
+	}
 	Pc := max(1, convTaskMACs/max(1, Mg*K))
 	nChunks := (P + Pc - 1) / Pc
 	if Pc < 64 || N*G*nChunks < 2 {
@@ -214,30 +229,43 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 	}
 	nChunks := (OH + rows - 1) / rows
 	tasks := N * G * nChunks
-	if tasks < 2 {
+	// Tiny convs (a few µs of work in total) are not worth waking the pool:
+	// run them entirely on the caller, with no parallel regions at all.
+	if tiny := N*G*Mg*K*P < 2*convTaskMACs; tiny || tasks < 2 {
 		col := ctx.NewUninit(tensor.F32, K, P)
 		cf := col.F32()
 		for n := 0; n < N; n++ {
 			for g := 0; g < G; g++ {
+				dst := of[(n*M+g*Mg)*P:]
+				if tiny {
+					o.im2colRows(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OW, 0, OH, pads)
+					if pk != nil {
+						gemm.SgemmPackedA(pk[g], P, cf, P, 0, dst, P, false)
+					} else {
+						gemm.SgemmSerial(Mg, P, K, 1, wf[g*Mg*K:], K, cf, P, 0, dst, P)
+					}
+					o.finishTile(dst, bias, g*Mg, Mg, P, P)
+					continue
+				}
 				o.im2colPar(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OH, OW, pads)
 				if pk != nil {
-					gemm.SgemmPackedA(pk[g], P, cf, P, 0, of[(n*M+g*Mg)*P:], P, true)
+					gemm.SgemmPackedA(pk[g], P, cf, P, 0, dst, P, true)
 				} else {
-					gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, cf, P, 0, of[(n*M+g*Mg)*P:], P)
+					gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, cf, P, 0, dst, P)
 				}
 			}
 		}
 		if ctx.Pool != nil {
 			ctx.Pool.Put(col)
 		}
-		o.finish(of, bias, N, M, P)
+		if !tiny {
+			o.finish(of, bias, N, M, P)
+		}
 		return
 	}
-	nw := par.Workers()
-	bufs := make([]*tensor.Tensor, nw)
-	for w := range bufs {
-		bufs[w] = ctx.NewUninit(tensor.F32, K, rows*OW)
-	}
+	// Per-worker scratch, taken from the pool lazily by whichever workers
+	// actually run a tile (each worker id only ever runs one tile at a time).
+	bufs := make([]*tensor.Tensor, par.Workers())
 	par.For(tasks, 1, func(t, w int) {
 		ch := t % nChunks
 		ng := t / nChunks
@@ -245,6 +273,9 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 		oh0 := ch * rows
 		oh1 := min(oh0+rows, OH)
 		pc := (oh1 - oh0) * OW
+		if bufs[w] == nil {
+			bufs[w] = ctx.NewUninit(tensor.F32, K, rows*OW)
+		}
 		cf := bufs[w].F32()[:K*pc]
 		o.im2colRows(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OW, oh0, oh1, pads)
 		dst := of[(n*M+g*Mg)*P+oh0*OW:]
@@ -257,7 +288,9 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 	})
 	if ctx.Pool != nil {
 		for _, b := range bufs {
-			ctx.Pool.Put(b)
+			if b != nil {
+				ctx.Pool.Put(b)
+			}
 		}
 	}
 }

@@ -33,6 +33,9 @@ func init() {
 	if v := os.Getenv("OCR_PAR_SPIN_NS"); v != "" {
 		fmt.Sscan(v, &par.SpinNS)
 	}
+	if v := os.Getenv("OCR_PAR_WORKERS"); v != "" {
+		fmt.Sscan(v, &par.MaxWorkers)
+	}
 }
 
 func loadOCRSession(tb testing.TB, model string) (*graph.Session, string) {

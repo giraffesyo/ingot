@@ -115,6 +115,9 @@ var benchShapes = []struct {
 	{"rec_m240_n960_k240", 240, 960, 240},
 	{"rec_m480_n240_k480", 480, 240, 480},
 	{"rec_m480_n40_k480", 480, 40, 480},
+	// GEMV (batch-1 classifier / decoder): m=1
+	{"gemv_m1_n1024_k576", 1, 1024, 576},
+	{"gemv_m1_n4096_k4096", 1, 4096, 4096},
 }
 
 func BenchmarkSgemm(b *testing.B) {

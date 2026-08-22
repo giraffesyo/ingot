@@ -173,7 +173,11 @@ func (o *globalPoolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 	}
 	out := ctx.NewUninit(tensor.F32, oshape...)
 	xf, of := x.F32(), out.F32()
-	par.For(N*C, 8, func(nc, _ int) {
+	grain := 8
+	if N*C*P <= 2*unaryChunk {
+		grain = N * C // tiny: stay on the caller
+	}
+	par.For(N*C, grain, func(nc, _ int) {
 		src := xf[nc*P : (nc+1)*P]
 		if o.isMax {
 			m := src[0]
