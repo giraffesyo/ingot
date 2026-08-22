@@ -51,6 +51,9 @@ func exp_asm(dst, src []float32, n int)
 func sigmoid_asm(dst, src []float32, n int)
 
 //go:noescape
+func dot_asm(a, b []float32, n int, out []float32)
+
+//go:noescape
 func dwconv3x3s1_asm(dst, src, wpacked []float32, ncols, W int)
 
 //go:noescape
@@ -286,4 +289,23 @@ func DwRowS1(dst, src, wpacked []float32, ncols, W, KH, KW int) {
 		m = 0
 	}
 	dwTail(dst, src, wpacked, m, ncols, W, KH, KW)
+}
+
+// Dot returns Σ a[i]*b[i] over min lengths, accumulated in several
+// independent SIMD lanes (the summation order differs from a sequential loop).
+func Dot(a, b []float32) float32 {
+	n := min(len(a), len(b))
+	m := n &^ 31
+	var s float32
+	if m > 0 {
+		var parts [32]float32
+		dot_asm(a, b, m, parts[:])
+		for _, v := range parts {
+			s += v
+		}
+	}
+	for i := m; i < n; i++ {
+		s += a[i] * b[i]
+	}
+	return s
 }

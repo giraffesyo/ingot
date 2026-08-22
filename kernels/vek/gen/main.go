@@ -216,6 +216,8 @@ func main() {
 	})
 
 	g.axpy()
+	g.dot()
+
 	// Depthwise row kernels: square stride-1 taps, and the even/odd sub-kernels
 	// the stride-2 path uses after de-interleaving columns (3x3 → 3x2 + 3x1,
 	// 5x5 → 5x3 + 5x2).
@@ -373,4 +375,33 @@ func expBody(g *gen, v, s, t, u int) {
 	g.w("\tWORD $0x%08X // n → int", fcvtns(u, u))
 	g.w("\tWORD $0x%08X // n << 23", shl23(u, u))
 	g.w("\tWORD $0x%08X // v = v * 2^n (int add)", addi(v, v, u))
+}
+
+// dot emits func dot_asm(a, b []float32, n int, out []float32): out[0:16] =
+// 16 partial sums of a[i]*b[i] (4 accumulators × 4 lanes); the Go wrapper
+// adds them. n is a multiple of 16.
+func (g *gen) dot() {
+	g.w("// func dot_asm(a, b []float32, n int, out []float32)")
+	g.w("TEXT ·dot_asm(SB), NOSPLIT, $0-80")
+	g.w("\tMOVD a_base+0(FP), R0")
+	g.w("\tMOVD b_base+24(FP), R1")
+	g.w("\tMOVD n+48(FP), R3")
+	g.w("\tMOVD out_base+56(FP), R2")
+	for i := 16; i < 20; i++ {
+		g.movi0(i)
+	}
+	g.w("loop16:")
+	g.w("\tCMP $16, R3")
+	g.w("\tBLT done")
+	g.w("\tVLD1.P 64(R0), [V0.S4, V1.S4, V2.S4, V3.S4]")
+	g.w("\tVLD1.P 64(R1), [V4.S4, V5.S4, V6.S4, V7.S4]")
+	for i := 0; i < 4; i++ {
+		g.w("\tWORD $0x%08X // fmla v%d += v%d*v%d", fmla(16+i, i, 4+i), 16+i, i, 4+i)
+	}
+	g.w("\tSUB $16, R3")
+	g.w("\tB loop16")
+	g.w("done:")
+	g.w("\tVST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)")
+	g.w("\tRET")
+	g.w("")
 }

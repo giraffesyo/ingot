@@ -179,6 +179,7 @@ func BenchmarkVek(b *testing.B) {
 	run("Mul", func() { Mul(out, x, y) })
 	run("Add", func() { Add(out, x, y) })
 	run("Exp", func() { Exp(out, x) })
+	run("Dot", func() { _ = Dot(x, y) })
 	run("Sigmoid", func() { Sigmoid(out, x) })
 }
 
@@ -214,6 +215,22 @@ func TestDwRowS1(t *testing.T) {
 					t.Fatalf("DwRowS1_%dx%d_n%d[%d]: got %g want %g (mag %g)", KH, KW, ncols, c, got[c], want[c], mag)
 				}
 			}
+		}
+	}
+}
+
+func TestDot(t *testing.T) {
+	r := rand.New(rand.NewPCG(13, 14))
+	for _, n := range []int{0, 1, 3, 15, 16, 17, 31, 32, 33, 63, 64, 100, 1000, 4097} {
+		a, b := randf(r, n), randf(r, n)
+		var want, mag float64
+		for i := range a {
+			want += float64(a[i]) * float64(b[i])
+			mag += math.Abs(float64(a[i]) * float64(b[i]))
+		}
+		got := Dot(a, b)
+		if d := math.Abs(float64(got) - want); d > 1e-6*(1+mag) {
+			t.Fatalf("Dot n=%d: got %g want %g", n, got, want)
 		}
 	}
 }

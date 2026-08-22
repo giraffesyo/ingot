@@ -224,6 +224,7 @@ func main() {
 	for _, k := range dwShapes {
 		g.dwconv(k[0], k[1])
 	}
+	g.dot()
 
 	os.Stdout.WriteString(g.b.String())
 }
@@ -296,3 +297,36 @@ func (g *gen) dwconv(KH, KW int) {
 
 // dwShapes are the (KH, KW) depthwise row kernels generated (see ../gen).
 var dwShapes = [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}}
+
+// dot emits func dot_asm(a, b []float32, n int, out []float32): out[0:32] =
+// 32 partial sums (4 YMM accumulators × 8 lanes); the Go wrapper adds them.
+// n is a multiple of 32.
+func (g *gen) dot() {
+	g.w("// func dot_asm(a, b []float32, n int, out []float32)")
+	g.w("TEXT ·dot_asm(SB), NOSPLIT, $0-80")
+	g.w("\tMOVQ a_base+0(FP), SI")
+	g.w("\tMOVQ b_base+24(FP), BX")
+	g.w("\tMOVQ n+48(FP), CX")
+	g.w("\tMOVQ out_base+56(FP), DI")
+	for i := 0; i < 4; i++ {
+		g.w("\tVXORPS Y%d, Y%d, Y%d", i, i, i)
+	}
+	g.w("loop:")
+	g.w("\tCMPQ CX, $32")
+	g.w("\tJL done")
+	for i := 0; i < 4; i++ {
+		g.w("\tVMOVUPS %d(SI), Y%d", i*32, 4+i)
+		g.w("\tVFMADD231PS %d(BX), Y%d, Y%d", i*32, 4+i, i)
+	}
+	g.w("\tADDQ $128, SI")
+	g.w("\tADDQ $128, BX")
+	g.w("\tSUBQ $32, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	for i := 0; i < 4; i++ {
+		g.w("\tVMOVUPS Y%d, %d(DI)", i, i*32)
+	}
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}

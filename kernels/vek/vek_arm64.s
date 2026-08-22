@@ -812,6 +812,31 @@ loop4:
 done:
 	RET
 
+// func dot_asm(a, b []float32, n int, out []float32)
+TEXT ·dot_asm(SB), NOSPLIT, $0-80
+	MOVD a_base+0(FP), R0
+	MOVD b_base+24(FP), R1
+	MOVD n+48(FP), R3
+	MOVD out_base+56(FP), R2
+	WORD $0x4F000410 // movi v16.4s, #0
+	WORD $0x4F000411 // movi v17.4s, #0
+	WORD $0x4F000412 // movi v18.4s, #0
+	WORD $0x4F000413 // movi v19.4s, #0
+loop16:
+	CMP $16, R3
+	BLT done
+	VLD1.P 64(R0), [V0.S4, V1.S4, V2.S4, V3.S4]
+	VLD1.P 64(R1), [V4.S4, V5.S4, V6.S4, V7.S4]
+	WORD $0x4E24CC10 // fmla v16 += v0*v4
+	WORD $0x4E25CC31 // fmla v17 += v1*v5
+	WORD $0x4E26CC52 // fmla v18 += v2*v6
+	WORD $0x4E27CC73 // fmla v19 += v3*v7
+	SUB $16, R3
+	B loop16
+done:
+	VST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)
+	RET
+
 // func dwconv3x3s1_asm(dst, src []float32, wpacked []float32, ncols, W int)
 TEXT ·dwconv3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVD dst_base+0(FP), R0

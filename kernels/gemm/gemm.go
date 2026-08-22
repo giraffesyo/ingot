@@ -477,25 +477,15 @@ func gemv(transA, transB bool, n, k int, alpha float32, a []float32, lda int, b 
 		grain := max(1, minTaskMACs/max(k, 1))
 		par.For(n, grain, func(j, _ int) {
 			row := b[j*ldb : j*ldb+k]
-			var s0, s1, s2, s3 float32
-			p := 0
+			var v float32
 			if xs == 1 {
-				x := a[:k]
-				for ; p+4 <= k; p += 4 {
-					s0 += x[p] * row[p]
-					s1 += x[p+1] * row[p+1]
-					s2 += x[p+2] * row[p+2]
-					s3 += x[p+3] * row[p+3]
-				}
-				for ; p < k; p++ {
-					s0 += x[p] * row[p]
-				}
+				v = vek.Dot(a[:k], row)
 			} else {
-				for ; p < k; p++ {
-					s0 += a[p*xs] * row[p]
+				for p := 0; p < k; p++ {
+					v += a[p*xs] * row[p]
 				}
 			}
-			v := alpha * ((s0 + s1) + (s2 + s3))
+			v *= alpha
 			if firstOverwrite {
 				c[j] = v
 			} else {
