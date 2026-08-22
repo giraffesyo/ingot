@@ -82,6 +82,22 @@ AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv Co
 
 Performance gaps (kernels, not coverage) are tracked separately in `docs/PERF.md`.
 
+## Graph optimizer (what gets fused)
+
+`graph.Compile` runs `graph.Optimize` (use `CompileRaw` to skip it). Rewrites
+are semantics-preserving and verified by the zoo conformance suite and
+`TestOptimizeAB` (optimised vs raw outputs on every model):
+
+- `Add(x,3)→Clip(0,6)→Mul(x,·)→Div(·,6)` ⇒ `ingot.HardSwish` (opset<14 exports)
+- Conv/ConvTranspose followed by scalar or per-channel Mul/Add/Sub, or by
+  BatchNormalization ⇒ folded into weights/bias
+- Conv/ConvTranspose followed by Relu/HardSwish/HardSigmoid/Sigmoid/Clip/
+  LeakyRelu ⇒ activation in the conv epilogue (`ingot_act` attrs)
+- Conv(act) followed by scalar Mul/Add/Sub/Div ⇒ epilogue scale/shift
+
+Not yet: Gemm/MatMul + bias/activation epilogues, Resize+Add (FPN), GAP into
+SE, LayerNorm decomposition re-fusion, fused attention.
+
 ## OCR pipeline notes (phase 3, in progress)
 
 Detection works end-to-end: **PP-OCRv4 detector (330 nodes) runs on the pure-Go

@@ -277,3 +277,133 @@ Remaining conv hot spots (next targets):
 - resizeBilinear in preprocessing is scalar per-pixel via image.At (slow RGBA
   conversion); a fast path for *image.RGBA/NRGBA reading the pixel slice directly
   would speed preprocessing on large images.
+
+
+## Phase 4, round 1 — PP-OCRv4 det/rec vs ONNX Runtime (2026-08-21)
+
+Harness: `models/ocr` `BenchmarkOCRModels` + `TestOCRProfile` (per-op/per-node
+breakdown, `OCR_PROFILE=det_640 OCR_PROFILE_NODES=1`) on our side;
+`tools/export/orttime.py` (same shapes, same synthetic input) and
+`tools/export/ortprof.py` (ORT's own per-node profiler) on the ORT side.
+ORT 1.29 CPU EP, default graph optimisation. Apple Silicon (the dev box),
+Go 1.26, CGO_ENABLED=0. "MT" = all cores; ORT MT = its default thread pool.
+
+### Result
+
+| model (input) | ours MT | ORT MT | ratio | ours 1T | ORT 1T | ratio |
+|---|---|---|---|---|---|---|
+| det_640 (1×3×640×640) | **14.5 ms** | 17.8 ms | **0.82×** | 87 ms | 69 ms | 1.27× |
+| det_960 (1×3×960×960) | **26.1 ms** | 44.9 ms | **0.58×** | 187 ms | 157 ms | 1.19× |
+| rec_320 (1×3×48×320) | 6.8 ms | 6.3 ms | 1.08× | 21 ms | 11.7 ms | 1.8× |
+| rec_b8_320 (8×3×48×320) | 37.2 ms | 36.4 ms | 1.02× | 168 ms | 174 ms | 0.96× |
+
+Start of the round: det_640 62 ms / rec_320 15.4 ms MT (3.5× / 2.4× ORT).
+Multi-threaded we are now **faster than ORT on detection** and at parity on
+recognition. Single-threaded we are within 1.2–1.8× — and the 1T gap has a
+specific cause (see "Why ORT is fast single-threaded here").
+
+### What changed, in order of payoff
+
+1. **GEMM small-M fast path** (`kernels/gemm`). Pointwise convs at high
+   resolution are GEMMs with M = 16..64, K = 16..96, N = 25k..100k. The Goto
+   NC-block loop paid three parallel hand-offs per 3072-column block and each
+   macro task carried ~60 ns of work at K=16, so these shapes ran at ~50 GFLOPS
+   MT and did not scale with threads. New path when A fits in cache: pack A
+   once for all of k, then one parallel region over N-panels where each worker
+   packs its own B panel into an L1-resident buffer right before using it.
+   Macro/pack task grains are now sized by MACs (~2 µs/task).
+
+   | shape (m,n,k) | before | after |
+   |---|---|---|
+   | pointwise 32,102400,16 | 54 GFLOPS | 490 |
+   | pointwise 48,25600,48 | 168 | 719 |
+   | 3×3 head 24,25600,864 | 270 | 555 |
+   | deconv 4,102400,24 | 12 | 147 |
+   | sq1024 / sq2048 | 955 / 1199 | unchanged |
+
+   det_640: 62 → 48.7 ms.
+
+2. **Conv tiling** (`ops/conv.go`). The im2col path built the whole K×P column
+   matrix (88 MB for the det head at 640², zeroed every call). Now tiled over
+   output rows with per-worker L2-sized scratch, a serial GEMM per tile
+   (`gemm.SgemmSerial`) and the bias/epilogue applied while the tile is hot.
+   Cheap pointwise convs tile over columns the same way. det Conv.58/61:
+   5.4 → 1.4 ms each.
+
+3. **ConvTranspose as GEMM + col2im** (was a naive scatter): 16.4 → 0.74 ms
+   for the two det head deconvs; non-overlapping k≤s/no-pad gets a direct-write
+   path parallel over (channel, row-chunk).
+
+4. **Clip vectorised** (was a scalar serial loop — 5 ms in det), row-broadcast
+   fast path for bias-style adds, Concat parallel copy, GAP 8-way accumulators.
+   det_640: 48.7 → 23.7 ms.
+
+5. **Pool leaks + gemm ctx churn** — steady-state pool misses 11 → 0 per run,
+   23 → 6 MB/op allocated (the gemm `sync.Pool` of multi-MB contexts was being
+   evicted by GC 47×/run once per-tile GEMMs ran on 18 workers; now a plain
+   free list).
+
+6. **Graph optimizer** (`graph/optimize.go`, run by `Compile`; `CompileRaw`
+   skips it). Paddle2ONNX exports HardSwish as Add→Clip→Mul→Div and wraps every
+   conv in scalar Mul/Add pairs, so each conv in det/rec came with 6–8 extra
+   full passes over the activation. Passes: HardSwish fusion; Mul/Add/Sub
+   (scalar or per-channel) and BatchNormalization folded into conv W/bias;
+   activation (Relu/HardSwish/HardSigmoid/Sigmoid/Clip/LeakyRelu) fused into
+   the conv epilogue; post-activation scalar affine fused as epilogue
+   scale/shift. det 330 → 102 nodes, rec 440 → 206.
+   det_640: 23.7 → 14.5 ms, rec_320: 11.7 → 6.8 ms.
+   Verified by: zoo conformance vs ORT (now through the optimizer), an A/B test
+   Compile vs CompileRaw on every model (≤1e-4 rel), and per-activation ×
+   per-conv-path oracle tests for the epilogue.
+
+### det_640 per-op, after (MT)
+
+| op | n | µs/run | share |
+|---|---|---|---|
+| Conv | 62 | 11547 | 80% |
+| ConvTranspose | 2 | 777 | 5% |
+| Add (FPN) | 11 | 532 | 4% |
+| Resize | 6 | 466 | 3% |
+| GlobalAveragePool | 10 | 375 | 3% |
+| Mul (SE) | 10 | 289 | 2% |
+| Concat | 1 | 160 | 1% |
+
+Conv is now the whole story; the two 96→24 3×3 head convs at 160² are 1.45 ms
+each (~600 GFLOPS effective, im2col-bound), and the rest are many small
+pointwise/depthwise layers at 0.2–0.5 ms each where per-op overhead and
+memory traffic dominate.
+
+### Why ORT is fast single-threaded here (and what it means for the target)
+
+`ortprof.py rec_320 1` shows ORT running a 240×240×960 pointwise conv
+(110 MFLOP) in **105 µs on one thread ≈ 1.05 TFLOPS**. That is ~8× the NEON
+FMA peak of one core (~130 GFLOPS, which our micro-kernel reaches). The box
+reports `FEAT_SME2` / `SME_F32F32`, and the ORT 1.29 wheel contains
+`ArmKleidiAI::MlasGemmBatch` / `ConvolveSme`: **ORT's SGEMM runs on the Arm
+SME matrix unit** (via KleidiAI) on SME2-capable Apple Silicon. So on this
+hardware the single-thread bar is a matrix coprocessor, not a NEON core:
+
+- MT: the SME unit is shared per cluster, so ORT's MT scaling is modest; our
+  NEON kernels across all cores already beat it on det and match it on rec.
+- 1T: our conv layers run at ~100 GFLOPS (kernel peak); ORT's run at up to
+  1 TFLOPS. No amount of NEON tuning closes that — only an SME GEMM kernel would
+  (Go: WORD-encoded SME instructions + streaming-mode discipline; needs care
+  with the Go runtime's signal-based preemption, but asm functions are not
+  async-preempted and SME state is kernel-saved). Tracked as a phase-4 item.
+- On x86 and non-SME Arm (most servers today) this does not apply; there the
+  NEON/AVX2 numbers stand on their own.
+
+The 1T rec profile otherwise: Conv 86% (GEMM-bound at ~100 GFLOPS), Softmax
+6.6% (scalar `math.Exp` — a vectorised exp kernel is the next cheap win),
+MatMul 4.7%.
+
+### Remaining per-op gaps worth taking next
+
+- `vek.Exp` (NEON/AVX2 polynomial): Softmax, Sigmoid, SiLU, GELU, LayerNorm
+  tails. rec Softmax 1.24 ms 1T → ~0.1.
+- rec batching in `models/ocr` (one forward per box today; b8 GEMMs run at
+  2–4× the per-image efficiency).
+- Resize/GAP/FPN Add/Concat in det: ~1.8 ms of memory-bound small ops; fuse
+  Resize+Add (FPN upsample-add) and GAP into the SE conv.
+- Weight pre-packing at load (GEMM A-panels) — removes pack-A from every call.
+- SME GEMM (Apple M4+ / Arm v9 SME2 servers), see above.
