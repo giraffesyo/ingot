@@ -145,7 +145,11 @@ func rowBroadcastFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor {
 	}
 	out := ctx.NewUninit(tensor.F32, bs...)
 	of, bigf, smf := out.F32(), big.F32(), small.F32()
-	par.For(nRows, max(1, unaryChunk/row), func(r, _ int) {
+	grain := max(1, unaryChunk/row)
+	if len(of) <= 2*unaryChunk {
+		grain = nRows // tiny: stay on the caller
+	}
+	par.For(nRows, grain, func(r, _ int) {
 		d, x := of[r*row:(r+1)*row], bigf[r*row:(r+1)*row]
 		switch kind {
 		case '+':
@@ -218,7 +222,11 @@ func blockBroadcastFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor
 	if kind == '/' && rev {
 		return nil
 	}
-	par.For(nBlocks, max(1, unaryChunk/max(block, 1)), func(k, _ int) {
+	grain := max(1, unaryChunk/max(block, 1))
+	if len(of) <= 2*unaryChunk {
+		grain = nBlocks // tiny: stay on the caller
+	}
+	par.For(nBlocks, grain, func(k, _ int) {
 		lo := k * block
 		apply(of[lo:lo+block], bigf[lo:lo+block], smf[k])
 	})

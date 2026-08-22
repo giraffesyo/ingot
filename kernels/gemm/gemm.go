@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 )
 
 // gemmCtx is the per-call state shared by all workers. It doubles as the
@@ -133,6 +134,11 @@ func sgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 		scaleC(m, n, beta, c, ldc)
 	}
 	firstOverwrite := beta == 0
+
+	if m == 1 {
+		gemv(transA, transB, n, k, alpha, a, lda, b, ldb, firstOverwrite, c, workers)
+		return
+	}
 
 	g := getCtx()
 	defer putCtx(g)
@@ -454,4 +460,76 @@ func SgemmPackedA(pa *PackedA, n int, b []float32, ldb int, beta float32, c []fl
 	g.asm = pa.data
 	g.smallMSweep(m, k, workers)
 	g.asm = saved
+}
+
+// gemv handles m == 1: y[1×n] = alpha·x[1×k]·op(B) (+ y). Packing B into
+// micro-kernel panels would cost a full pass over B for one row of output, so
+// B is streamed directly: row-major B[k×n] as k axpys into column chunks of y
+// (parallel over chunks); transposed B[n×k] as one dot product per output
+// (parallel over rows). Memory-bound either way, which is the best a GEMV can do.
+func gemv(transA, transB bool, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, firstOverwrite bool, c []float32, workers int) {
+	xs := 1
+	if transA {
+		xs = lda // x stored as a column
+	}
+	if transB {
+		// y[j] = alpha * dot(x, B[j,:])
+		grain := max(1, minTaskMACs/max(k, 1))
+		par.For(n, grain, func(j, _ int) {
+			row := b[j*ldb : j*ldb+k]
+			var s0, s1, s2, s3 float32
+			p := 0
+			if xs == 1 {
+				x := a[:k]
+				for ; p+4 <= k; p += 4 {
+					s0 += x[p] * row[p]
+					s1 += x[p+1] * row[p+1]
+					s2 += x[p+2] * row[p+2]
+					s3 += x[p+3] * row[p+3]
+				}
+				for ; p < k; p++ {
+					s0 += x[p] * row[p]
+				}
+			} else {
+				for ; p < k; p++ {
+					s0 += a[p*xs] * row[p]
+				}
+			}
+			v := alpha * ((s0 + s1) + (s2 + s3))
+			if firstOverwrite {
+				c[j] = v
+			} else {
+				c[j] += v
+			}
+		})
+		return
+	}
+	// y[j0:j1] = alpha * Σ_p x[p] * B[p][j0:j1]. Chunks of y stay in L1 across
+	// the k loop; enough chunks to spread B's bandwidth over the workers.
+	chunk := 2048
+	if workers > 1 {
+		chunk = min(chunk, max(256, n/(2*workers)))
+	}
+	nChunks := (n + chunk - 1) / chunk
+	if workers <= 1 {
+		nChunks = 1
+	}
+	par.For(nChunks, 1, func(ci, _ int) {
+		j0 := ci * chunk
+		j1 := n
+		if nChunks > 1 {
+			j1 = min(j0+chunk, n)
+		}
+		y := c[j0:j1]
+		if firstOverwrite {
+			clear(y)
+		}
+		for p := 0; p < k; p++ {
+			xv := alpha * a[p*xs]
+			if xv == 0 {
+				continue
+			}
+			vek.Axpy(y, b[p*ldb+j0:p*ldb+j1], xv)
+		}
+	})
 }
