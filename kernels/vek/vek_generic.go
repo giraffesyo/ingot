@@ -143,3 +143,11 @@ func Dot(a, b []float32) float32 {
 	}
 	return (s0 + s1) + (s2 + s3)
 }
+
+// SiLU computes dst = src · sigmoid(src).
+func SiLU(dst, src []float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		x := src[i]
+		dst[i] = x / (1 + expScalar(-x))
+	}
+}

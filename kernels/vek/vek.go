@@ -51,6 +51,9 @@ func exp_asm(dst, src []float32, n int)
 func sigmoid_asm(dst, src []float32, n int)
 
 //go:noescape
+func silu_asm(dst, src []float32, n int)
+
+//go:noescape
 func dot_asm(a, b []float32, n int, out []float32)
 
 //go:noescape
@@ -337,4 +340,15 @@ func Dot(a, b []float32) float32 {
 		s += a[i] * b[i]
 	}
 	return s
+}
+
+// SiLU computes dst = src · sigmoid(src) (a.k.a. Swish).
+func SiLU(dst, src []float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 3
+	silu_asm(dst, src, m)
+	for i := m; i < n; i++ {
+		x := src[i]
+		dst[i] = x / (1 + expScalar(-x))
+	}
 }

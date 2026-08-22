@@ -212,6 +212,17 @@ func main() {
 	g.unary("mulscalar", 60, prepScalar, func(g *gen) { g.w("\tVMULPS Y13, Y0, Y0") })
 
 	g.unary("exp", 56, expPrep, expBody)
+	g.unary("silu", 56, expPrep, func(g *gen) {
+		// expBody clobbers Y1..Y3, so x is re-read from the source pointer
+		// after the sigmoid (SI still points at this vector; dst may alias src
+		// but the store happens after this body).
+		g.w("\tVXORPS Y1, Y1, Y1")
+		g.w("\tVSUBPS Y0, Y1, Y0          // -x")
+		expBody(g)
+		g.w("\tVADDPS Y15, Y0, Y0         // 1+e^-x")
+		g.w("\tVDIVPS Y0, Y15, Y0         // sigmoid")
+		g.w("\tVMULPS (SI), Y0, Y0        // * x (reload from source)")
+	})
 	g.unary("sigmoid", 56, expPrep, func(g *gen) {
 		g.w("\tVXORPS Y1, Y1, Y1")
 		g.w("\tVSUBPS Y0, Y1, Y0          // -x")

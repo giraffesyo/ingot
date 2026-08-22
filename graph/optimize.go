@@ -14,6 +14,7 @@ import (
 //
 //   - fuse-hardswish:   Add(x,3) → Clip(0,6) → Mul(x,·) → Div(·,6)  ⇒  ingot.HardSwish(x)
 //     (the opset<14 decomposition emitted by Paddle2ONNX and torch).
+//   - fuse-silu:        Mul(x, Sigmoid(x))  ⇒  ingot.SiLU(x)  (torch SiLU/Swish export).
 //   - fold-conv-affine: Conv/ConvTranspose → {Mul,Add,Sub by scalar or per-channel
 //     const | BatchNormalization}  ⇒  folded into W and bias (exact in f64).
 //   - fuse-conv-act:    Conv/ConvTranspose → {Relu,HardSwish,HardSigmoid,Sigmoid,
@@ -28,6 +29,7 @@ func Optimize(g *Graph) map[string]int {
 	for changed := true; changed; {
 		changed = false
 		changed = fuseHardSwish(g, stats) || changed
+		changed = fuseSiLU(g, stats) || changed
 		changed = foldConvAffine(g, stats) || changed
 		changed = fuseConvAct(g, stats) || changed
 		changed = foldPostAffine(g, stats) || changed
@@ -520,6 +522,8 @@ func fuseConvAct(g *Graph, stats map[string]int) bool {
 			act = "relu"
 		case u.OpType == "HardSwish" && (u.Domain == "" || u.Domain == ingotDomain):
 			act = "hardswish"
+		case u.OpType == "SiLU" && u.Domain == ingotDomain:
+			act = "silu"
 		case u.Domain == "" && u.OpType == "HardSigmoid":
 			act, alpha, beta = "hardsigmoid", u.Attrs.Float("alpha", 0.2), u.Attrs.Float("beta", 0.5)
 		case u.Domain == "" && u.OpType == "Sigmoid":
@@ -593,5 +597,51 @@ func foldPostAffine(g *Graph, stats map[string]int) bool {
 		changed = true
 	}
 	g.compact(dead)
+	return changed
+}
+
+// fuseSiLU rewrites Mul(x, Sigmoid(x)) (either operand order) into
+// ingot.SiLU(x) when the Sigmoid output has no other consumer.
+func fuseSiLU(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	for _, m := range g.Nodes {
+		if dead[m] || m.Domain != "" || m.OpType != "Mul" || len(m.Inputs) != 2 || len(m.Outputs) != 1 || m.Outputs[0] == nil {
+			continue
+		}
+		var x, sv *Value
+		for i := 0; i < 2; i++ {
+			if p := m.Inputs[i].Producer; p != nil && p.OpType == "Sigmoid" && p.Domain == "" && !dead[p] && p.Inputs[0] == m.Inputs[1-i] {
+				sv, x = m.Inputs[i], m.Inputs[1-i]
+			}
+		}
+		if sv == nil || g.soleConsumer(sv) != m {
+			continue
+		}
+		sg := sv.Producer
+		out := m.Outputs[0]
+		n := &Node{Name: m.Name + "_silu", OpType: "SiLU", Domain: ingotDomain, Attrs: ops.Attrs{}, Inputs: []*Value{x}, Outputs: []*Value{out}}
+		g.dropNode(sg)
+		g.dropNode(m)
+		dead[sg] = true
+		g.Values[out.Name] = out
+		out.Producer = n
+		x.Consumers = append(x.Consumers, n)
+		for i, nn := range g.Nodes {
+			if nn == m {
+				g.Nodes[i] = n
+				break
+			}
+		}
+		stats["fuse-silu"]++
+		changed = true
+	}
+	g.compact(dead)
+	if changed {
+		if g.Opsets == nil {
+			g.Opsets = map[string]int{}
+		}
+		g.Opsets[ingotDomain] = 1
+	}
 	return changed
 }

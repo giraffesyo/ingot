@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"github.com/giraffesyo/ingot/kernels/par"
 	"math"
 
 	"github.com/giraffesyo/ingot/tensor"
@@ -108,10 +109,15 @@ func (o *reduceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	}
 	if trailing && len(of) > 0 {
 		inner := cnt
-		for i := range of {
-			row := xf[i*inner : (i+1)*inner]
-			of[i] = reduceRow(o.kind, of[i], row)
+		grain := len(of)
+		if len(xf) > 2*unaryChunk {
+			grain = max(1, unaryChunk/max(inner, 1))
 		}
+		kind := o.kind
+		par.For(len(of), grain, func(i, _ int) {
+			row := xf[i*inner : (i+1)*inner]
+			of[i] = reduceRow(kind, of[i], row)
+		})
 	} else {
 		idx := make([]int, r)
 		oi := 0
@@ -163,9 +169,22 @@ func accum(kind string, acc, v float32) float32 {
 func reduceRow(kind string, acc float32, row []float32) float32 {
 	switch kind {
 	case "sum", "mean":
-		var s float32
-		for _, v := range row {
-			s += v
+		// 8 independent accumulators: a single chain is latency-bound.
+		var s0, s1, s2, s3, s4, s5, s6, s7 float32
+		i := 0
+		for ; i+8 <= len(row); i += 8 {
+			s0 += row[i]
+			s1 += row[i+1]
+			s2 += row[i+2]
+			s3 += row[i+3]
+			s4 += row[i+4]
+			s5 += row[i+5]
+			s6 += row[i+6]
+			s7 += row[i+7]
+		}
+		s := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+		for ; i < len(row); i++ {
+			s += row[i]
 		}
 		return acc + s
 	case "max":

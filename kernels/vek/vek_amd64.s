@@ -370,6 +370,63 @@ done:
 	VZEROUPPER
 	RET
 
+// func silu_asm(dst, src []float32, n int, ...)
+TEXT ·silu_asm(SB), NOSPLIT, $0-56
+	MOVQ dst_base+0(FP), DI
+	MOVQ src_base+24(FP), SI
+	MOVQ n+48(FP), CX
+	VBROADCASTSS c_explo<>(SB), Y4
+	VBROADCASTSS c_exphi<>(SB), Y5
+	VBROADCASTSS c_log2e<>(SB), Y6
+	VBROADCASTSS c_ln2hi<>(SB), Y7
+	VBROADCASTSS c_ln2lo<>(SB), Y8
+	VBROADCASTSS c_p0<>(SB), Y9
+	VBROADCASTSS c_p1<>(SB), Y10
+	VBROADCASTSS c_p2<>(SB), Y11
+	VBROADCASTSS c_p3<>(SB), Y12
+	VBROADCASTSS c_p4<>(SB), Y13
+	VBROADCASTSS c_p5<>(SB), Y14
+	VBROADCASTSS c_one<>(SB), Y15
+loop:
+	CMPQ CX, $8
+	JL done
+	VMOVUPS (SI), Y0
+	VXORPS Y1, Y1, Y1
+	VSUBPS Y0, Y1, Y0          // -x
+	VMAXPS Y4, Y0, Y0          // clamp lo
+	VMINPS Y5, Y0, Y0          // clamp hi
+	VMULPS Y6, Y0, Y1          // x*log2e
+	VROUNDPS $0, Y1, Y1        // n = round-to-nearest
+	VFNMADD231PS Y7, Y1, Y0    // r = x - n*ln2hi
+	VFNMADD231PS Y8, Y1, Y0    // r -= n*ln2lo
+	VMOVUPS Y10, Y2            // p1
+	VFMADD231PS Y9, Y0, Y2     // p0*r + p1
+	VMOVUPS Y11, Y3            // p2
+	VFMADD231PS Y2, Y0, Y3
+	VMOVUPS Y12, Y2            // p3
+	VFMADD231PS Y3, Y0, Y2
+	VMOVUPS Y13, Y3            // p4
+	VFMADD231PS Y2, Y0, Y3
+	VMOVUPS Y14, Y2            // p5
+	VFMADD231PS Y3, Y0, Y2     // P(r)
+	VMULPS Y0, Y0, Y3          // r^2
+	VADDPS Y15, Y0, Y0         // r+1
+	VFMADD231PS Y3, Y2, Y0     // += P*r^2
+	VCVTPS2DQ Y1, Y1           // n → int
+	VPSLLD $23, Y1, Y1
+	VPADDD Y1, Y0, Y0          // * 2^n
+	VADDPS Y15, Y0, Y0         // 1+e^-x
+	VDIVPS Y0, Y15, Y0         // sigmoid
+	VMULPS (SI), Y0, Y0        // * x (reload from source)
+	VMOVUPS Y0, (DI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP loop
+done:
+	VZEROUPPER
+	RET
+
 // func sigmoid_asm(dst, src []float32, n int, ...)
 TEXT ·sigmoid_asm(SB), NOSPLIT, $0-56
 	MOVQ dst_base+0(FP), DI
