@@ -252,6 +252,11 @@ func (g *gemmCtx) smallM(m, n, k int, a, b, c []float32, firstOverwrite bool, wo
 			g.smallPackA(t)
 		}
 	}
+	g.smallMSweep(m, k, workers)
+}
+
+// smallMSweep runs the N-panel sweep of the small-M path over g.asm.
+func (g *gemmCtx) smallMSweep(m, k, workers int) {
 	g.phase = phaseSmallM
 	if workers > 1 {
 		grain := max(1, macroTaskMACs/(NR*m*k))
@@ -370,4 +375,83 @@ func scaleC(m, n int, beta float32, c []float32, ldc int) {
 			}
 		}
 	}
+}
+
+// PackedA is A[m×k] pre-packed into the small-M path's panel layout, for
+// operands that are reused across many calls (weights). Build once with PackA
+// and multiply with SgemmPackedA; the pack cost (a full pass over A, run every
+// call otherwise) is paid once.
+type PackedA struct {
+	m, k int
+	data []float32 // [kBlock][mPanel][KC*MR]
+}
+
+// Rows and Cols return the logical dimensions of the packed matrix.
+func (p *PackedA) Rows() int { return p.m }
+func (p *PackedA) Cols() int { return p.k }
+
+// PackFits reports whether an m×k operand is small enough for the pre-packed
+// small-M sweep path (SgemmPackedA): the packed A must stay cache-resident.
+func PackFits(m, k int) bool {
+	mPanels := (m + MR - 1) / MR
+	return mPanels*MR*((k+KC-1)/KC)*KC <= smallMMaxA
+}
+
+// PackA packs row-major A[m×k] (row stride lda); if transA, A is stored as
+// [k×m] and op(A)=Aᵀ is packed.
+func PackA(transA bool, m, k int, a []float32, lda int) *PackedA {
+	mPanels := (m + MR - 1) / MR
+	nkb := (k + KC - 1) / KC
+	p := &PackedA{m: m, k: k, data: make([]float32, nkb*mPanels*KC*MR)}
+	for kb := 0; kb < nkb; kb++ {
+		p0 := kb * KC
+		kc := min(KC, k-p0)
+		for ip := 0; ip < mPanels; ip++ {
+			mr := min(MR, m-ip*MR)
+			dst := p.data[(kb*mPanels+ip)*KC*MR:]
+			if transA {
+				packAPanelT(kc, mr, a[p0*lda+ip*MR:], lda, dst)
+			} else {
+				packAPanel(kc, mr, a[ip*MR*lda+p0:], lda, dst)
+			}
+		}
+	}
+	return p
+}
+
+// SgemmPackedA computes C = op(A)·B + beta·C with a pre-packed A (see PackA),
+// B[k×n] row-major with stride ldb. workers ≤ 1 keeps the work on the calling
+// goroutine (like SgemmSerial); otherwise the N panels are swept in parallel.
+func SgemmPackedA(pa *PackedA, n int, b []float32, ldb int, beta float32, c []float32, ldc int, parallel bool) {
+	m, k := pa.m, pa.k
+	if m == 0 || n == 0 {
+		return
+	}
+	if k == 0 {
+		scaleC(m, n, beta, c, ldc)
+		return
+	}
+	if beta != 0 && beta != 1 {
+		scaleC(m, n, beta, c, ldc)
+	}
+	workers := 1
+	if parallel {
+		workers = par.Workers()
+		if w := int(int64(m) * int64(n) * int64(k) / minTaskMACs); w < workers {
+			workers = max(w, 1)
+		}
+	}
+	g := getCtx()
+	defer putCtx(g)
+	g.alpha, g.ldb, g.ldc = 1, ldb, ldc
+	g.transA, g.transB = false, false
+	g.mc, g.nc, g.kc = m, n, k
+	g.mPanels = (m + MR - 1) / MR
+	g.nPanels = (n + NR - 1) / NR
+	g.acc = beta != 0
+	g.bsrc, g.cblk = b, c
+	saved := g.asm
+	g.asm = pa.data
+	g.smallMSweep(m, k, workers)
+	g.asm = saved
 }

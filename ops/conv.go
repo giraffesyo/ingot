@@ -23,6 +23,33 @@ type convOp struct {
 	autoPad   string
 	kshape    []int64 // may be nil (infer from W)
 	epi       epilogue
+
+	// Pre-packed weights (one gemm.PackedA per group), built on first use and
+	// reused while the weight tensor's storage is unchanged (constant weights).
+	packMu   sync.Mutex
+	packed   []*gemm.PackedA
+	packSrc  *float32
+	packLen  int
+	packFits bool
+}
+
+// packedWeights returns the per-group pre-packed W[Mg×K] matrices, or nil if
+// the shape is too large for the packed (small-M sweep) path.
+func (o *convOp) packedWeights(wf []float32, G, Mg, K int) []*gemm.PackedA {
+	if !gemm.PackFits(Mg, K) {
+		return nil
+	}
+	o.packMu.Lock()
+	defer o.packMu.Unlock()
+	if o.packSrc == &wf[0] && o.packLen == len(wf) {
+		return o.packed
+	}
+	pk := make([]*gemm.PackedA, G)
+	for g := 0; g < G; g++ {
+		pk[g] = gemm.PackA(false, Mg, K, wf[g*Mg*K:], K)
+	}
+	o.packed, o.packSrc, o.packLen = pk, &wf[0], len(wf)
+	return pk
 }
 
 func buildConv(n NodeInfo) (Op, error) {
@@ -140,12 +167,17 @@ const (
 // GEMM per chunk, so the bias add happens in-cache; otherwise the parallel
 // GEMM is used directly.
 func (o *convOp) pointwise(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg, M, K, P int) {
+	pk := o.packedWeights(wf, G, Mg, K)
 	Pc := max(1, convTaskMACs/max(1, Mg*K))
 	nChunks := (P + Pc - 1) / Pc
 	if Pc < 64 || N*G*nChunks < 2 {
 		for n := 0; n < N; n++ {
 			for g := 0; g < G; g++ {
-				gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P:], P, 0, of[(n*M+g*Mg)*P:], P)
+				if pk != nil {
+					gemm.SgemmPackedA(pk[g], P, xf[(n*C+g*Cg)*P:], P, 0, of[(n*M+g*Mg)*P:], P, true)
+				} else {
+					gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P:], P, 0, of[(n*M+g*Mg)*P:], P)
+				}
 			}
 		}
 		o.finish(of, bias, N, M, P)
@@ -158,7 +190,11 @@ func (o *convOp) pointwise(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg
 		p0 := ch * Pc
 		pc := min(Pc, P-p0)
 		dst := of[(n*M+g*Mg)*P+p0:]
-		gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P+p0:], P, 0, dst, P)
+		if pk != nil {
+			gemm.SgemmPackedA(pk[g], pc, xf[(n*C+g*Cg)*P+p0:], P, 0, dst, P, false)
+		} else {
+			gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P+p0:], P, 0, dst, P)
+		}
 		o.finishTile(dst, bias, g*Mg, Mg, P, pc)
 	})
 }
@@ -169,6 +205,7 @@ func (o *convOp) pointwise(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg
 // adds the bias while the slab is hot. A single-task problem falls back to the
 // parallel im2col + parallel GEMM.
 func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg, M, K, H, W, KH, KW, OH, OW int, pads [4]int) {
+	pk := o.packedWeights(wf, G, Mg, K)
 	P := OH * OW
 	rows := max(1, convColChunkFloats/max(1, K*OW))
 	// Ensure enough tasks to occupy the pool when the problem allows.
@@ -183,7 +220,11 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 		for n := 0; n < N; n++ {
 			for g := 0; g < G; g++ {
 				o.im2colPar(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OH, OW, pads)
-				gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, cf, P, 0, of[(n*M+g*Mg)*P:], P)
+				if pk != nil {
+					gemm.SgemmPackedA(pk[g], P, cf, P, 0, of[(n*M+g*Mg)*P:], P, true)
+				} else {
+					gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, cf, P, 0, of[(n*M+g*Mg)*P:], P)
+				}
 			}
 		}
 		if ctx.Pool != nil {
@@ -207,7 +248,11 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 		cf := bufs[w].F32()[:K*pc]
 		o.im2colRows(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OW, oh0, oh1, pads)
 		dst := of[(n*M+g*Mg)*P+oh0*OW:]
-		gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, cf, pc, 0, dst, P)
+		if pk != nil {
+			gemm.SgemmPackedA(pk[g], pc, cf, pc, 0, dst, P, false)
+		} else {
+			gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, cf, pc, 0, dst, P)
+		}
 		o.finishTile(dst, bias, g*Mg, Mg, P, pc)
 	})
 	if ctx.Pool != nil {
