@@ -126,3 +126,20 @@ func Sigmoid(dst, src []float32) {
 func DwRowS1(dst, src, wpacked []float32, ncols, W, KH, KW int) {
 	dwTail(dst, src, wpacked, 0, ncols, W, KH, KW)
 }
+
+// Dot returns Σ a[i]*b[i] over min lengths (4 independent accumulators).
+func Dot(a, b []float32) float32 {
+	n := min(len(a), len(b))
+	var s0, s1, s2, s3 float32
+	i := 0
+	for ; i+4 <= n; i += 4 {
+		s0 += a[i] * b[i]
+		s1 += a[i+1] * b[i+1]
+		s2 += a[i+2] * b[i+2]
+		s3 += a[i+3] * b[i+3]
+	}
+	for ; i < n; i++ {
+		s0 += a[i] * b[i]
+	}
+	return (s0 + s1) + (s2 + s3)
+}
