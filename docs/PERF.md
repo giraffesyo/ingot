@@ -441,3 +441,42 @@ dominates and is the next target; rec batching cannot show until it does.
   Resize+Add (FPN upsample-add) and GAP into the SE conv.
 - Weight pre-packing at load (GEMM A-panels) — removes pack-A from every call.
 - SME GEMM (Apple M4+ / Arm v9 SME2 servers), see above.
+
+
+## Phase 4, round 2 — the hand-off was the bottleneck (2026-08-22)
+
+A CPU profile of `BenchmarkOCRModels/rec_320` (MT) showed **78% of samples in
+`runtime.lock2` / `usleep` / `pthread_cond_*` and 1.7% in the GEMM
+micro-kernel.** `kernels/par` helpers spun with a non-blocking channel receive
+plus `runtime.Gosched()` per iteration: 17 helpers hammering one channel mutex
+and the scheduler lock after every region. The pool now publishes a job through
+an atomic pointer + generation counter; helpers spin on the counter (a clock
+read every 1024 spins), park on a buffered channel after `SpinNS`, and only
+parked helpers get wake tokens. Longer spin windows (200 µs, 1 ms) measured
+*worse* — spinning helpers on efficiency cores slow the caller's serial
+sections — so 50 µs stays.
+
+Plus: detection preprocessing resampled through `image.At` (6.4 M allocations
+per 20 pipeline runs) → packed-RGB source + parallel rows; constant conv
+weights were re-packed into micro-kernel panels every call (`packAPanel` 14% of
+rec MT) → `gemm.PackA`/`SgemmPackedA`, cached per op.
+
+| model | round 1 | round 2 | ORT MT | ratio |
+|---|---|---|---|---|
+| det_640 | 12.6 ms | **8.4 ms** | 17.8 | **0.47×** |
+| det_960 | 21.2 ms | **16.8 ms** | 44.9 | **0.37×** |
+| rec_320 | 5.5 ms | **2.7 ms** | 6.3 | **0.43×** |
+| rec_b8_320 | 32.7 ms | **17.7 ms** | 36.4 | **0.49×** |
+| pipeline img_006 (det+rec) | 45 ms | **24 ms** | — | |
+
+Every PP-OCRv4 configuration now runs at roughly **half of ONNX Runtime's
+multi-threaded latency** on this machine. 1T is unchanged by this round (no
+hand-off single-threaded). Remaining MT overhead: ~13 µs/node in rec
+(~1200 allocs/op: Tensor structs, shape clones, closures, per-run maps in
+Session.Run), park/wake churn around serial ops, and the rec per-forward fixed
+cost (~2.5 ms at batch 1 → batching pays; `Pipeline` batches within width
+ratio 1.25).
+
+Method notes: profile MT runs with `-cpuprofile` — lock contention is invisible
+in per-op timings; and re-run any benchmark three times (first-run variance of
+±20% was seen even on a quiet machine).

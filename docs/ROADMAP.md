@@ -47,14 +47,16 @@
       (bias+activation+post-affine) — det 330→102 nodes, rec 440→206
 - [x] amd64 AVX2 vek + gemm kernels (AVX-512 opt-in; loses on Zen4/Ice Lake)
 - [x] ≤2× ONNX Runtime CPU on PP-OCRv4 det + rec, documented (docs/PERF.md):
-      MT det 0.58–0.82× ORT, rec ~1.0×; 1T 1.2–1.8× (ORT uses SME on M4+)
+      MT det 0.37–0.47× ORT, rec 0.43–0.49×; 1T 1.0–1.5× (ORT uses SME on M4+)
 - [x] vek.Exp/Sigmoid (NEON + AVX2) → Softmax, Sigmoid, Exp op (2.8 Gelem/s 1T)
 - [ ] GELU/Tanh/SiLU SIMD; fused attention; layernorm SIMD
 - [ ] int8 GEMM (SDOT/UDOT on arm64, VNNI on amd64), bf16
-- [ ] weight pre-packing at load; in-place ops; static memory planner
+- [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
+      (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
+- [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
 - [ ] SME GEMM micro-kernel (Apple M4+ / Armv9 SME2) — the only way to match
       ORT single-threaded on that hardware
-- [ ] rec batching in the OCR pipeline
+- [x] rec batching in the OCR pipeline (width-grouped, padding-bounded)
 
 ## Coverage (breadth)
 - [x] model zoo conformance harness (graph.TestZoo, auto-discovers manifests)
