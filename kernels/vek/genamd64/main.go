@@ -221,8 +221,9 @@ func main() {
 	})
 
 	g.axpy()
-	g.dwconv(3)
-	g.dwconv(5)
+	for _, k := range dwShapes {
+		g.dwconv(k[0], k[1])
+	}
 
 	os.Stdout.WriteString(g.b.String())
 }
@@ -254,8 +255,8 @@ func (g *gen) axpy() {
 
 // dwconv: one interior row of a stride-1 KxK depthwise conv, adding into dst.
 // dst += sum_{kh,kw} wpacked[kh*K+kw] * src[kh*W + col + kw]. 8 cols/iter.
-func (g *gen) dwconv(K int) {
-	name := fmt.Sprintf("dwconv%dx%ds1", K, K)
+func (g *gen) dwconv(KH, KW int) {
+	name := fmt.Sprintf("dwconv%dx%ds1", KH, KW)
 	g.w("// func %s_asm(dst, src []float32, wpacked []float32, ncols, W int)", name)
 	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-88", name)
 	g.w("\tMOVQ dst_base+0(FP), DI")
@@ -269,14 +270,14 @@ func (g *gen) dwconv(K int) {
 	g.w("\tCMPQ CX, $8")
 	g.w("\tJL done")
 	g.w("\tVMOVUPS (DI), Y0 // acc = dst[c..c+8]")
-	// set up row pointers R8..R(8+K-1) = SI + kh*DX
+	// set up row pointers R8..R(8+KH-1) = SI + kh*DX
 	g.w("\tMOVQ SI, %s", rows[0])
-	for kh := 1; kh < K; kh++ {
+	for kh := 1; kh < KH; kh++ {
 		g.w("\tLEAQ (%s)(DX*1), %s", rows[kh-1], rows[kh])
 	}
-	for kh := 0; kh < K; kh++ {
-		for kw := 0; kw < K; kw++ {
-			t := kh*K + kw
+	for kh := 0; kh < KH; kh++ {
+		for kw := 0; kw < KW; kw++ {
+			t := kh*KW + kw
 			g.w("\tVBROADCASTSS %d(BX), Y1", t*4)
 			g.w("\tVMOVUPS %d(%s), Y2", kw*4, rows[kh])
 			g.w("\tVFMADD231PS Y1, Y2, Y0")
@@ -292,3 +293,6 @@ func (g *gen) dwconv(K int) {
 	g.w("\tRET")
 	g.w("")
 }
+
+// dwShapes are the (KH, KW) depthwise row kernels generated (see ../gen).
+var dwShapes = [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}}

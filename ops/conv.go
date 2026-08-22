@@ -17,6 +17,9 @@ type convOp struct {
 	group     int
 	dwPadded  []float32 // lazily packed padded depthwise weights (C * paddedK)
 	dwOnce    sync.Once
+	dwS2Once  sync.Once
+	dwEven    []float32 // stride-2: even-column taps per channel, KH×ceil(KW/2), padded
+	dwOdd     []float32 // stride-2: odd-column taps per channel, KH×floor(KW/2), padded
 	strides   [2]int
 	dilations [2]int
 	pads      [4]int // top, left, bottom, right
@@ -140,10 +143,13 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	depthwise := G == C && Cg == 1 && Mg == 1
 	pointwise := KH == 1 && KW == 1 && o.strides == [2]int{1, 1} && pads == [4]int{} && o.dilations == [2]int{1, 1}
 	dwFast := depthwise && o.strides == [2]int{1, 1} && o.dilations == [2]int{1, 1} && KH == KW && (KH == 3 || KH == 5)
+	dwFastS2 := depthwise && o.strides == [2]int{2, 2} && o.dilations == [2]int{1, 1} && KH == KW && (KH == 3 || KH == 5)
 
 	switch {
 	case dwFast:
 		o.depthwiseS1(ctx, xf, wf, bias, of, N, C, H, W, KH, OH, OW, pads)
+	case dwFastS2:
+		o.depthwiseS2(ctx, xf, wf, bias, of, N, C, H, W, KH, OH, OW, pads)
 	case depthwise:
 		o.depthwise(xf, wf, bias, of, N, C, H, W, KH, KW, OH, OW, pads)
 	case pointwise:
@@ -530,4 +536,93 @@ func (o *convOp) depthwiseS1(ctx *Ctx, x, w, bias, out []float32, N, C, H, W, K,
 
 func init() {
 	Register("", "Conv", 1, buildConv)
+}
+
+// depthwiseS2 is a stride-2, dilation-1 KxK (K in {3,5}) depthwise conv. Each
+// channel is padded into a zero-bordered scratch plane, whose columns are then
+// de-interleaved into an even plane E[r][i] = pad[r][2i] and an odd plane
+// O[r][i] = pad[r][2i+1]. A stride-2 tap (kh,kw) at output column ow then reads
+// E[2oh+kh][ow+kw/2] (kw even) or O[2oh+kh][ow+(kw-1)/2] (kw odd) — stride 1
+// on the half planes — so each output row is two stride-1 row-kernel passes:
+// KH×ceil(K/2) over E and KH×floor(K/2) over O (vek.DwRowS1, NEON/AVX2).
+func (o *convOp) depthwiseS2(ctx *Ctx, x, w, bias, out []float32, N, C, H, W, K, OH, OW int, pads [4]int) {
+	pt, pl, pb, pr := pads[0], pads[1], pads[2], pads[3]
+	Hp, Wp := H+pt+pb, W+pl+pr
+	Wh := (Wp + 1) / 2 // half-plane row width (even plane needs ceil)
+	KE, KO := (K+1)/2, K/2
+	padE, padO := (K*KE+7)/8*8, (K*KO+7)/8*8
+	o.dwS2Once.Do(func() {
+		o.dwEven = make([]float32, C*padE)
+		o.dwOdd = make([]float32, C*padO)
+		for c := 0; c < C; c++ {
+			for kh := 0; kh < K; kh++ {
+				for kw := 0; kw < K; kw++ {
+					v := w[c*K*K+kh*K+kw]
+					if kw%2 == 0 {
+						o.dwEven[c*padE+kh*KE+kw/2] = v
+					} else {
+						o.dwOdd[c*padO+kh*KO+kw/2] = v
+					}
+				}
+			}
+		}
+	})
+	workers := par.Workers()
+	plane := Hp * Wp
+	half := Hp * Wh
+	per := plane + 2*half
+	scratch := ctx.NewUninit(tensor.F32, workers, per)
+	sf := scratch.F32()
+	grain := max(1, 20000/max(OH*OW*K*K, 1))
+	par.For(N*C, grain, func(nc, wk int) {
+		c := nc % C
+		xc := x[nc*H*W : (nc+1)*H*W]
+		oc := out[nc*OH*OW : (nc+1)*OH*OW]
+		buf := sf[wk*per : (wk+1)*per]
+		pad := buf[:plane]
+		ev := buf[plane : plane+half]
+		od := buf[plane+half : plane+2*half]
+		// Padded plane: zero border, interior copied.
+		clear(pad[:pt*Wp])
+		clear(pad[(pt+H)*Wp:])
+		for i := 0; i < H; i++ {
+			row := pad[(pt+i)*Wp : (pt+i+1)*Wp]
+			clear(row[:pl])
+			copy(row[pl:pl+W], xc[i*W:(i+1)*W])
+			clear(row[pl+W:])
+		}
+		// De-interleave columns.
+		for r := 0; r < Hp; r++ {
+			prow := pad[r*Wp : (r+1)*Wp]
+			erow := ev[r*Wh : (r+1)*Wh]
+			orow := od[r*Wh : (r+1)*Wh]
+			i := 0
+			for ; i+1 < Wp; i += 2 {
+				erow[i/2] = prow[i]
+				orow[i/2] = prow[i+1]
+			}
+			if i < Wp {
+				erow[i/2] = prow[i]
+				orow[i/2] = 0
+			}
+		}
+		var b float32
+		if bias != nil {
+			b = bias[c]
+		}
+		we := o.dwEven[c*padE : (c+1)*padE]
+		wo := o.dwOdd[c*padO : (c+1)*padO]
+		for oh := 0; oh < OH; oh++ {
+			row := oc[oh*OW : (oh+1)*OW]
+			for i := range row {
+				row[i] = b
+			}
+			vek.DwRowS1(row, ev[2*oh*Wh:], we, OW, Wh, K, KE)
+			vek.DwRowS1(row, od[2*oh*Wh:], wo, OW, Wh, K, KO)
+		}
+		o.epi.apply(oc)
+	})
+	if ctx.Pool != nil {
+		ctx.Pool.Put(scratch)
+	}
 }

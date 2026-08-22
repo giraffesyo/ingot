@@ -216,11 +216,18 @@ func main() {
 	})
 
 	g.axpy()
-	g.dwconv(3)
-	g.dwconv(5)
+	// Depthwise row kernels: square stride-1 taps, and the even/odd sub-kernels
+	// the stride-2 path uses after de-interleaving columns (3x3 → 3x2 + 3x1,
+	// 5x5 → 5x3 + 5x2).
+	for _, k := range dwShapes {
+		g.dwconv(k[0], k[1])
+	}
 
 	os.Stdout.WriteString(g.b.String())
 }
+
+// dwShapes are the (KH, KW) depthwise row kernels generated.
+var dwShapes = [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}}
 
 // dwconv emits func dwconvKxKs1_asm(dst, src []float32, wpacked []float32, ncols, W int):
 // one interior output row of a stride-1, dilation-1, KxK depthwise conv, adding
@@ -228,9 +235,9 @@ func main() {
 // input element for output column 0 (all taps in-bounds). wpacked holds K*K
 // weights one per lane, padded to a multiple of 4, loaded into V25.. once.
 // ncols is a multiple of 4.
-func (g *gen) dwconv(K int) {
-	name := fmt.Sprintf("dwconv%dx%ds1", K, K)
-	nw := K * K
+func (g *gen) dwconv(KH, KW int) {
+	name := fmt.Sprintf("dwconv%dx%ds1", KH, KW)
+	nw := KH * KW
 	nreg := (nw + 3) / 4
 	g.w("// func %s_asm(dst, src []float32, wpacked []float32, ncols, W int)", name)
 	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-88", name)
@@ -253,15 +260,15 @@ func (g *gen) dwconv(K int) {
 	g.w("	CMP $4, R3")
 	g.w("	BLT done")
 	g.w("	VLD1 (R0), [V0.S4] // acc = dst[c..c+4]")
-	for kh := 0; kh < K; kh++ {
+	for kh := 0; kh < KH; kh++ {
 		if kh == 0 {
 			g.w("	MOVD R1, R5")
 		} else {
 			g.w("	ADD R4, R5, R5")
 		}
 		g.w("	MOVD R5, R6")
-		for kw := 0; kw < K; kw++ {
-			t := kh*K + kw
+		for kw := 0; kw < KW; kw++ {
+			t := kh*KW + kw
 			if kw > 0 {
 				g.w("	ADD $4, R6, R6")
 			}

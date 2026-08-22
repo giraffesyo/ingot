@@ -89,10 +89,14 @@ func Axpy(dst, src []float32, a float32) {
 }
 
 // DwRow3x3S1: scalar fallback (full width).
-func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) { dwTail(dst, src, wpacked, 0, ncols, W, 3) }
+func DwRow3x3S1(dst, src, wpacked []float32, ncols, W int) {
+	dwTail(dst, src, wpacked, 0, ncols, W, 3, 3)
+}
 
 // DwRow5x5S1: scalar fallback (full width).
-func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) { dwTail(dst, src, wpacked, 0, ncols, W, 5) }
+func DwRow5x5S1(dst, src, wpacked []float32, ncols, W int) {
+	dwTail(dst, src, wpacked, 0, ncols, W, 5, 5)
+}
 
 func clamp01(x float32) float32 {
 	if x < 0 {
@@ -116,4 +120,9 @@ func Sigmoid(dst, src []float32) {
 	for i := 0; i < min(len(dst), len(src)); i++ {
 		dst[i] = 1 / (1 + expScalar(-src[i]))
 	}
+}
+
+// DwRowS1: scalar fallback (full width).
+func DwRowS1(dst, src, wpacked []float32, ncols, W, KH, KW int) {
+	dwTail(dst, src, wpacked, 0, ncols, W, KH, KW)
 }

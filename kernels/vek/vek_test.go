@@ -181,3 +181,39 @@ func BenchmarkVek(b *testing.B) {
 	run("Exp", func() { Exp(out, x) })
 	run("Sigmoid", func() { Sigmoid(out, x) })
 }
+
+// TestDwRowS1 checks every depthwise row kernel shape against a scalar
+// reference over all tail residues.
+func TestDwRowS1(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 10))
+	for _, k := range [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}, {4, 4}} {
+		KH, KW := k[0], k[1]
+		for _, ncols := range []int{0, 1, 3, 4, 7, 8, 9, 16, 17, 33, 100} {
+			W := ncols + KW + 3
+			src := randf(r, KH*W)
+			w := randf(r, KH*KW)
+			wp := make([]float32, (KH*KW+7)/8*8)
+			copy(wp, w)
+			bias := randf(r, ncols)
+			got := append([]float32(nil), bias...)
+			DwRowS1(got, src, wp, ncols, W, KH, KW)
+			want := append([]float32(nil), bias...)
+			for c := 0; c < ncols; c++ {
+				var mag float64
+				for kh := 0; kh < KH; kh++ {
+					for kw := 0; kw < KW; kw++ {
+						term := w[kh*KW+kw] * src[kh*W+c+kw]
+						want[c] += term
+						mag += math.Abs(float64(term))
+					}
+				}
+				// FMA vs separate multiply/add reorder the rounding; bound the
+				// error by the magnitude of the summed terms, not the (possibly
+				// cancelled) result.
+				if d := math.Abs(float64(got[c] - want[c])); d > 2e-6*(1+mag) {
+					t.Fatalf("DwRowS1_%dx%d_n%d[%d]: got %g want %g (mag %g)", KH, KW, ncols, c, got[c], want[c], mag)
+				}
+			}
+		}
+	}
+}
