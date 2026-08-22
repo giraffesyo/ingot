@@ -115,19 +115,74 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	case depthwise:
 		o.depthwise(xf, wf, bias, of, N, C, H, W, KH, KW, OH, OW, pads)
 	case pointwise:
-		// out[n][g] = W_g[Mg×K] · X[n][g][K×P]
+		o.pointwise(ctx, xf, wf, bias, of, N, C, G, Cg, Mg, M, K, P)
+	default:
+		o.im2colConv(ctx, xf, wf, bias, of, N, C, G, Cg, Mg, M, K, H, W, KH, KW, OH, OW, pads)
+	}
+	return []*tensor.Tensor{out}, nil
+}
+
+// Tile sizing for the chunked conv paths. Each task runs a serial GEMM over a
+// column range of the output, so the im2col scratch (K×cols floats) stays
+// L2-resident and the bias epilogue runs while the tile is still hot.
+const (
+	convColChunkFloats = 1 << 17 // im2col scratch per task: 512 KB
+	convTaskMACs       = 1 << 18 // pointwise: target work per task (~2-3 µs)
+)
+
+// pointwise: out[n][g] = W_g[Mg×K] · X[n][g][K×P]. For cheap GEMMs (small
+// Mg·K) the work is parallelised here over column chunks of P with a serial
+// GEMM per chunk, so the bias add happens in-cache; otherwise the parallel
+// GEMM is used directly.
+func (o *convOp) pointwise(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg, M, K, P int) {
+	Pc := max(1, convTaskMACs/max(1, Mg*K))
+	nChunks := (P + Pc - 1) / Pc
+	if Pc < 64 || N*G*nChunks < 2 {
 		for n := 0; n < N; n++ {
 			for g := 0; g < G; g++ {
-				gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*H*W:], P, 0, of[(n*M+g*Mg)*P:], P)
+				gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P:], P, 0, of[(n*M+g*Mg)*P:], P)
 			}
 		}
 		addBias(of, bias, N, M, P)
-	default:
-		col := ctx.New(tensor.F32, K, P)
+		return
+	}
+	par.For(N*G*nChunks, 1, func(t, _ int) {
+		ch := t % nChunks
+		ng := t / nChunks
+		n, g := ng/G, ng%G
+		p0 := ch * Pc
+		pc := min(Pc, P-p0)
+		dst := of[(n*M+g*Mg)*P+p0:]
+		gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, xf[(n*C+g*Cg)*P+p0:], P, 0, dst, P)
+		if bias != nil {
+			for m := 0; m < Mg; m++ {
+				row := dst[m*P : m*P+pc]
+				vek.AddScalar(row, row, bias[g*Mg+m])
+			}
+		}
+	})
+}
+
+// im2colConv: general conv as im2col + GEMM, tiled over output rows. Each task
+// owns [oh0,oh1) of one (n, g): it packs the column matrix for those rows into
+// a per-worker scratch buffer, runs a serial GEMM into the output slab, and
+// adds the bias while the slab is hot. A single-task problem falls back to the
+// parallel im2col + parallel GEMM.
+func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, Mg, M, K, H, W, KH, KW, OH, OW int, pads [4]int) {
+	P := OH * OW
+	rows := max(1, convColChunkFloats/max(1, K*OW))
+	// Ensure enough tasks to occupy the pool when the problem allows.
+	if want := 2 * par.Workers(); N*G*((OH+rows-1)/rows) < want && OH > 1 {
+		rows = max(1, min(rows, (OH*N*G+want-1)/want))
+	}
+	nChunks := (OH + rows - 1) / rows
+	tasks := N * G * nChunks
+	if tasks < 2 {
+		col := ctx.NewUninit(tensor.F32, K, P)
 		cf := col.F32()
 		for n := 0; n < N; n++ {
 			for g := 0; g < G; g++ {
-				o.im2col(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OH, OW, pads)
+				o.im2colPar(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OH, OW, pads)
 				gemm.Sgemm(Mg, P, K, 1, wf[g*Mg*K:], K, cf, P, 0, of[(n*M+g*Mg)*P:], P)
 			}
 		}
@@ -135,71 +190,110 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			ctx.Pool.Put(col)
 		}
 		addBias(of, bias, N, M, P)
+		return
 	}
-	return []*tensor.Tensor{out}, nil
+	nw := par.Workers()
+	bufs := make([]*tensor.Tensor, nw)
+	for w := range bufs {
+		bufs[w] = ctx.NewUninit(tensor.F32, K, rows*OW)
+	}
+	par.For(tasks, 1, func(t, w int) {
+		ch := t % nChunks
+		ng := t / nChunks
+		n, g := ng/G, ng%G
+		oh0 := ch * rows
+		oh1 := min(oh0+rows, OH)
+		pc := (oh1 - oh0) * OW
+		cf := bufs[w].F32()[:K*pc]
+		o.im2colRows(xf[(n*C+g*Cg)*H*W:], cf, Cg, H, W, KH, KW, OW, oh0, oh1, pads)
+		dst := of[(n*M+g*Mg)*P+oh0*OW:]
+		gemm.SgemmSerial(Mg, pc, K, 1, wf[g*Mg*K:], K, cf, pc, 0, dst, P)
+		if bias != nil {
+			for m := 0; m < Mg; m++ {
+				row := dst[m*P : m*P+pc]
+				vek.AddScalar(row, row, bias[g*Mg+m])
+			}
+		}
+	})
+	if ctx.Pool != nil {
+		for _, b := range bufs {
+			ctx.Pool.Put(b)
+		}
+	}
 }
 
 func addBias(of, bias []float32, N, M, P int) {
 	if bias == nil {
 		return
 	}
-	for n := 0; n < N; n++ {
-		for m := 0; m < M; m++ {
-			b := bias[m]
-			row := of[(n*M+m)*P : (n*M+m+1)*P]
-			for i := range row {
-				row[i] += b
-			}
-		}
-	}
+	par.For(N*M, max(1, unaryChunk/max(P, 1)), func(i, _ int) {
+		row := of[i*P : (i+1)*P]
+		vek.AddScalar(row, row, bias[i%M])
+	})
 }
 
-// im2col writes col[(c*KH+kh)*KW+kw][oh*OW+ow] = x[c][oh*s+kh*d-pt][ow*s+kw*d-pl] (0 outside).
-// Parallel over the K rows.
-func (o *convOp) im2col(x, col []float32, C, H, W, KH, KW, OH, OW int, pads [4]int) {
-	sh, sw := o.strides[0], o.strides[1]
-	dh, dw := o.dilations[0], o.dilations[1]
-	pt, pl := pads[0], pads[1]
+// im2colPar writes the full column matrix
+// col[(c*KH+kh)*KW+kw][oh*OW+ow] = x[c][oh*s+kh*d-pt][ow*s+kw*d-pl] (0 outside),
+// parallel over the K rows.
+func (o *convOp) im2colPar(x, col []float32, C, H, W, KH, KW, OH, OW int, pads [4]int) {
 	P := OH * OW
 	K := C * KH * KW
 	grain := max(1, 8192/max(P, 1))
 	par.For(K, grain, func(k, _ int) {
-		c := k / (KH * KW)
-		kh := (k / KW) % KH
-		kw := k % KW
-		xc := x[c*H*W : (c+1)*H*W]
-		row := col[k*P : (k+1)*P]
-		for oh := 0; oh < OH; oh++ {
-			ih := oh*sh + kh*dh - pt
-			dst := row[oh*OW : (oh+1)*OW]
-			if ih < 0 || ih >= H {
-				clear(dst)
-				continue
+		o.im2colRow(x, col[k*P:(k+1)*P], k, H, W, KH, KW, OW, 0, OH, pads)
+	})
+}
+
+// im2colRows writes the column matrix restricted to output rows [oh0,oh1):
+// col[k][(oh-oh0)*OW+ow], serially.
+func (o *convOp) im2colRows(x, col []float32, C, H, W, KH, KW, OW, oh0, oh1 int, pads [4]int) {
+	pc := (oh1 - oh0) * OW
+	K := C * KH * KW
+	for k := 0; k < K; k++ {
+		o.im2colRow(x, col[k*pc:(k+1)*pc], k, H, W, KH, KW, OW, oh0, oh1, pads)
+	}
+}
+
+// im2colRow fills one K-row of the column matrix for output rows [oh0,oh1).
+func (o *convOp) im2colRow(x, row []float32, k, H, W, KH, KW, OW, oh0, oh1 int, pads [4]int) {
+	sh, sw := o.strides[0], o.strides[1]
+	dh, dw := o.dilations[0], o.dilations[1]
+	pt, pl := pads[0], pads[1]
+	c := k / (KH * KW)
+	kh := (k / KW) % KH
+	kw := k % KW
+	xc := x[c*H*W : (c+1)*H*W]
+	for oh := oh0; oh < oh1; oh++ {
+		ih := oh*sh + kh*dh - pt
+		dst := row[(oh-oh0)*OW : (oh-oh0+1)*OW]
+		if ih < 0 || ih >= H {
+			clear(dst)
+			continue
+		}
+		src := xc[ih*W : (ih+1)*W]
+		if sw == 1 && dw == 1 {
+			// contiguous window with edge clipping
+			start := kw - pl // iw at ow=0
+			lo := max(0, -start)
+			hi := min(OW, W-start)
+			clear(dst[:min(lo, OW)])
+			if hi > lo {
+				copy(dst[lo:hi], src[start+lo:start+hi])
 			}
-			src := xc[ih*W : (ih+1)*W]
-			if sw == 1 && dw == 1 {
-				// contiguous window with edge clipping
-				start := kw - pl // iw at ow=0
-				for ow := 0; ow < OW; ow++ {
-					iw := start + ow
-					if iw < 0 || iw >= W {
-						dst[ow] = 0
-					} else {
-						dst[ow] = src[iw]
-					}
-				}
-				continue
+			if hi < OW {
+				clear(dst[max(hi, 0):])
 			}
-			for ow := 0; ow < OW; ow++ {
-				iw := ow*sw + kw*dw - pl
-				if iw < 0 || iw >= W {
-					dst[ow] = 0
-				} else {
-					dst[ow] = src[iw]
-				}
+			continue
+		}
+		for ow := 0; ow < OW; ow++ {
+			iw := ow*sw + kw*dw - pl
+			if iw < 0 || iw >= W {
+				dst[ow] = 0
+			} else {
+				dst[ow] = src[iw]
 			}
 		}
-	})
+	}
 }
 
 // depthwise: one filter per channel. For each output row the kernel taps are
