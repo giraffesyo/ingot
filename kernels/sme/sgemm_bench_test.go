@@ -1,4 +1,4 @@
-package sme
+package sme_test
 
 import (
 	"math/rand/v2"
@@ -7,10 +7,11 @@ import (
 	"testing"
 
 	"github.com/giraffesyo/ingot/kernels/gemm"
+	"github.com/giraffesyo/ingot/kernels/sme"
 )
 
 func BenchmarkSgemm(b *testing.B) {
-	if !Available() {
+	if !sme.Available() {
 		b.Skip("SME not available")
 	}
 	r := rand.New(rand.NewPCG(5, 6))
@@ -37,7 +38,15 @@ func BenchmarkSgemm(b *testing.B) {
 		flops := 2 * float64(sh.m) * float64(sh.n) * float64(sh.k)
 		b.Run(sh.name+"/sme", func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				Sgemm(sh.m, sh.n, sh.k, a, sh.k, bm, sh.n, c, sh.n)
+				sme.Sgemm(sh.m, sh.n, sh.k, a, sh.k, bm, sh.n, c, sh.n)
+			}
+			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+		b.Run(sh.name+"/sme-prepacked", func(b *testing.B) {
+			pa := sme.PackA(sh.m, sh.k, a, sh.k)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				sme.SgemmPacked(pa, sh.n, bm, sh.n, c, sh.n, true)
 			}
 			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})
@@ -53,16 +62,16 @@ func BenchmarkSgemm(b *testing.B) {
 // BenchmarkFMOPAContention: aggregate FMOPA throughput with G goroutines
 // hammering the (per-cluster, shared) matrix units simultaneously.
 func BenchmarkFMOPAContention(b *testing.B) {
-	if !Available() {
+	if !sme.Available() {
 		b.Skip("SME not available")
 	}
-	lanes := SVL() / 4
+	lanes := sme.SVL() / 4
 	flopsPerIter := 4 * 2 * float64(lanes*lanes)
 	for _, g := range []int{1, 2, 4, 6, 12, 18} {
 		if g > runtime.GOMAXPROCS(0) {
 			continue
 		}
-		b.Run(map[bool]string{true: "g"}[true]+itoa(g), func(b *testing.B) {
+		b.Run("g"+itoa(g), func(b *testing.B) {
 			const inner = 4096
 			var wg sync.WaitGroup
 			for i := 0; i < b.N; i++ {
@@ -73,7 +82,7 @@ func BenchmarkFMOPAContention(b *testing.B) {
 						for j := range src {
 							src[j] = 1
 						}
-						ProbePeak(inner, src)
+						sme.ProbePeak(inner, src)
 						wg.Done()
 					}()
 				}

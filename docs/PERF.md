@@ -648,3 +648,40 @@ NEON peak — from a couple of cores, leaving the rest free.
 Next: pre-packed-A entry point, dispatch (opt-in `OCR_GEMM_KERNEL=sme`, then
 default-on for eligible shapes on SME hardware), then the model-level numbers
 that finally attack the "ORT uses SME" 1T column.
+
+
+### SME, part 2: the signal problem, the guard, and ORT parity at 1T
+
+**Finding: ZA state survives ordinary context switches but is destroyed by
+signal delivery on macOS.** Go's runtime pings threads with SIGURG (async
+preemption, GC stop-the-world), so an unprotected streaming-mode kernel
+corrupts silently and rarely — a GC-storm stress test corrupts within
+milliseconds, serial runs are clean for thousands of iterations
+(kernels/sme/stress_test.go keeps all three regressions: serial, 8-way
+parallel, GC storm). The fix: `guard()` pins the goroutine to its OS thread
+and masks all blockable signals (via runtime.sigprocmask) around each
+streaming section; pending signals deliver after unmasking, so nothing is
+lost — the thread just can't be async-preempted, which is already true of
+assembly. With the guard: 12,000 concurrent runs + GC storm, zero corruptions;
+overhead is negligible (two libc calls per ~100 µs task).
+
+Integration: `OCR_GEMM_KERNEL=sme` (opt-in) makes gemm.PackA additionally pack
+eligible weights (m ≥ 32, k ≥ 48, no transpose) for the ZA kernel, and
+SgemmPackedA / Sgemm dispatch to it for beta=0 — ops code untouched. Pre-packed
+SME: rec-shape 480·240·480 at **700 GFLOPS 1T** (7.4× NEON), sq1024 684.
+
+Model level (single thread, the column ORT wins on SME hardware):
+
+| model | NEON 1T | SME 1T | ORT 1T |
+|---|---|---|---|
+| rec_320 | 20.7 ms* | **11.0 ms** | 11.7 ms |
+| det_640 | 84 ms* | 81 ms* | 69 ms |
+
+(*loaded machine — relative comparison valid, absolute numbers high; quiet
+baselines are 17.1/74. det barely moves: its convs are small-M → NEON.)
+
+**Recognition at ONNX-Runtime parity on one thread, in pure Go.** Remaining to
+make this default-on for SME hardware: quiet-machine sweep of the eligibility
+thresholds, MT interaction (matrix units are shared per cluster — maybe cap
+SME-GEMM parallelism), and a linux/arm64 detection path (HWCAP2_SME) when
+there's hardware to test.
