@@ -60,8 +60,9 @@
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
-- [ ] SME GEMM micro-kernel (Apple M4+ / Armv9 SME2) — the only way to match
-      ORT single-threaded on that hardware
+- [x] SME probes + Sgemm (kernels/sme, pure Go WORD-encoded): FMOPA peak 2.17
+      TFLOPS/core, Sgemm 626 GFLOPS 1T at sq1024 (6.5× NEON). TODO: pre-packed
+      A entry, shape-aware dispatch, model integration
 - [x] rec batching in the OCR pipeline (width-grouped, padding-bounded)
 
 ## Coverage (breadth)
