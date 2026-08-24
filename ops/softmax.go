@@ -50,7 +50,11 @@ func (o *softmaxOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 		}
 	}
 	if inner == 1 {
-		par.For(outer, 4, func(i, _ int) {
+		grain := 4
+		if outer*D <= 2*unaryChunk {
+			grain = outer // tiny: stay on the caller
+		}
+		par.For(outer, grain, func(i, _ int) {
 			softmaxRow(xf[i*D:(i+1)*D], of[i*D:(i+1)*D], o.log)
 		})
 		return []*tensor.Tensor{out}, nil

@@ -45,7 +45,11 @@ func (o *layerNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	out := ctx.New(tensor.F32, xs...)
 	xf, of := x.F32(), out.F32()
 	eps := o.eps
-	par.For(outer, 2, func(i, _ int) {
+	grain := 2
+	if outer*D <= 2*unaryChunk {
+		grain = outer // tiny: stay on the caller
+	}
+	par.For(outer, grain, func(i, _ int) {
 		row := xf[i*D : (i+1)*D]
 		dst := of[i*D : (i+1)*D]
 		var mean float64

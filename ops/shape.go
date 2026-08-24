@@ -235,6 +235,27 @@ func transposeBytes(x, out *tensor.Tensor, perm []int) {
 	inner := os[r-1]
 	is := sst[r-1]
 	switch {
+	case esz == 4 && is == 1 && inner >= 8:
+		// Last output dim contiguous in the source too (perm keeps the final
+		// axis, e.g. attention's [B,T,H,d]→[B,H,T,d]): each inner run is a
+		// straight copy; parallel over runs when the tensor is large.
+		s4 := x.F32()
+		d4 := out.F32()
+		runs := n / inner
+		offs := make([]int, runs)
+		for ri := 0; ri < runs; ri++ {
+			offs[ri] = off
+			off = advance(idx, os, sst, r-2, off)
+		}
+		if n <= 2*unaryChunk {
+			for ri := 0; ri < runs; ri++ {
+				copy(d4[ri*inner:(ri+1)*inner], s4[offs[ri]:offs[ri]+inner])
+			}
+		} else {
+			par.For(runs, max(1, unaryChunk/inner), func(ri, _ int) {
+				copy(d4[ri*inner:(ri+1)*inner], s4[offs[ri]:offs[ri]+inner])
+			})
+		}
 	case esz == 4:
 		s4 := x.F32()
 		d4 := out.F32()
