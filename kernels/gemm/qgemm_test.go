@@ -115,3 +115,13 @@ func BenchmarkQgemmPackedS8(b *testing.B) {
 		})
 	}
 }
+
+// TestQgemmFallbackKernels forces the portable kernels so the non-I8MM path
+// (Apple M1, Graviton2) is exercised on every machine.
+func TestQgemmFallbackKernels(t *testing.T) {
+	savedU, savedS := qkernel, qkernelS8
+	qkernel, qkernelS8 = qkernelGeneric, qkernelS8Generic
+	defer func() { qkernel, qkernelS8 = savedU, savedS }()
+	t.Run("u8s8", TestQgemmU8S8VsRef)
+	t.Run("packedS8", TestQgemmPackedS8VsRef)
+}
