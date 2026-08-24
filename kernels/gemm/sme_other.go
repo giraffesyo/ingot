@@ -15,3 +15,6 @@ func smePackA(m, k int, a []float32, lda int) *sme.PackedA { return nil }
 
 func smeSgemmPacked(pa *sme.PackedA, n int, b []float32, ldb int, c []float32, ldc int, parallel bool) {
 }
+
+// PrefersSME reports whether the SME unit would take this GEMM (never here).
+func PrefersSME(m, n, k int) bool { return false }

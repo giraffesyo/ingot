@@ -51,9 +51,10 @@
       MT det 0.37–0.47× ORT, rec 0.43–0.49×; 1T 1.0–1.5× (ORT uses SME on M4+)
 - [x] vek.Exp/Sigmoid (NEON + AVX2) → Softmax, Sigmoid, Exp op (2.8 Gelem/s 1T)
 - [x] SiLU/Erf/GELU SIMD kernels + pattern fusion (ingot.SiLU/Gelu); Dot; GEMV
-- [x] Winograd F(2×2,3×3) conv path — correct, oracle-tested, opt-in
-      (OCR_WINOGRAD=1): wins in isolation, cache footprint regresses models;
-      needs Cin-blocked GEMM accumulation before default-on (docs/PERF.md)
+- [x] Winograd F(2×2,3×3), fused per-block pipeline — default-on (yields to
+      SME at 1T; OCR_NO_WINOGRAD=1 disables): resnetish MT −20%, det −7%
+- [x] hybrid SME+NEON MT GEMM: prototyped, measured, declined (parity at best
+      on real shapes; docs/PERF.md)
 - [ ] Tanh SIMD; fused attention; layernorm SIMD; direct 3×3 / SIMD MaxPool for
       small spatial convs (resnetish 4× ORT); fused depthwise+pointwise (mnv2 1T)
 - [ ] int8 GEMM (SDOT/UDOT on arm64, VNNI on amd64), bf16

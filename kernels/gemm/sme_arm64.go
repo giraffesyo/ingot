@@ -55,3 +55,8 @@ func smePackA(m, k int, a []float32, lda int) *sme.PackedA { return sme.PackA(m,
 func smeSgemmPacked(pa *sme.PackedA, n int, b []float32, ldb int, c []float32, ldc int, parallel bool) {
 	sme.SgemmPacked(pa, n, b, ldb, c, ldc, parallel)
 }
+
+// PrefersSME reports whether the current dispatch policy would send an
+// m×n×k GEMM to the SME unit — used by higher-level fusions (Winograd) to
+// yield: measured 1T order is SME > Winograd > im2col.
+func PrefersSME(m, n, k int) bool { return smeEligible(m, n, k) }
