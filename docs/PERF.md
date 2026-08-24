@@ -595,3 +595,12 @@ accumulate re-reads M per block — the footprint gain doesn't pay for it. The
 remaining route to default-on is a fused transform→GEMM with an NCHWc-style
 interleaved layout (transform writes packed panels directly), which is a
 larger redesign. The kernel-level win is real; the memory system is the blocker.
+
+### Separable vectorised MaxPool
+
+Max pooling is separable: each output row = vertical MaxPair across its KH
+input rows (full width), a horizontal sliding max via KW−1 shifted MaxPairs,
+then a copy (stride 1) or strided subsample. Works for any stride/kernel; the
+first cut (de-interleaved halves like the stride-2 depthwise) spent 84% of its
+time re-de-interleaving rows and was scrapped. 1T: resnet stem 64ch@112²
+k3s2 1.35 → 0.49 ms (74 µs MT), 16ch@32² 40 → 11 µs.

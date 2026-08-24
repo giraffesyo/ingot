@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
 )
 
@@ -101,35 +102,64 @@ func (o *poolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 		owHi++ // exclusive
 	}
-	par.For(N*C, 1, func(nc, _ int) {
+	// Vectorised interior max pooling: max is separable, so each output row is
+	// (1) a vertical MaxPair across its KH input rows at full width, then
+	// (2) a horizontal sliding max via KW−1 shifted MaxPairs, then
+	// (3) a copy (stride 1) or strided subsample into the output row.
+	vecMax := isMax && !o.countIncludePad && owHi > owLo
+	var vmF []float32
+	if vecMax {
+		vmT := ctx.NewUninit(tensor.F32, par.Workers(), 2*W)
+		vmF = vmT.F32()
+		defer func() {
+			if ctx.Pool != nil {
+				ctx.Pool.Put(vmT)
+			}
+		}()
+	}
+	n := owHi - owLo
+	par.For(N*C, 1, func(nc, wk int) {
 		xc := xf[nc*H*W : (nc+1)*H*W]
 		oc := of[nc*OH*OW : (nc+1)*OH*OW]
 		for oh := 0; oh < OH; oh++ {
 			h0 := oh*sh - pt
 			khLo, khHi := max(0, -h0), min(KH, H-h0)
-			if isMax && !o.countIncludePad && owHi > owLo && khHi > khLo {
-				// Max pooling fast path: interior columns with no bounds checks;
-				// each tap row is a sliding-window max over the input row.
-				orow := oc[oh*OW : (oh+1)*OW]
-				for ow := owLo; ow < owHi; ow++ {
-					orow[ow] = float32(math.Inf(-1))
+			if vecMax && khHi > khLo {
+				tmp := vmF[wk*2*W : wk*2*W+W]
+				hm := vmF[wk*2*W+W : (wk+1)*2*W]
+				// vertical max across rows
+				src := xc[(h0+khLo)*W : (h0+khLo+1)*W]
+				if khHi-khLo == 1 {
+					tmp = src
+				} else {
+					vek.MaxPair(tmp, src, xc[(h0+khLo+1)*W:(h0+khLo+2)*W])
+					for kh := khLo + 2; kh < khHi; kh++ {
+						vek.MaxPair(tmp, tmp, xc[(h0+kh)*W:(h0+kh+1)*W])
+					}
 				}
-				for kh := khLo; kh < khHi; kh++ {
-					row := xc[(h0+kh)*W : (h0+kh+1)*W]
-					for ow := owLo; ow < owHi; ow++ {
-						w0 := ow*sw - pl
-						m := orow[ow]
-						for kw := 0; kw < KW; kw++ {
-							if v := row[w0+kw]; v > m {
-								m = v
-							}
-						}
-						orow[ow] = m
+				// horizontal sliding max over the interior span
+				w0 := owLo*sw - pl
+				wspan := (n-1)*sw + KW // input columns the interior windows cover
+				win := tmp[w0 : w0+wspan]
+				if KW == 1 {
+					hm = win
+				} else {
+					vek.MaxPair(hm[:wspan-1], win[:wspan-1], win[1:])
+					for kw := 2; kw < KW; kw++ {
+						vek.MaxPair(hm[:wspan-kw], hm[:wspan-kw], win[kw:])
+					}
+				}
+				acc := oc[oh*OW+owLo : oh*OW+owHi]
+				if sw == 1 {
+					copy(acc, hm[:n])
+				} else {
+					for i := 0; i < n; i++ {
+						acc[i] = hm[i*sw]
 					}
 				}
 			}
 			for ow := 0; ow < OW; ow++ {
-				if isMax && !o.countIncludePad && ow >= owLo && ow < owHi && khHi > khLo {
+				if vecMax && ow >= owLo && ow < owHi && khHi > khLo {
 					continue // done above
 				}
 				w0 := ow*sw - pl
