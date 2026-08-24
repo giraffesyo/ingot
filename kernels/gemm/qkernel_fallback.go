@@ -1,9 +1,4 @@
-//go:build !arm64
-
 package gemm
-
-// qkernel: portable fallback (amd64 VNNI/VPMADDUBSW kernels are TODO).
-var qkernel = qkernelGeneric
 
 func qkernelGeneric(kg int64, ap *uint8, bp *int8, ct *int32) {
 	a := (*[1 << 28]uint8)(unsafePointer(ap))[: kg*qMR*qKG : kg*qMR*qKG]
@@ -25,9 +20,6 @@ func qkernelGeneric(kg int64, ap *uint8, bp *int8, ct *int32) {
 		}
 	}
 }
-
-// qkernelS8: portable fallback.
-var qkernelS8 = qkernelS8Generic
 
 func qkernelS8Generic(kg int64, ap *int8, bp *int8, ct *int32) {
 	a := (*[1 << 28]int8)(unsafePointer(ap))[: kg*qMR*qKG : kg*qMR*qKG]
