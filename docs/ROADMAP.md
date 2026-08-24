@@ -61,8 +61,10 @@
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
 - [x] SME probes + Sgemm (kernels/sme, pure Go WORD-encoded): FMOPA peak 2.17
-      TFLOPS/core, Sgemm 626 GFLOPS 1T at sq1024 (6.5× NEON). TODO: pre-packed
-      A entry, shape-aware dispatch, model integration
+      TFLOPS/core; pre-packed Sgemm 700 GFLOPS 1T (7.4× NEON); signal-mask
+      guard (ZA dies on signal delivery — GC-storm regression test); dispatch
+      via OCR_GEMM_KERNEL=sme → rec_320 1T at ORT parity (11.0 vs 11.7 ms).
+      TODO: default-on for SME hardware, MT tuning, linux detection
 - [x] rec batching in the OCR pipeline (width-grouped, padding-bounded)
 
 ## Coverage (breadth)

@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/sme"
 	"github.com/giraffesyo/ingot/kernels/vek"
 )
 
@@ -137,6 +138,11 @@ func sgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda in
 
 	if m == 1 {
 		gemv(transA, transB, n, k, alpha, a, lda, b, ldb, firstOverwrite, c, workers)
+		return
+	}
+
+	if !transA && !transB && alpha == 1 && firstOverwrite && smeEligible(m, n, k) {
+		smeSgemm(m, n, k, a, lda, b, ldb, c, ldc, workers > 1)
 		return
 	}
 
@@ -389,7 +395,8 @@ func scaleC(m, n int, beta float32, c []float32, ldc int) {
 // call otherwise) is paid once.
 type PackedA struct {
 	m, k int
-	data []float32 // [kBlock][mPanel][KC*MR]
+	data []float32    // [kBlock][mPanel][KC*MR]
+	sme  *sme.PackedA // additionally packed for the SME kernel (nil unless enabled+eligible)
 }
 
 // Rows and Cols return the logical dimensions of the packed matrix.
@@ -409,6 +416,9 @@ func PackA(transA bool, m, k int, a []float32, lda int) *PackedA {
 	mPanels := (m + MR - 1) / MR
 	nkb := (k + KC - 1) / KC
 	p := &PackedA{m: m, k: k, data: make([]float32, nkb*mPanels*KC*MR)}
+	if !transA && smeEligible(m, 1<<30, k) {
+		p.sme = smePackA(m, k, a, lda)
+	}
 	for kb := 0; kb < nkb; kb++ {
 		p0 := kb * KC
 		kc := min(KC, k-p0)
@@ -431,6 +441,10 @@ func PackA(transA bool, m, k int, a []float32, lda int) *PackedA {
 func SgemmPackedA(pa *PackedA, n int, b []float32, ldb int, beta float32, c []float32, ldc int, parallel bool) {
 	m, k := pa.m, pa.k
 	if m == 0 || n == 0 {
+		return
+	}
+	if pa.sme != nil && beta == 0 && n >= 16 {
+		smeSgemmPacked(pa.sme, n, b, ldb, c, ldc, parallel)
 		return
 	}
 	if k == 0 {

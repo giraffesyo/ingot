@@ -13,29 +13,25 @@ const (
 	nr = 32
 )
 
-// Sgemm computes C = A·B for row-major A[m×k], B[k×n], C[m×n] (alpha=1,
-// beta=0) on the SME unit. K is streamed — no KC blocking: the ZA tile is the
-// accumulator for the entire k range, so A and B are read exactly once.
-// A is packed into 32-row panels up front; each parallel task packs one
-// 32-column B panel and sweeps the A panels.
-func Sgemm(m, n, k int, a []float32, lda int, b []float32, ldb int, c []float32, ldc int) {
-	if m == 0 || n == 0 {
-		return
-	}
-	if k == 0 {
-		for i := 0; i < m; i++ {
-			clear(c[i*ldc : i*ldc+n])
-		}
-		return
-	}
+// PackedA is A[m×k] packed into 32-row panels for the ZA kernel (zero-padded),
+// for operands reused across calls (weights): the pack cost is paid once.
+type PackedA struct {
+	m, k int
+	data []float32 // [panel][k][32]
+}
+
+// Rows and Cols return the logical dimensions of the packed matrix.
+func (p *PackedA) Rows() int { return p.m }
+func (p *PackedA) Cols() int { return p.k }
+
+// PackA packs row-major A[m×k] (row stride lda) for the ZA kernel.
+func PackA(m, k int, a []float32, lda int) *PackedA {
 	mp := (m + mr - 1) / mr
-	np := (n + nr - 1) / nr
-	// Pack A: panel ip holds k steps of 32 row-values (zero-padded).
-	ap := make([]float32, mp*k*mr)
-	par.For(mp, max(1, 4*1024/max(k, 1)), func(ip, _ int) {
+	pa := &PackedA{m: m, k: k, data: make([]float32, mp*k*mr)}
+	for ip := 0; ip < mp; ip++ {
 		i0 := ip * mr
 		rows := min(mr, m-i0)
-		dst := ap[ip*k*mr : (ip+1)*k*mr]
+		dst := pa.data[ip*k*mr : (ip+1)*k*mr]
 		if rows < mr {
 			clear(dst)
 		}
@@ -46,11 +42,49 @@ func Sgemm(m, n, k int, a []float32, lda int, b []float32, ldb int, c []float32,
 				dst[p*mr+r] = v
 			}
 		}
-	})
-	// Per-worker: B panel (k×32) + scratch C tile for edges.
-	nw := par.Workers()
+	}
+	return pa
+}
+
+// Sgemm computes C = A·B for row-major A[m×k], B[k×n], C[m×n] (alpha=1,
+// beta=0) on the SME unit. K is streamed — no KC blocking: the ZA tile is the
+// accumulator for the entire k range, so A and B are read exactly once.
+func Sgemm(m, n, k int, a []float32, lda int, b []float32, ldb int, c []float32, ldc int) {
+	if m == 0 || n == 0 {
+		return
+	}
+	if k == 0 {
+		for i := 0; i < m; i++ {
+			clear(c[i*ldc : i*ldc+n])
+		}
+		return
+	}
+	SgemmPacked(PackA(m, k, a, lda), n, b, ldb, c, ldc, true)
+}
+
+// SgemmPacked computes C = op(A)·B with a pre-packed A (alpha=1, beta=0).
+// Each task packs one 32-column B panel and sweeps the A panels; parallel
+// false keeps everything on the calling goroutine.
+func SgemmPacked(pa *PackedA, n int, b []float32, ldb int, c []float32, ldc int, parallel bool) {
+	m, k := pa.m, pa.k
+	if m == 0 || n == 0 {
+		return
+	}
+	if k == 0 {
+		for i := 0; i < m; i++ {
+			clear(c[i*ldc : i*ldc+n])
+		}
+		return
+	}
+	ap := pa.data
+	mp := (m + mr - 1) / mr
+	np := (n + nr - 1) / nr
+	nw := 1
+	if parallel {
+		nw = par.Workers()
+	}
 	slab := make([]float32, nw*(k*nr+mr*nr))
-	par.For(np, 1, func(jp, wk int) {
+	task := func(jp, wk int) {
 		buf := slab[wk*(k*nr+mr*nr):]
 		bp := buf[:k*nr]
 		tile := buf[k*nr : k*nr+mr*nr]
@@ -74,5 +108,16 @@ func Sgemm(m, n, k int, a []float32, lda int, b []float32, ldb int, c []float32,
 				copy(c[(i0+r)*ldc+j0:(i0+r)*ldc+j0+cols], tile[r*nr:r*nr+cols])
 			}
 		}
+	}
+	if !parallel || np == 1 {
+		guard(func() {
+			for jp := 0; jp < np; jp++ {
+				task(jp, 0)
+			}
+		})
+		return
+	}
+	par.For(np, 1, func(jp, wk int) {
+		guard(func() { task(jp, wk) })
 	})
 }
