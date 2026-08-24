@@ -150,6 +150,64 @@ def _effnet():
     import torchvision
     export("efficientnet_b0", torchvision.models.efficientnet_b0(), [torch.randn(1, 3, 224, 224)], ["x"])
 
+MODELS["opprobe"] = lambda: export("opprobe", OpProbe(), [torch.randn(1, 3, 8, 8)], ["x"])
+MODELS["deconvprobe"] = lambda: export("deconvprobe", DeconvProbe(), [torch.randn(1, 4, 8, 8)], ["x"])
+
+
+# ---- statically quantized (int8) variants: QLinearConv islands ----
+# Convs only (op_types_to_quantize) keeps the model to standard ONNX ops
+# (QuantizeLinear/DequantizeLinear/QLinearConv); full QOperator quantization
+# emits com.microsoft contrib ops (QLinearAdd, ...) we don't implement.
+def export_int8(name, src_name):
+    import numpy as np
+    import onnxruntime as ort
+    from onnxruntime.quantization import (CalibrationDataReader, QuantFormat,
+                                          QuantType, quantize_static)
+    src = os.path.join(OUT, f"{src_name}.onnx")
+    dst = os.path.join(OUT, f"{name}.onnx")
+    man = json.load(open(os.path.join(OUT, f"{src_name}.json")))
+
+    class Reader(CalibrationDataReader):
+        def __init__(self):
+            self.n = 0
+        def get_next(self):
+            if self.n >= 8:
+                return None
+            self.n += 1
+            rng = np.random.default_rng(self.n)
+            return {i["name"]: rng.standard_normal(i["shape"]).astype(np.float32)
+                    for i in man["inputs"]}
+
+    quantize_static(src, dst, Reader(), quant_format=QuantFormat.QOperator,
+                    activation_type=QuantType.QUInt8, weight_type=QuantType.QInt8,
+                    per_channel=True, op_types_to_quantize=["Conv"])
+    sess = ort.InferenceSession(dst, providers=["CPUExecutionProvider"])
+    feeds = {}
+    inputs = []
+    for i, im in enumerate(man["inputs"]):
+        rng = np.random.default_rng(100 + i)
+        arr = rng.standard_normal(im["shape"]).astype(np.float32)
+        fn = f"{name}.in.{i}.bin"
+        arr.tofile(os.path.join(OUT, fn))
+        feeds[im["name"]] = arr
+        inputs.append({"name": im["name"], "dtype": "float32", "shape": im["shape"], "file": fn})
+    outs = sess.run(None, feeds)
+    outputs = []
+    for i, (o, arr) in enumerate(zip(sess.get_outputs(), outs)):
+        fn = f"{name}.out.{i}.bin"
+        np.asarray(arr).tofile(os.path.join(OUT, fn))
+        outputs.append({"name": o.name, "dtype": str(arr.dtype), "shape": list(arr.shape), "file": fn})
+    m = onnx.load(dst)
+    ops = sorted({n.op_type for n in m.graph.node})
+    json.dump({"model": f"{name}.onnx", "opset": man.get("opset", 17),
+               "inputs": inputs, "outputs": outputs}, open(os.path.join(OUT, f"{name}.json"), "w"), indent=1)
+    print(f"{name}: {len(m.graph.node)} nodes, ops: {' '.join(ops)}")
+
+
+MODELS["tiny_conv_int8"] = lambda: export_int8("tiny_conv_int8", "tiny_conv")
+MODELS["mobilenet_v3_small_int8"] = lambda: export_int8("mobilenet_v3_small_int8", "mobilenet_v3_small")
+
+
 if __name__ == "__main__":
     names = sys.argv[1:] or MODELS
     for n in names:
@@ -174,6 +232,3 @@ class DeconvProbe(nn.Module):
         self.d2 = nn.ConvTranspose2d(6, 6, 2, stride=2, groups=2)
     def forward(self, x):
         return self.d2(F.relu(self.d1(x)))
-
-MODELS["opprobe"] = lambda: export("opprobe", OpProbe(), [torch.randn(1, 3, 8, 8)], ["x"])
-MODELS["deconvprobe"] = lambda: export("deconvprobe", DeconvProbe(), [torch.randn(1, 4, 8, 8)], ["x"])
