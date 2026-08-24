@@ -34,6 +34,7 @@ type convOp struct {
 	packSrc  *float32
 	packLen  int
 	packFits bool
+	winogradCache
 }
 
 // packedWeights returns the per-group pre-packed W[Mg×K] matrices, or nil if
@@ -154,6 +155,8 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		o.depthwise(xf, wf, bias, of, N, C, H, W, KH, KW, OH, OW, pads)
 	case pointwise:
 		o.pointwise(ctx, xf, wf, bias, of, N, C, G, Cg, Mg, M, K, P)
+	case o.winogradOK(G, Cg, Mg, KH, KW, OH, OW):
+		o.winograd(ctx, xf, wf, bias, of, N, Cg, M, H, W, OH, OW, pads)
 	default:
 		o.im2colConv(ctx, xf, wf, bias, of, N, C, G, Cg, Mg, M, K, H, W, KH, KW, OH, OW, pads)
 	}

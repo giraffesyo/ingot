@@ -12,6 +12,9 @@ import (
 // against convRef followed by a scalar reference of the same epilogue, over
 // the conv paths (im2col, pointwise, depthwise s1 3x3/5x5, generic depthwise).
 func TestConvEpilogue(t *testing.T) {
+	old := winogradEnabled
+	winogradEnabled = true
+	defer func() { winogradEnabled = old }()
 	r := rand.New(rand.NewPCG(7, 8))
 	rnd := func(n int) []float32 {
 		s := make([]float32, n)
@@ -41,12 +44,13 @@ func TestConvEpilogue(t *testing.T) {
 		N, C, H, W, M, KH, KW, G, sh, sw, pt, pl int
 	}
 	cfgs := []cfg{
-		{1, 4, 10, 12, 6, 3, 3, 1, 1, 1, 1, 1}, // im2col (tiled)
-		{2, 3, 20, 20, 5, 3, 3, 1, 2, 2, 1, 1}, // im2col stride 2
-		{1, 4, 6, 6, 4, 1, 1, 1, 1, 1, 0, 0},   // pointwise
-		{1, 8, 9, 9, 8, 3, 3, 8, 1, 1, 1, 1},   // depthwise s1 3x3 (NEON path)
-		{1, 6, 9, 11, 6, 5, 5, 6, 1, 1, 2, 2},  // depthwise s1 5x5
-		{1, 6, 9, 9, 6, 3, 3, 6, 2, 2, 1, 1},   // depthwise s2 (generic)
+		{1, 4, 10, 12, 6, 3, 3, 1, 1, 1, 1, 1},  // im2col (tiled)
+		{2, 3, 20, 20, 5, 3, 3, 1, 2, 2, 1, 1},  // im2col stride 2
+		{1, 4, 6, 6, 4, 1, 1, 1, 1, 1, 0, 0},    // pointwise
+		{1, 8, 9, 9, 8, 3, 3, 8, 1, 1, 1, 1},    // depthwise s1 3x3 (NEON path)
+		{1, 6, 9, 11, 6, 5, 5, 6, 1, 1, 2, 2},   // depthwise s1 5x5
+		{1, 6, 9, 9, 6, 3, 3, 6, 2, 2, 1, 1},    // depthwise s2 (generic)
+		{1, 16, 10, 13, 8, 3, 3, 1, 1, 1, 1, 1}, // winograd F(2,3)
 	}
 	for _, c := range cfgs {
 		for _, a := range acts {
