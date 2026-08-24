@@ -588,6 +588,10 @@ tiled im2col), @80² 0.52 vs 0.54, resnet 64ch@56² 0.44 vs 0.46. But in-model
 it made det *slower* overall: with 18 workers each holding a
 16·(Cin+Cout)·tiles V/M slab (~600 KB → ~11 MB concurrent), every neighbouring
 op loses the shared cache — the per-node profile showed all non-winograd nodes
-~1.5× slower. To turn it on by default: block the GEMMs over Cin with beta=1
-accumulation (shrinks the live V slab ~4×) and/or fuse transform+GEMM per
-Cin block. The kernel-level win is real; the memory footprint is the blocker.
+~1.5× slower. Cin-blocked GEMM accumulation (CB=32,
+beta=1) was tried and is *worse even in isolation* (det head @160²: 2.38 ms vs
+1.19 non-blocked): kc=32 GEMMs run at a fraction of kc=96 efficiency and the
+accumulate re-reads M per block — the footprint gain doesn't pay for it. The
+remaining route to default-on is a fused transform→GEMM with an NCHWc-style
+interleaved layout (transform writes packed panels directly), which is a
+larger redesign. The kernel-level win is real; the memory system is the blocker.
