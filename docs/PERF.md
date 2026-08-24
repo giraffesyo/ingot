@@ -604,3 +604,47 @@ then a copy (stride 1) or strided subsample. Works for any stride/kernel; the
 first cut (de-interleaved halves like the stride-2 depthwise) spent 84% of its
 time re-de-interleaving rows and was scrapped. 1T: resnet stem 64ch@112²
 k3s2 1.35 → 0.49 ms (74 µs MT), 16ch@32² 40 → 11 µs.
+
+
+## SME: 2.17 TFLOPS f32 on one core, from pure Go (2026-08-24)
+
+`kernels/sme` drives the Arm Scalable Matrix Extension (Apple M4-class and
+newer; `FEAT_SME2`, SVL = 512 bits) from WORD-encoded Go assembly —
+CGO_ENABLED=0, encodings verified against clang. Each assembly function
+brackets its own SMSTART/SMSTOP with no Go calls in between (Go never
+async-preempts assembly, and the OS preserves SME state across context
+switches/signals), and survives `-race` and GOGC=1 stress runs.
+
+Probes (single core):
+
+| probe | GFLOPS |
+|---|---|
+| FMOPA peak (4 ZA tiles, resident registers) | **2168** |
+| 2 loads + 4 FMOPA (GEMM inner-loop ratio) | 2090 |
+| 1-tile chain (accumulate latency ≈ 4 cycles) | 544 |
+| NEON FMA core peak, for scale | ~130 |
+
+Watch out: a run that lands on the E-cluster reports ~140 GFLOPS — always
+sanity-check which cluster you're on (first runs after idle are suspect).
+
+`sme.Sgemm` (32×32 ZA block = 2×2 f32 tiles, K streamed with no KC blocking so
+A and B are read exactly once, edges via predicate-free scratch tiles):
+
+| shape | SME 1T | NEON 1T | × | SME MT |
+|---|---|---|---|---|
+| sq512 | **411** | 93 | 4.4 | 543 |
+| sq1024 | **626** | 97 | 6.5 | 1168 |
+| rec 480·240·480 | **343** | 96 | 3.6 | |
+| conv3x3 m24 (small M) | 35 | 68 | 0.5 | |
+
+The gap from 626 to the 2168 kernel peak is packing: pack-B is already a
+`copy`, pack-A is a strided transpose — and in real use A is the constant
+weight matrix, pre-packed once at load (same as the NEON path), so the
+per-call cost is pack-B + kernel. Small-M shapes lose (partial 32-row panels
+waste FMOPA lanes) — dispatch must be shape-aware. MT aggregate saturates
+~1.2 TFLOPS (the matrix units are shared per cluster), ≈ the whole machine's
+NEON peak — from a couple of cores, leaving the rest free.
+
+Next: pre-packed-A entry point, dispatch (opt-in `OCR_GEMM_KERNEL=sme`, then
+default-on for eligible shapes on SME hardware), then the model-level numbers
+that finally attack the "ORT uses SME" 1T column.
