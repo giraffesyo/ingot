@@ -700,8 +700,11 @@ default with no env needed:
 - `=sme` forces SME at any parallelism (for experiments); `=neon` disables.
 
 Verified same-run: default at GOMAXPROCS=1 picks SME (rec_320 10.6 vs 20.7 ms
-forced-NEON); full suite passes at GOMAXPROCS=1 and 18. Hybrid SME+NEON MT
-scheduling is the open follow-up.
+forced-NEON); full suite passes at GOMAXPROCS=1 and 18. Threshold sweep on the
+det head settled eligibility at m ≥ 24 (24-row panels still use 75% of the
+FMOPA lanes): det_640 1T 71.5 → 56.6 ms — **0.82× ORT's 69 ms**, so detection
+also beats ORT single-threaded now; m ≥ 16 and k ≥ 32 measured no further
+gain. Hybrid SME+NEON MT scheduling is the open follow-up.
 
 Also: Go 1.27 (Homebrew auto-upgrade) rejected the runtime.sigprocmask
 linkname within a day of writing it — the guard now issues the

@@ -40,9 +40,9 @@ var smeMode = func() int {
 var ActiveKernel = "neon"
 
 // smeEligible: shapes where the ZA kernel beats NEON (measured: small M loses
-// — partial 32-row panels waste FMOPA lanes; tiny k never amortises packing).
+// — below 24 rows the wasted FMOPA lanes outweigh the unit's speed, measured on the det head; tiny k never amortises packing).
 func smeEligible(m, n, k int) bool {
-	return smeMode > 0 && m >= 32 && k >= 48 && n >= 16
+	return smeMode > 0 && m >= 24 && k >= 48 && n >= 16
 }
 
 func smeSgemm(m, n, k int, a []float32, lda int, b []float32, ldb int, c []float32, ldc int, parallel bool) {
