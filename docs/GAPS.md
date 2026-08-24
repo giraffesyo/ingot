@@ -41,10 +41,12 @@ AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv Co
 - **NonMaxSuppression, TopK.** Detection post-processing and beam search.
 
 ### Common, not yet needed by the zoo
-- **Quantization: QuantizeLinear/DequantizeLinear, QLinearConv/MatMul, ConvInteger,
-  MatMulInteger, DynamicQuantizeLinear.** No int8 compute kernels exist, so int8
-  models are unsupported end-to-end. This is also a *performance* gap (int8 is the
-  big CPU speed win) tracked in PERF.md.
+- **Quantization: supported** (2026-08-24) for the onnxruntime-quantizer
+  subset: QuantizeLinear, DequantizeLinear, DynamicQuantizeLinear, QLinearConv,
+  QLinearMatMul, MatMulInteger — u8/s8 activations, symmetric s8 weights,
+  per-channel weight scales (loud errors outside the subset). ConvInteger and
+  the com.microsoft QOperator contrib ops (QLinearAdd, QLinearGlobalAveragePool,
+  …) remain open, as does making int8 *fast* (PERF.md int8 phase 2).
 - **Recurrent: LSTM / GRU / RNN.** Older OCR recognizers (CRNN) use BiLSTM. A CRNN
   recognizer would need LSTM; SVTR/PARSeq (attention-based) do not.
 - **Einsum.** Some attention/loss formulations export as Einsum.

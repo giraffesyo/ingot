@@ -181,6 +181,13 @@ func discoverModels(tb testing.TB) []string {
 // tolFor returns the abs-error tolerance for a model (looser for deep stacks).
 func tolFor(name string) float64 {
 	switch {
+	case strings.Contains(name, "int8"):
+		// Quantized chains: a single ±1-quantum tie-break (legal — requant
+		// rounding at a .5 boundary) in a late layer moves the dequantized
+		// output by that layer's scale, ~0.1-0.3 for deep activations.
+		// Single-conv int8 models match ORT bit-exactly (tiny_conv_int8:
+		// 7.5e-9); deep ones diverge by an LSB or two.
+		return 0.5
 	case strings.Contains(name, "mobilenet"), strings.Contains(name, "efficientnet"),
 		strings.Contains(name, "resnet"):
 		return 2e-3

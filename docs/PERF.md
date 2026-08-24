@@ -743,3 +743,33 @@ Defaults after this round (auto everything, no env):
 | det_640 | 9.3 ms | **51.0 ms** | 17.8 / 69 → **0.52× / 0.74×** |
 | rec_320 | 3.0 ms | **8.0 ms** | 6.3 / 11.7 → **0.48× / 0.69×** |
 | resnetish | 313 µs | 318 µs | 96 / 82 (still the small-conv outlier) |
+
+
+## int8, phase 1 — kernels, ops, and ORT parity (2026-08-24)
+
+The quantization coverage gap (docs/GAPS) is closed for the onnxruntime
+quantizer's subset — u8 activations, symmetric s8 weights, per-channel scales:
+
+- **Kernels** (`kernels/gemm`): USMMLA/SMMLA 8×12 micro-kernels (FEAT_I8MM,
+  32 MACs/instruction), `QgemmU8S8` / `QgemmPackedS8` with pre-packed weights.
+  sq512: **311 GOPS 1T / 630 MT** (f32 NEON: 109 / 660). The by-element USDOT
+  form was tried first and replaced (71 GOPS — indexed-form issue rate).
+- **Ops**: QuantizeLinear, DequantizeLinear, DynamicQuantizeLinear,
+  QLinearConv, QLinearMatMul, MatMulInteger. Activations shift u8→s8 (−128,
+  zero point adjusted); im2col pads with the shifted zero point so padded taps
+  contribute exactly zero; requantization in f32 with magic-number
+  round-half-to-even. Quantize divides by scale — the reciprocal is an ulp off
+  exactly at .5 ties (found via the DynamicQuantizeLinear spec vector).
+- **Conformance**: quantized zoo models (zoo.py `export_int8`, convs-only
+  QOperator so everything stays standard ONNX). `tiny_conv_int8` matches ORT
+  **bit-exactly** (7.5e-9); `mobilenet_v3_small_int8` within 0.32 — one or two
+  legal ±1-quantum tie-breaks in a late layer, each worth that layer's scale
+  in the dequantized output (tolerance rationale in tolFor).
+
+Not yet fast in-model: mnv3_int8 runs 16-19 ms vs 2.2 f32 — QLinearConv is
+81% of it, dominated by **depthwise convs pushed through the GEMM path with
+K=9** (mostly padding) plus an untiled im2col and a separate requant pass.
+The int8 optimization phase needs: direct int8 depthwise kernels, the tiled
+conv structure from the f32 path, vectorised requant, and eventually SME2's
+i8→i32 MOPA (4× the f32 rate). Full QOperator coverage (QLinearAdd/
+QLinearGlobalAveragePool — com.microsoft contrib ops) is a separate gap.

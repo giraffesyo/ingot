@@ -133,19 +133,24 @@ func (o *quantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor,
 // quantAll divides by the scale (not multiply-by-reciprocal: the spec is
 // x/scale, and the reciprocal is off by an ulp exactly at .5 boundaries).
 func quantAll(out *tensor.Tensor, xf []float32, prm func(i int) (scale, z float32)) {
-	if out.DType() == tensor.U8 {
-		of := out.U8()
-		for i, v := range xf {
-			s, z := prm(i)
-			of[i] = satU8(v/s + z)
+	chunks := max(1, (len(xf)+unaryChunk-1)/unaryChunk)
+	par.For(chunks, 1, func(c, _ int) {
+		lo := c * unaryChunk
+		hi := min(lo+unaryChunk, len(xf))
+		if out.DType() == tensor.U8 {
+			of := out.U8()
+			for i := lo; i < hi; i++ {
+				s, z := prm(i)
+				of[i] = satU8(xf[i]/s + z)
+			}
+			return
 		}
-		return
-	}
-	of := out.I8()
-	for i, v := range xf {
-		s, z := prm(i)
-		of[i] = satI8(v/s + z)
-	}
+		of := out.I8()
+		for i := lo; i < hi; i++ {
+			s, z := prm(i)
+			of[i] = satI8(xf[i]/s + z)
+		}
+	})
 }
 
 // ---- DequantizeLinear ----
@@ -177,9 +182,14 @@ func (o *dequantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tenso
 	if len(sc) == 1 {
 		s := sc[0]
 		z := zpi[0]
-		for i := 0; i < n; i++ {
-			of[i] = float32(get(i)-z) * s
-		}
+		chunks := max(1, (n+unaryChunk-1)/unaryChunk)
+		par.For(chunks, 1, func(c, _ int) {
+			lo := c * unaryChunk
+			hi := min(lo+unaryChunk, n)
+			for i := lo; i < hi; i++ {
+				of[i] = float32(get(i)-z) * s
+			}
+		})
 		return []*tensor.Tensor{out}, nil
 	}
 	xs := x.Shape()
