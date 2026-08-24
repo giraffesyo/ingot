@@ -569,3 +569,25 @@ Where the remaining gaps are:
 - **segnet**: ConvTranspose GEMM+col2im on tiny shapes.
 
 PP-OCRv4 is unaffected by this round (det_640 8.3–8.7 ms, rec_320 2.8 ms).
+
+
+## Winograd F(2×2, 3×3) — implemented, opt-in for now (2026-08-24)
+
+`ops/winograd.go`: 3×3 stride-1 group-1 convs with Cin ≥ 16 can run as
+F(2×2,3×3) — 2.25× fewer MACs, no column matrix. Input/inverse transforms are
+whole-tile-row vector ops (vek.Add/Sub) using the same even/odd column
+de-interleave as the stride-2 depthwise (tiles overlap by 2 columns, so BᵀdB
+and AᵀMA become shifted row adds with contiguous stores per frequency plane);
+the 16 per-frequency GEMMs use pre-packed transformed weights cached on the op.
+Oracle tests cover even/odd extents, pads 0/1/2, batch > 1, and the fused
+epilogue; the zoo conformance suite passes with it forced on.
+
+Status: **opt-in via OCR_WINOGRAD=1** (tests force-enable it). Isolated,
+same-run comparison (det head 96→24 3×3): @160² **1.19 vs 1.56 ms** (wino vs
+tiled im2col), @80² 0.52 vs 0.54, resnet 64ch@56² 0.44 vs 0.46. But in-model
+it made det *slower* overall: with 18 workers each holding a
+16·(Cin+Cout)·tiles V/M slab (~600 KB → ~11 MB concurrent), every neighbouring
+op loses the shared cache — the per-node profile showed all non-winograd nodes
+~1.5× slower. To turn it on by default: block the GEMMs over Cin with beta=1
+accumulation (shrinks the live V slab ~4×) and/or fuse transform+GEMM per
+Cin block. The kernel-level win is real; the memory footprint is the blocker.

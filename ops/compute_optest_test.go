@@ -50,6 +50,10 @@ func convRef(x, w, bias []float32, N, C, H, W, M, KH, KW, G, sh, sw, dh, dw, pt,
 }
 
 func TestConvVariants(t *testing.T) {
+	// Exercise the Winograd path too (opt-in at runtime, always tested).
+	old := winogradEnabled
+	winogradEnabled = true
+	defer func() { winogradEnabled = old }()
 	r := rand.New(rand.NewPCG(1, 2))
 	rnd := func(n int) []float32 {
 		s := make([]float32, n)
@@ -73,6 +77,11 @@ func TestConvVariants(t *testing.T) {
 		{1, 6, 11, 13, 6, 5, 5, 6, 2, 2, 1, 1, 2, 2}, // depthwise 5x5 stride 2
 		{2, 8, 10, 17, 8, 3, 3, 8, 2, 2, 1, 1, 1, 1}, // depthwise 3x3 stride 2, odd width
 		{1, 6, 9, 9, 6, 3, 3, 6, 2, 2, 1, 1, 0, 0},   // depthwise 3x3 stride 2, no pad
+		// Winograd F(2,3) path (3x3, s1, groups 1, Cin>=16):
+		{1, 16, 12, 14, 8, 3, 3, 1, 1, 1, 1, 1, 1, 1}, // even/odd extents, pad 1
+		{2, 24, 9, 11, 16, 3, 3, 1, 1, 1, 1, 1, 1, 1}, // batch 2, odd OH/OW
+		{1, 16, 8, 8, 4, 3, 3, 1, 1, 1, 1, 1, 0, 0},   // valid pad
+		{1, 32, 5, 5, 8, 3, 3, 1, 1, 1, 1, 1, 2, 2},   // pad 2 (output > input)
 	}
 	for ci, c := range cfgs {
 		x := rnd(c.N * c.C * c.H * c.W)
