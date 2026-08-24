@@ -710,3 +710,36 @@ Also: Go 1.27 (Homebrew auto-upgrade) rejected the runtime.sigprocmask
 linkname within a day of writing it — the guard now issues the
 __pthread_sigmask syscall directly from our own assembly (no cgo, no runtime
 internals; TestGuardMask asserts success, the GC-storm test proves protection).
+
+
+## Winograd, fused — default-on; hybrid SME+NEON — measured and declined (2026-08-24)
+
+The Winograd rewrite that earns default-on: instead of materialising V/M per
+band (~600 KB × workers — the round-1 blocker), the pipeline is fused per
+~36-tile block of a tile row. The column transform writes each 12-tile group
+directly in the micro-kernel's packed-B panel layout (gemm.PanelKernel /
+PackAPanels expose the kernel narrowly), the 16 per-frequency GEMMs consume it
+cache-hot, and the blk-wide vectorised inverse writes C immediately — working
+set ≈ one block (~250 KB).
+
+Isolated (same-run, wino vs tiled im2col): det58 96→24@160² 1.05 vs 1.18 ms,
+det55 @80² 0.29 vs 0.40, resnet 16ch@16² **14 vs 45 µs**, 64ch@56² 0.24 vs
+0.35. In-model MT: resnetish 375 → 297-315 µs, det_640 −7%, mnv2/det_960
+unchanged. Dispatch order, measured at 1T: **SME > Winograd > im2col** — so
+winogradOK yields to the SME unit when the dispatch policy would take the
+equivalent im2col GEMM (gemm.PrefersSME). OCR_NO_WINOGRAD=1 disables.
+
+Hybrid SME+NEON MT GEMM (split N panels between C coarse SME tasks and the
+NEON sweep) was prototyped (hybrid_arm64_test.go) and declined: with
+pre-packed weights the real model shapes are parity at best on SME at MT
+(rec 911 vs 972 NEON GFLOPS, det-head 657 vs 641), and hybrid only wins a
+narrow band (pw_m96 1250 → 1550 at c4/f45) while losing where pure SME or
+pure NEON is right. Not worth shape-dependent split tables today.
+
+Defaults after this round (auto everything, no env):
+
+| | MT | 1T | ORT MT / 1T |
+|---|---|---|---|
+| det_640 | 9.3 ms | **51.0 ms** | 17.8 / 69 → **0.52× / 0.74×** |
+| rec_320 | 3.0 ms | **8.0 ms** | 6.3 / 11.7 → **0.48× / 0.69×** |
+| resnetish | 313 µs | 318 µs | 96 / 82 (still the small-conv outlier) |

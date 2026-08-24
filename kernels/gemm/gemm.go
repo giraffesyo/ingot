@@ -537,3 +537,25 @@ func gemv(transA, transB bool, n, k int, alpha float32, a []float32, lda int, b 
 		}
 	})
 }
+
+// PanelKernel exposes the micro-kernel for fused consumers (Winograd conv):
+// C[MR×NR] (+)= Aᵖ·Bᵖ for one packed A panel (kc steps × MR rows, packAPanel
+// layout) against one packed B panel (kc steps × NR columns). C row stride ldc
+// must accommodate MR rows and NR columns — callers own full tiles.
+func PanelKernel(kc int, apanel, bpanel, c []float32, ldc int, acc bool) {
+	microKernel(kc, apanel, bpanel, c, ldc, acc)
+}
+
+// PackAPanels packs row-major A[m×k] (k ≤ KC) into packAPanel layout —
+// ceil(m/MR) panels of KC·MR floats — for use with PanelKernel.
+func PackAPanels(m, k int, a []float32, lda int) []float32 {
+	if k > KC {
+		panic("gemm: PackAPanels requires k <= KC")
+	}
+	mPanels := (m + MR - 1) / MR
+	out := make([]float32, mPanels*KC*MR)
+	for ip := 0; ip < mPanels; ip++ {
+		packAPanel(k, min(MR, m-ip*MR), a[ip*MR*lda:], lda, out[ip*KC*MR:])
+	}
+	return out
+}
