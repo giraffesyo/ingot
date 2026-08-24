@@ -685,3 +685,25 @@ make this default-on for SME hardware: quiet-machine sweep of the eligibility
 thresholds, MT interaction (matrix units are shared per cluster — maybe cap
 SME-GEMM parallelism), and a linux/arm64 detection path (HWCAP2_SME) when
 there's hardware to test.
+
+
+### SME, part 3: default-on (auto-1T policy) and the Go 1.27 guard rewrite
+
+Quiet(ish)-machine A/B across the OCR models settled the dispatch policy: SME
+is a ~2× win single-threaded (rec_320 1T 19.8 → 8.8 ms — **0.75× ORT's 11.7**;
+rec_b8 151 → 74; det 1T ~8% better) but a mild loss at full parallelism (the
+per-cluster matrix units contend while NEON pipelines idle). Policy, now the
+default with no env needed:
+
+- `OCR_GEMM_KERNEL` unset → **auto**: SME for eligible shapes when the worker
+  pool is single-threaded (GOMAXPROCS=1); NEON otherwise.
+- `=sme` forces SME at any parallelism (for experiments); `=neon` disables.
+
+Verified same-run: default at GOMAXPROCS=1 picks SME (rec_320 10.6 vs 20.7 ms
+forced-NEON); full suite passes at GOMAXPROCS=1 and 18. Hybrid SME+NEON MT
+scheduling is the open follow-up.
+
+Also: Go 1.27 (Homebrew auto-upgrade) rejected the runtime.sigprocmask
+linkname within a day of writing it — the guard now issues the
+__pthread_sigmask syscall directly from our own assembly (no cgo, no runtime
+internals; TestGuardMask asserts success, the GC-storm test proves protection).

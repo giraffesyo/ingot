@@ -63,8 +63,9 @@
 - [x] SME probes + Sgemm (kernels/sme, pure Go WORD-encoded): FMOPA peak 2.17
       TFLOPS/core; pre-packed Sgemm 700 GFLOPS 1T (7.4× NEON); signal-mask
       guard (ZA dies on signal delivery — GC-storm regression test); dispatch
-      via OCR_GEMM_KERNEL=sme → rec_320 1T at ORT parity (11.0 vs 11.7 ms).
-      TODO: default-on for SME hardware, MT tuning, linux detection
+      via OCR_GEMM_KERNEL=sme → rec_320 1T 8.8 ms vs ORT 11.7 (0.75×).
+      Default-on (auto): SME when the pool is single-threaded, NEON at MT.
+      TODO: hybrid SME+NEON MT scheduling, linux detection (HWCAP2_SME)
 - [x] rec batching in the OCR pipeline (width-grouped, padding-bounded)
 
 ## Coverage (breadth)
