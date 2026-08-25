@@ -2,6 +2,7 @@ package gemm
 
 import (
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -124,4 +125,40 @@ func TestQgemmFallbackKernels(t *testing.T) {
 	defer func() { qkernel, qkernelS8 = savedU, savedS }()
 	t.Run("u8s8", TestQgemmU8S8VsRef)
 	t.Run("packedS8", TestQgemmPackedS8VsRef)
+}
+
+// TestQPackBPanel checks the NEON zip-transpose pack against the scalar layout
+// definition, including the 16-byte-load edge conditions.
+func TestQPackBPanel(t *testing.T) {
+	rng := rand.New(rand.NewPCG(11, 12))
+	for _, tc := range []struct{ k, n, j0 int }{
+		{8, 28, 0}, {8, 28, 12}, {16, 40, 12}, {64, 64, 24},
+		{40, 200, 96}, {8, 28, 16}, {24, 32, 12}, {13, 40, 12}, {16, 40, 36},
+	} {
+		kg := (tc.k + qKG - 1) / qKG
+		b := make([]int8, tc.k*tc.n)
+		for i := range b {
+			b[i] = int8(rng.IntN(256) - 128)
+		}
+		cols := min(qNR, tc.n-tc.j0)
+		got := make([]int8, kg*qNR*qKG)
+		for i := range got {
+			got[i] = 0x55
+		}
+		qpackBPanel(got, b, tc.n, tc.k, kg, tc.j0, cols)
+		want := make([]int8, kg*qNR*qKG)
+		for g := 0; g < kg; g++ {
+			for j := 0; j < cols; j++ {
+				for o := 0; o < qKG; o++ {
+					q := g*qKG + o
+					if q < tc.k {
+						want[g*qNR*qKG+j*qKG+o] = b[q*tc.n+tc.j0+j]
+					}
+				}
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("k=%d n=%d j0=%d: pack mismatch", tc.k, tc.n, tc.j0)
+		}
+	}
 }

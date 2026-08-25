@@ -72,21 +72,7 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 		bp := wb.bp
 		j0 := jp * qNR
 		cols := min(qNR, n-j0)
-		if cols < qNR || k%qKG != 0 {
-			clear(bp)
-		}
-		for g := 0; g < kg; g++ {
-			q0 := g * qKG
-			ko := min(qKG, k-q0)
-			dst := bp[g*qNR*qKG:]
-			for o := 0; o < ko; o++ {
-				src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
-				d := dst[o:]
-				for j, v := range src {
-					d[j*qKG] = v
-				}
-			}
-		}
+		qpackBPanel(bp, b, ldb, k, kg, j0, cols)
 		for ip := 0; ip < mp; ip++ {
 			i0 := ip * qMR
 			rows := min(qMR, m-i0)
@@ -113,6 +99,32 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 	for _, w := range bufs {
 		if w != nil {
 			putQwork(w)
+		}
+	}
+}
+
+// qpackBPanel packs one qNR-column panel of row-major B (k×n, leading dim ldb)
+// into group-major [kg][qNR][qKG] layout: bp[g*qNR*qKG+j*qKG+o] = B[g*qKG+o][j0+j].
+// Full panels take the NEON zip-transpose kernel (it loads 16 bytes per row, so
+// it needs j0+16 <= ldb and whole k-groups); edges fall back to the scalar loop.
+func qpackBPanel(bp []int8, b []int8, ldb, k, kg, j0, cols int) {
+	if hasQpackAsm && cols == qNR && k%qKG == 0 && j0+16 <= ldb {
+		qpackb(&bp[0], &b[j0], int64(ldb), int64(kg))
+		return
+	}
+	if cols < qNR || k%qKG != 0 {
+		clear(bp[:kg*qNR*qKG])
+	}
+	for g := 0; g < kg; g++ {
+		q0 := g * qKG
+		ko := min(qKG, k-q0)
+		dst := bp[g*qNR*qKG:]
+		for o := 0; o < ko; o++ {
+			src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
+			d := dst[o:]
+			for j, v := range src {
+				d[j*qKG] = v
+			}
 		}
 	}
 }
@@ -224,21 +236,7 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 		bp := wb.bp
 		j0 := jp * qNR
 		cols := min(qNR, n-j0)
-		if cols < qNR || k%qKG != 0 {
-			clear(bp)
-		}
-		for g := 0; g < kg; g++ {
-			q0 := g * qKG
-			ko := min(qKG, k-q0)
-			dst := bp[g*qNR*qKG:]
-			for o := 0; o < ko; o++ {
-				src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
-				d := dst[o:]
-				for j, v := range src {
-					d[j*qKG] = v
-				}
-			}
-		}
+		qpackBPanel(bp, b, ldb, k, kg, j0, cols)
 		for ip := 0; ip < mp; ip++ {
 			i0 := ip * qMR
 			rows := min(qMR, m-i0)
