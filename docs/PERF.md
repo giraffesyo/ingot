@@ -1184,3 +1184,20 @@ never reaches the wall on this machine, so halving traffic buys nothing
 (and the extra shll ops don't cost either). This is the LLM-decode
 building block from the mission statement: decoder GEMVs are exactly the
 MT-memory-bound case.
+
+
+## Fused attention — ingot.MHA (2026-08-26)
+
+fuse-attention collapses the exported 11-node MHA pattern (packed QKV
+[3,B,H,T,dh] → 3×Slice+Squeeze → q·scale, Kᵀ → MatMul → Softmax → ·V →
+Transpose) into one op. Three structural savings: the q-scale folds into
+the score GEMM's alpha, K is consumed by the transposed-B GEMM without
+ever materialising its transpose, and the output GEMM writes straight
+into the post-transpose [B,T,H,dh] layout through its leading dimension.
+Softmax runs on the score tile while it's hot in cache.
+
+Both rec attention blocks fuse (the survivor Softmax is the CTC head);
+parity and corpus accuracy are bit-for-bit unchanged. In-model gains are
+small — attention was ~10% of a T=40 model (rec_int8 MT 2.9 → 2.75 ms) —
+but the runtime now executes transformer attention as one fused pass,
+which is the load-bearing capability for the ViT/BERT/decoder targets.

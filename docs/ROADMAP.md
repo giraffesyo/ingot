@@ -95,8 +95,12 @@
       for Neoverse-class hardware, gated + unwired)
 - [x] bf16 storage path: vek.DotBF16 + gemm.GemvBF16 (shll-widen into f32
       FMLA) — 2.0× MT GEMV at the DRAM wall (105→215 GFLOPS), 1T parity
+- [x] fused attention (ingot.MHA): 11-node exported MHA pattern → one op
+      (scale in GEMM alpha, transposed-B K, strided output writes); both rec
+      blocks fuse, parity/accuracy unchanged
 - [ ] SE-path islands (small), fused epilogues; bf16 storage in the
-      executor (Linear/MatMul weight auto-conversion, opt-in)
+      executor (Linear/MatMul weight auto-conversion, opt-in); transformer
+      zoo model (ViT/BERT block) to exercise MHA at scale
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
