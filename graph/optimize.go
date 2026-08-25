@@ -38,6 +38,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = foldQDQAffine(g, stats) || changed
 		changed = fuseQLUT(g, stats) || changed
 		changed = fuseLayerNorm(g, stats) || changed
+		changed = fuseAttention(g, stats) || changed
 	}
 	renumber(g)
 	return stats
@@ -1355,6 +1356,159 @@ func fuseLayerNorm(g *Graph, stats map[string]int) bool {
 		out.Producer = rm1
 		g.Opsets[ingotDomain] = 1
 		stats["fuse-layernorm"]++
+		changed = true
+	}
+	g.compact(dead)
+	return changed
+}
+
+// sliceStart matches Slice(x, axis 0, starts s, ends s+1, steps 1) and
+// returns s. Bounds come as 1-element const inputs (opset ≥10).
+func sliceStart(n *Node) (int64, bool) {
+	if n.OpType != "Slice" || n.Domain != "" || len(n.Inputs) < 4 {
+		return 0, false
+	}
+	get := func(i int) (int64, bool) {
+		if i >= len(n.Inputs) || n.Inputs[i] == nil || n.Inputs[i].Const == nil ||
+			n.Inputs[i].Const.DType() != tensor.I64 || n.Inputs[i].Const.Numel() != 1 {
+			return 0, false
+		}
+		return n.Inputs[i].Const.I64()[0], true
+	}
+	st, ok1 := get(1)
+	en, ok2 := get(2)
+	ax, ok3 := get(3)
+	if !ok1 || !ok2 || !ok3 || ax != 0 || en != st+1 {
+		return 0, false
+	}
+	if len(n.Inputs) > 4 && n.Inputs[4] != nil {
+		if sp, ok := get(4); !ok || sp != 1 {
+			return 0, false
+		}
+	}
+	return st, true
+}
+
+func permIs(n *Node, want ...int64) bool {
+	p := n.Attrs.Ints("perm", nil)
+	if len(p) != len(want) {
+		return false
+	}
+	for i := range p {
+		if p[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// fuseAttention rewrites the exported multi-head-attention pattern
+//
+//	x[3,B,H,T,dh] → Slice{0,1,2}+Squeeze → q·scale, Kᵀ([0,1,3,2])
+//	→ MatMul → Softmax(last) → MatMul(·V) → Transpose([0,2,1,3])
+//
+// into one ingot.MHA node producing the transposed output directly.
+func fuseAttention(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	for _, sm := range g.Nodes {
+		if dead[sm] || sm.OpType != "Softmax" || sm.Domain != "" {
+			continue
+		}
+		if ax := sm.Attrs.Int("axis", -1); ax != -1 && ax != 3 {
+			continue
+		}
+		mm1 := sm.Inputs[0].Producer
+		if mm1 == nil || dead[mm1] || mm1.OpType != "MatMul" || g.soleConsumer(mm1.Outputs[0]) != sm {
+			continue
+		}
+		// q side: optional scalar Mul.
+		qv := mm1.Inputs[0]
+		scale := float32(1)
+		var mulN *Node
+		if p := qv.Producer; p != nil && p.OpType == "Mul" {
+			if x, c, _, ok := binaryWithConst(p); ok && g.soleConsumer(p.Outputs[0]) == mm1 {
+				scale, qv, mulN = c, x, p
+			}
+		}
+		// k side: Transpose [0,1,3,2].
+		ktr := mm1.Inputs[1].Producer
+		if ktr == nil || ktr.OpType != "Transpose" || !permIs(ktr, 0, 1, 3, 2) || g.soleConsumer(ktr.Outputs[0]) != mm1 {
+			continue
+		}
+		kv := ktr.Inputs[0]
+		// probs → MatMul(·V) → Transpose [0,2,1,3].
+		mm2 := g.soleConsumer(sm.Outputs[0])
+		if mm2 == nil || mm2.OpType != "MatMul" || mm2.Inputs[0] != sm.Outputs[0] {
+			continue
+		}
+		vv := mm2.Inputs[1]
+		otr := g.soleConsumer(mm2.Outputs[0])
+		if otr == nil || otr.OpType != "Transpose" || !permIs(otr, 0, 2, 1, 3) {
+			continue
+		}
+		// q/k/v each: Squeeze(axes=[0]) of Slice(x5, start 0/1/2).
+		unpack := func(v *Value) (*Node, *Node, *Value, int64, bool) {
+			sq := v.Producer
+			if sq == nil || sq.OpType != "Squeeze" {
+				return nil, nil, nil, 0, false
+			}
+			ax := sq.Attrs.Ints("axes", nil)
+			if len(ax) != 1 || ax[0] != 0 {
+				return nil, nil, nil, 0, false
+			}
+			sl := sq.Inputs[0].Producer
+			if sl == nil || g.soleConsumer(sl.Outputs[0]) != sq {
+				return nil, nil, nil, 0, false
+			}
+			st, ok := sliceStart(sl)
+			if !ok {
+				return nil, nil, nil, 0, false
+			}
+			return sq, sl, sl.Inputs[0], st, true
+		}
+		qsq, qsl, x5q, s0, ok0 := unpack(qv)
+		ksq, ksl, x5k, s1, ok1 := unpack(kv)
+		vsq, vsl, x5v, s2, ok2 := unpack(vv)
+		if !ok0 || !ok1 || !ok2 || x5q != x5k || x5q != x5v || s0 != 0 || s1 != 1 || s2 != 2 {
+			continue
+		}
+		// Consumer hygiene: q/k/v squeezes feed only this pattern.
+		if g.soleConsumer(qsq.Outputs[0]) == nil || g.soleConsumer(ksq.Outputs[0]) != ktr || g.soleConsumer(vsq.Outputs[0]) != mm2 {
+			continue
+		}
+		out := otr.Outputs[0]
+		drop := []*Node{qsl, ksl, vsl, qsq, ksq, vsq, ktr, mm1, sm, mm2, otr}
+		if mulN != nil {
+			drop = append(drop, mulN)
+		}
+		// Mutate the q-slice node (earliest safe position) into the MHA node.
+		host := qsl
+		for _, n2 := range drop {
+			dead[n2] = true
+			if n2 != host {
+				g.dropNode(n2)
+			}
+		}
+		for _, v := range host.Inputs[1:] {
+			if v != nil {
+				removeConsumer(v, host)
+				if v.Const != nil && len(v.Consumers) == 0 && !g.isOutput(v) {
+					delete(g.Values, v.Name)
+				}
+			}
+		}
+		mid := host.Outputs[0]
+		delete(g.Values, mid.Name)
+		g.Values[out.Name] = out
+		dead[host] = false
+		host.OpType, host.Domain = "MHA", ingotDomain
+		host.Attrs = ops.Attrs{"scale": fattr(scale)}
+		host.Inputs = host.Inputs[:1]
+		host.Outputs = []*Value{out}
+		out.Producer = host
+		g.Opsets[ingotDomain] = 1
+		stats["fuse-attention"]++
 		changed = true
 	}
 	g.compact(dead)
