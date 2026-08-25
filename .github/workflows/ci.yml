@@ -72,6 +72,7 @@ jobs:
       - name: GEMM + elementwise benchmarks (native AVX2)
         run: |
           go test -run='^$' -bench='Sgemm|MicroKernel' -benchmem ./kernels/gemm | tee bench-gemm.txt
+          go test -run='^$' -bench='Qgemm'              -benchmem ./kernels/gemm | tee bench-qgemm.txt
           go test -run='^$' -bench='Vek'                -benchmem ./kernels/vek  | tee bench-vek.txt
       - uses: actions/upload-artifact@v4
         with:
