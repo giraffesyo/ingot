@@ -93,8 +93,10 @@
 - [x] bf16 kernels + probes: NEON BFMMLA/BFDOT quarter-rate on Apple, SME
       BFMOPA == f32 FMOPA — bf16 is storage-only here (kernel stays in-tree
       for Neoverse-class hardware, gated + unwired)
-- [ ] bf16 storage path: bf16 weights for bandwidth-bound GEMV/decode
-      (convert-on-pack); SE-path islands (small), fused epilogues
+- [x] bf16 storage path: vek.DotBF16 + gemm.GemvBF16 (shll-widen into f32
+      FMLA) — 2.0× MT GEMV at the DRAM wall (105→215 GFLOPS), 1T parity
+- [ ] SE-path islands (small), fused epilogues; bf16 storage in the
+      executor (Linear/MatMul weight auto-conversion, opt-in)
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)

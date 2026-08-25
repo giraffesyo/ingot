@@ -1160,3 +1160,27 @@ Neoverse V2/Grace it may be genuinely fast, and that costs us nothing to
 leave ready. bf16 numerics: products of 8-bit mantissas are exact in f32,
 so the only kernel error is f32 summation — the oracle tolerance is the
 same shape as f32 GEMM's.
+
+
+## bf16 storage — 2× GEMV at the memory wall (2026-08-26)
+
+The follow-through on the bf16 verdict: since bf16 *arithmetic* is dead on
+Apple, store weights as bf16 bits and widen in-register (`shll #16`) into
+the ordinary f32 FMLA stream — zero bf16 instructions, immune to the
+quarter-rate block, half the weight bytes.
+
+`vek.DotBF16` + `gemm.GemvBF16` (m=1 decode shape, row-major bf16 W) +
+`gemm.BConvert` (one-time RNE pack). Measured at n=4096–11008, k=4096
+(weights far beyond cache):
+
+| | f32 | bf16 | × |
+|---|---|---|---|
+| MT (18 workers) | 105 GFLOPS | **202–215** | 1.9–2.0 |
+| 1T | ~30 | ~30 | 1.0 |
+
+The MT pair tells the whole story: both are pinned at the same ~210 GB/s
+DRAM wall — bf16 simply does twice the math per byte. At 1T a single core
+never reaches the wall on this machine, so halving traffic buys nothing
+(and the extra shll ops don't cost either). This is the LLM-decode
+building block from the mission statement: decoder GEMVs are exactly the
+MT-memory-bound case.
