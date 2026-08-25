@@ -142,3 +142,256 @@ qkernelS8S8_loop:
 	VST1.P [V20.S4, V21.S4, V22.S4, V23.S4], 64(R3)
 	RET
 
+// func qkernelU8S8SDOT(kg int64, ap, bp, ct pointers)
+// A [g][8r][8o], B quad-major [g][2q][12j][4], C row-major 8×12.
+TEXT ·qkernelU8S8SDOT(SB), NOSPLIT, $48-32
+	MOVD kg+0(FP), R0
+	MOVD ap+8(FP), R1
+	MOVD bp+16(FP), R2
+	MOVD ct+24(FP), R3
+	WORD $0x4F000408 // movi v8.4s, #0
+	WORD $0x4F000409 // movi v9.4s, #0
+	WORD $0x4F00040A // movi v10.4s, #0
+	WORD $0x4F00040B // movi v11.4s, #0
+	WORD $0x4F00040C // movi v12.4s, #0
+	WORD $0x4F00040D // movi v13.4s, #0
+	WORD $0x4F00040E // movi v14.4s, #0
+	WORD $0x4F00040F // movi v15.4s, #0
+	WORD $0x4F000410 // movi v16.4s, #0
+	WORD $0x4F000411 // movi v17.4s, #0
+	WORD $0x4F000412 // movi v18.4s, #0
+	WORD $0x4F000413 // movi v19.4s, #0
+	WORD $0x4F000414 // movi v20.4s, #0
+	WORD $0x4F000415 // movi v21.4s, #0
+	WORD $0x4F000416 // movi v22.4s, #0
+	WORD $0x4F000417 // movi v23.4s, #0
+	WORD $0x4F000418 // movi v24.4s, #0
+	WORD $0x4F000419 // movi v25.4s, #0
+	WORD $0x4F00041A // movi v26.4s, #0
+	WORD $0x4F00041B // movi v27.4s, #0
+	WORD $0x4F00041C // movi v28.4s, #0
+	WORD $0x4F00041D // movi v29.4s, #0
+	WORD $0x4F00041E // movi v30.4s, #0
+	WORD $0x4F00041F // movi v31.4s, #0
+	MOVD ZR, R5
+	MOVD R5, sums-8(SP)
+	MOVD R5, sums-16(SP)
+	MOVD R5, sums-24(SP)
+	MOVD R5, sums-32(SP)
+	MOVD R5, sums-40(SP)
+	MOVD R5, sums-48(SP)
+qkernelU8S8SDOT_loop:
+	CBZ R0, qkernelU8S8SDOT_done
+	MOVD R2, R4 // quad 0 pointer, for the deferred sum pass
+	VLD1.P 64(R1), [V0.B16, V1.B16, V2.B16, V3.B16] // A rows 0-7 × 8k
+	WORD $0x4F04E407 // movi v7.16b, #0x80
+	WORD $0x6E271C00 // eor v0 ^= 0x80 (u8 → s8)
+	WORD $0x6E271C21 // eor v1 ^= 0x80 (u8 → s8)
+	WORD $0x6E271C42 // eor v2 ^= 0x80 (u8 → s8)
+	WORD $0x6E271C63 // eor v3 ^= 0x80 (u8 → s8)
+	VLD1.P 48(R2), [V4.B16, V5.B16, V6.B16] // B quad 0, cols 0-11
+	WORD $0x4F80E088 // sdot v8 += b0 · a[r0,q0]
+	WORD $0x4F80E0A9 // sdot v9 += b1 · a[r0,q0]
+	WORD $0x4F80E0CA // sdot v10 += b2 · a[r0,q0]
+	WORD $0x4F80E88B // sdot v11 += b0 · a[r1,q0]
+	WORD $0x4F80E8AC // sdot v12 += b1 · a[r1,q0]
+	WORD $0x4F80E8CD // sdot v13 += b2 · a[r1,q0]
+	WORD $0x4F81E08E // sdot v14 += b0 · a[r2,q0]
+	WORD $0x4F81E0AF // sdot v15 += b1 · a[r2,q0]
+	WORD $0x4F81E0D0 // sdot v16 += b2 · a[r2,q0]
+	WORD $0x4F81E891 // sdot v17 += b0 · a[r3,q0]
+	WORD $0x4F81E8B2 // sdot v18 += b1 · a[r3,q0]
+	WORD $0x4F81E8D3 // sdot v19 += b2 · a[r3,q0]
+	WORD $0x4F82E094 // sdot v20 += b0 · a[r4,q0]
+	WORD $0x4F82E0B5 // sdot v21 += b1 · a[r4,q0]
+	WORD $0x4F82E0D6 // sdot v22 += b2 · a[r4,q0]
+	WORD $0x4F82E897 // sdot v23 += b0 · a[r5,q0]
+	WORD $0x4F82E8B8 // sdot v24 += b1 · a[r5,q0]
+	WORD $0x4F82E8D9 // sdot v25 += b2 · a[r5,q0]
+	WORD $0x4F83E09A // sdot v26 += b0 · a[r6,q0]
+	WORD $0x4F83E0BB // sdot v27 += b1 · a[r6,q0]
+	WORD $0x4F83E0DC // sdot v28 += b2 · a[r6,q0]
+	WORD $0x4F83E89D // sdot v29 += b0 · a[r7,q0]
+	WORD $0x4F83E8BE // sdot v30 += b1 · a[r7,q0]
+	WORD $0x4F83E8DF // sdot v31 += b2 · a[r7,q0]
+	VLD1.P 48(R2), [V4.B16, V5.B16, V6.B16] // B quad 1, cols 0-11
+	WORD $0x4FA0E088 // sdot v8 += b0 · a[r0,q1]
+	WORD $0x4FA0E0A9 // sdot v9 += b1 · a[r0,q1]
+	WORD $0x4FA0E0CA // sdot v10 += b2 · a[r0,q1]
+	WORD $0x4FA0E88B // sdot v11 += b0 · a[r1,q1]
+	WORD $0x4FA0E8AC // sdot v12 += b1 · a[r1,q1]
+	WORD $0x4FA0E8CD // sdot v13 += b2 · a[r1,q1]
+	WORD $0x4FA1E08E // sdot v14 += b0 · a[r2,q1]
+	WORD $0x4FA1E0AF // sdot v15 += b1 · a[r2,q1]
+	WORD $0x4FA1E0D0 // sdot v16 += b2 · a[r2,q1]
+	WORD $0x4FA1E891 // sdot v17 += b0 · a[r3,q1]
+	WORD $0x4FA1E8B2 // sdot v18 += b1 · a[r3,q1]
+	WORD $0x4FA1E8D3 // sdot v19 += b2 · a[r3,q1]
+	WORD $0x4FA2E094 // sdot v20 += b0 · a[r4,q1]
+	WORD $0x4FA2E0B5 // sdot v21 += b1 · a[r4,q1]
+	WORD $0x4FA2E0D6 // sdot v22 += b2 · a[r4,q1]
+	WORD $0x4FA2E897 // sdot v23 += b0 · a[r5,q1]
+	WORD $0x4FA2E8B8 // sdot v24 += b1 · a[r5,q1]
+	WORD $0x4FA2E8D9 // sdot v25 += b2 · a[r5,q1]
+	WORD $0x4FA3E09A // sdot v26 += b0 · a[r6,q1]
+	WORD $0x4FA3E0BB // sdot v27 += b1 · a[r6,q1]
+	WORD $0x4FA3E0DC // sdot v28 += b2 · a[r6,q1]
+	WORD $0x4FA3E89D // sdot v29 += b0 · a[r7,q1]
+	WORD $0x4FA3E8BE // sdot v30 += b1 · a[r7,q1]
+	WORD $0x4FA3E8DF // sdot v31 += b2 · a[r7,q1]
+	FMOVQ sums-48(SP), F0
+	WORD $0x4F87E080 // sum0 += b0(q1) · (−128)
+	FMOVQ F0, sums-48(SP)
+	FMOVQ sums-32(SP), F0
+	WORD $0x4F87E0A0 // sum1 += b1(q1) · (−128)
+	FMOVQ F0, sums-32(SP)
+	FMOVQ sums-16(SP), F0
+	WORD $0x4F87E0C0 // sum2 += b2(q1) · (−128)
+	FMOVQ F0, sums-16(SP)
+	VLD1 (R4), [V4.B16, V5.B16, V6.B16] // reload B quad 0
+	FMOVQ sums-48(SP), F0
+	WORD $0x4F87E080 // sum0 += b0(q0) · (−128)
+	FMOVQ F0, sums-48(SP)
+	FMOVQ sums-32(SP), F0
+	WORD $0x4F87E0A0 // sum1 += b1(q0) · (−128)
+	FMOVQ F0, sums-32(SP)
+	FMOVQ sums-16(SP), F0
+	WORD $0x4F87E0C0 // sum2 += b2(q0) · (−128)
+	FMOVQ F0, sums-16(SP)
+	SUB $1, R0, R0
+	B qkernelU8S8SDOT_loop
+qkernelU8S8SDOT_done:
+	FMOVQ sums-48(SP), F0
+	WORD $0x6EA08508 // v8 -= (−128·colsum0)
+	WORD $0x6EA0856B // v11 -= (−128·colsum0)
+	WORD $0x6EA085CE // v14 -= (−128·colsum0)
+	WORD $0x6EA08631 // v17 -= (−128·colsum0)
+	WORD $0x6EA08694 // v20 -= (−128·colsum0)
+	WORD $0x6EA086F7 // v23 -= (−128·colsum0)
+	WORD $0x6EA0875A // v26 -= (−128·colsum0)
+	WORD $0x6EA087BD // v29 -= (−128·colsum0)
+	FMOVQ sums-32(SP), F0
+	WORD $0x6EA08529 // v9 -= (−128·colsum1)
+	WORD $0x6EA0858C // v12 -= (−128·colsum1)
+	WORD $0x6EA085EF // v15 -= (−128·colsum1)
+	WORD $0x6EA08652 // v18 -= (−128·colsum1)
+	WORD $0x6EA086B5 // v21 -= (−128·colsum1)
+	WORD $0x6EA08718 // v24 -= (−128·colsum1)
+	WORD $0x6EA0877B // v27 -= (−128·colsum1)
+	WORD $0x6EA087DE // v30 -= (−128·colsum1)
+	FMOVQ sums-16(SP), F0
+	WORD $0x6EA0854A // v10 -= (−128·colsum2)
+	WORD $0x6EA085AD // v13 -= (−128·colsum2)
+	WORD $0x6EA08610 // v16 -= (−128·colsum2)
+	WORD $0x6EA08673 // v19 -= (−128·colsum2)
+	WORD $0x6EA086D6 // v22 -= (−128·colsum2)
+	WORD $0x6EA08739 // v25 -= (−128·colsum2)
+	WORD $0x6EA0879C // v28 -= (−128·colsum2)
+	WORD $0x6EA087FF // v31 -= (−128·colsum2)
+	VST1.P [V8.S4, V9.S4, V10.S4], 48(R3)
+	VST1.P [V11.S4, V12.S4, V13.S4], 48(R3)
+	VST1.P [V14.S4, V15.S4, V16.S4], 48(R3)
+	VST1.P [V17.S4, V18.S4, V19.S4], 48(R3)
+	VST1.P [V20.S4, V21.S4, V22.S4], 48(R3)
+	VST1.P [V23.S4, V24.S4, V25.S4], 48(R3)
+	VST1.P [V26.S4, V27.S4, V28.S4], 48(R3)
+	VST1.P [V29.S4, V30.S4, V31.S4], 48(R3)
+	RET
+
+// func qkernelS8S8SDOT(kg int64, ap, bp, ct pointers)
+// A [g][8r][8o], B quad-major [g][2q][12j][4], C row-major 8×12.
+TEXT ·qkernelS8S8SDOT(SB), NOSPLIT, $0-32
+	MOVD kg+0(FP), R0
+	MOVD ap+8(FP), R1
+	MOVD bp+16(FP), R2
+	MOVD ct+24(FP), R3
+	WORD $0x4F000408 // movi v8.4s, #0
+	WORD $0x4F000409 // movi v9.4s, #0
+	WORD $0x4F00040A // movi v10.4s, #0
+	WORD $0x4F00040B // movi v11.4s, #0
+	WORD $0x4F00040C // movi v12.4s, #0
+	WORD $0x4F00040D // movi v13.4s, #0
+	WORD $0x4F00040E // movi v14.4s, #0
+	WORD $0x4F00040F // movi v15.4s, #0
+	WORD $0x4F000410 // movi v16.4s, #0
+	WORD $0x4F000411 // movi v17.4s, #0
+	WORD $0x4F000412 // movi v18.4s, #0
+	WORD $0x4F000413 // movi v19.4s, #0
+	WORD $0x4F000414 // movi v20.4s, #0
+	WORD $0x4F000415 // movi v21.4s, #0
+	WORD $0x4F000416 // movi v22.4s, #0
+	WORD $0x4F000417 // movi v23.4s, #0
+	WORD $0x4F000418 // movi v24.4s, #0
+	WORD $0x4F000419 // movi v25.4s, #0
+	WORD $0x4F00041A // movi v26.4s, #0
+	WORD $0x4F00041B // movi v27.4s, #0
+	WORD $0x4F00041C // movi v28.4s, #0
+	WORD $0x4F00041D // movi v29.4s, #0
+	WORD $0x4F00041E // movi v30.4s, #0
+	WORD $0x4F00041F // movi v31.4s, #0
+qkernelS8S8SDOT_loop:
+	CBZ R0, qkernelS8S8SDOT_done
+	VLD1.P 64(R1), [V0.B16, V1.B16, V2.B16, V3.B16] // A rows 0-7 × 8k
+	VLD1.P 48(R2), [V4.B16, V5.B16, V6.B16] // B quad 0, cols 0-11
+	WORD $0x4F80E088 // sdot v8 += b0 · a[r0,q0]
+	WORD $0x4F80E0A9 // sdot v9 += b1 · a[r0,q0]
+	WORD $0x4F80E0CA // sdot v10 += b2 · a[r0,q0]
+	WORD $0x4F80E88B // sdot v11 += b0 · a[r1,q0]
+	WORD $0x4F80E8AC // sdot v12 += b1 · a[r1,q0]
+	WORD $0x4F80E8CD // sdot v13 += b2 · a[r1,q0]
+	WORD $0x4F81E08E // sdot v14 += b0 · a[r2,q0]
+	WORD $0x4F81E0AF // sdot v15 += b1 · a[r2,q0]
+	WORD $0x4F81E0D0 // sdot v16 += b2 · a[r2,q0]
+	WORD $0x4F81E891 // sdot v17 += b0 · a[r3,q0]
+	WORD $0x4F81E8B2 // sdot v18 += b1 · a[r3,q0]
+	WORD $0x4F81E8D3 // sdot v19 += b2 · a[r3,q0]
+	WORD $0x4F82E094 // sdot v20 += b0 · a[r4,q0]
+	WORD $0x4F82E0B5 // sdot v21 += b1 · a[r4,q0]
+	WORD $0x4F82E0D6 // sdot v22 += b2 · a[r4,q0]
+	WORD $0x4F82E897 // sdot v23 += b0 · a[r5,q0]
+	WORD $0x4F82E8B8 // sdot v24 += b1 · a[r5,q0]
+	WORD $0x4F82E8D9 // sdot v25 += b2 · a[r5,q0]
+	WORD $0x4F83E09A // sdot v26 += b0 · a[r6,q0]
+	WORD $0x4F83E0BB // sdot v27 += b1 · a[r6,q0]
+	WORD $0x4F83E0DC // sdot v28 += b2 · a[r6,q0]
+	WORD $0x4F83E89D // sdot v29 += b0 · a[r7,q0]
+	WORD $0x4F83E8BE // sdot v30 += b1 · a[r7,q0]
+	WORD $0x4F83E8DF // sdot v31 += b2 · a[r7,q0]
+	VLD1.P 48(R2), [V4.B16, V5.B16, V6.B16] // B quad 1, cols 0-11
+	WORD $0x4FA0E088 // sdot v8 += b0 · a[r0,q1]
+	WORD $0x4FA0E0A9 // sdot v9 += b1 · a[r0,q1]
+	WORD $0x4FA0E0CA // sdot v10 += b2 · a[r0,q1]
+	WORD $0x4FA0E88B // sdot v11 += b0 · a[r1,q1]
+	WORD $0x4FA0E8AC // sdot v12 += b1 · a[r1,q1]
+	WORD $0x4FA0E8CD // sdot v13 += b2 · a[r1,q1]
+	WORD $0x4FA1E08E // sdot v14 += b0 · a[r2,q1]
+	WORD $0x4FA1E0AF // sdot v15 += b1 · a[r2,q1]
+	WORD $0x4FA1E0D0 // sdot v16 += b2 · a[r2,q1]
+	WORD $0x4FA1E891 // sdot v17 += b0 · a[r3,q1]
+	WORD $0x4FA1E8B2 // sdot v18 += b1 · a[r3,q1]
+	WORD $0x4FA1E8D3 // sdot v19 += b2 · a[r3,q1]
+	WORD $0x4FA2E094 // sdot v20 += b0 · a[r4,q1]
+	WORD $0x4FA2E0B5 // sdot v21 += b1 · a[r4,q1]
+	WORD $0x4FA2E0D6 // sdot v22 += b2 · a[r4,q1]
+	WORD $0x4FA2E897 // sdot v23 += b0 · a[r5,q1]
+	WORD $0x4FA2E8B8 // sdot v24 += b1 · a[r5,q1]
+	WORD $0x4FA2E8D9 // sdot v25 += b2 · a[r5,q1]
+	WORD $0x4FA3E09A // sdot v26 += b0 · a[r6,q1]
+	WORD $0x4FA3E0BB // sdot v27 += b1 · a[r6,q1]
+	WORD $0x4FA3E0DC // sdot v28 += b2 · a[r6,q1]
+	WORD $0x4FA3E89D // sdot v29 += b0 · a[r7,q1]
+	WORD $0x4FA3E8BE // sdot v30 += b1 · a[r7,q1]
+	WORD $0x4FA3E8DF // sdot v31 += b2 · a[r7,q1]
+	SUB $1, R0, R0
+	B qkernelS8S8SDOT_loop
+qkernelS8S8SDOT_done:
+	VST1.P [V8.S4, V9.S4, V10.S4], 48(R3)
+	VST1.P [V11.S4, V12.S4, V13.S4], 48(R3)
+	VST1.P [V14.S4, V15.S4, V16.S4], 48(R3)
+	VST1.P [V17.S4, V18.S4, V19.S4], 48(R3)
+	VST1.P [V20.S4, V21.S4, V22.S4], 48(R3)
+	VST1.P [V23.S4, V24.S4, V25.S4], 48(R3)
+	VST1.P [V26.S4, V27.S4, V28.S4], 48(R3)
+	VST1.P [V29.S4, V30.S4, V31.S4], 48(R3)
+	RET
+
