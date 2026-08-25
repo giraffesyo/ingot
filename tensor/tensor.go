@@ -153,6 +153,17 @@ func (t *Tensor) I32() []int32 {
 	return unsafe.Slice((*int32)(unsafe.Pointer(&t.buf[t.offset*4])), n)
 }
 
+// I16 returns the tensor data as []int16 (dtype I16).
+func (t *Tensor) I16() []int16 {
+	t.mustDType(I16)
+	t.mustContiguous()
+	n := t.Numel()
+	if n == 0 {
+		return nil
+	}
+	return unsafe.Slice((*int16)(unsafe.Pointer(&t.buf[t.offset*2])), n)
+}
+
 // Bool returns the underlying bool storage (contiguous tensors only).
 func (t *Tensor) Bool() []bool {
 	t.mustDType(Bool)
