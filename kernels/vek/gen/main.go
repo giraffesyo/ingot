@@ -275,6 +275,7 @@ func main() {
 
 	g.axpy()
 	g.dot()
+	g.quantKernels()
 
 	// erf: two vectors per iteration (register budget), see erfBody.
 	g.unaryN("erf", 56, 2, erfPrep, func(g *gen, v, s int) {
@@ -524,4 +525,134 @@ func erfBody(g *gen, x, w, s, t, u, u2 int) {
 	g.w("\tWORD $0x%08X // w = sign(x)", vand(w, x, 30))
 	g.w("\tWORD $0x%08X // x = 1 - s", fsub(x, 27, s))
 	g.w("\tWORD $0x%08X // x |= sign", vorr(x, x, w))
+}
+
+// Quantization kernels (see kernels/vek/quant.go for the exact semantics —
+// they mirror the scalar reference bit for bit: quantize divides, dequantize
+// subtracts the zero point in the integer domain, all rounding is FCVTNS).
+func (g *gen) quantKernels() {
+	fcvtns := func(d, n int) uint32 { return 0x4E21A800 | u(n)<<5 | u(d) }
+	scvtf := func(d, n int) uint32 { return 0x4E21D800 | u(n)<<5 | u(d) }
+	subi := func(d, n, m int) uint32 { return 0x6EA08400 | u(m)<<16 | u(n)<<5 | u(d) }
+
+	narrowStore := func(unsigned bool) {
+		g.w("\tWORD $0x%08X // sqxtn v4.4h, v0.4s", 0x0E614800|u(0)<<5|4)
+		g.w("\tWORD $0x%08X // sqxtn2 v4.8h, v1.4s", 0x4E614800|u(1)<<5|4)
+		g.w("\tWORD $0x%08X // sqxtn v5.4h, v2.4s", 0x0E614800|u(2)<<5|5)
+		g.w("\tWORD $0x%08X // sqxtn2 v5.8h, v3.4s", 0x4E614800|u(3)<<5|5)
+		if unsigned {
+			g.w("\tWORD $0x%08X // sqxtun v6.8b, v4.8h", 0x2E212800|u(4)<<5|6)
+			g.w("\tWORD $0x%08X // sqxtun2 v6.16b, v5.8h", 0x6E212800|u(5)<<5|6)
+		} else {
+			g.w("\tWORD $0x%08X // sqxtn v6.8b, v4.8h", 0x0E214800|u(4)<<5|6)
+			g.w("\tWORD $0x%08X // sqxtn2 v6.16b, v5.8h", 0x4E214800|u(5)<<5|6)
+		}
+		g.w("\tVST1.P [V6.B16], 16(R0)")
+	}
+
+	// quant{u8,i8}_asm(dst []u8/i8, src []float32, n int, scale, zp float32):
+	// dst = sat(rne(src/scale + zp)); n multiple of 16.
+	for _, uns := range []bool{true, false} {
+		name := "quantu8"
+		if !uns {
+			name = "quanti8"
+		}
+		g.w("// func %s_asm(dst, src, n, scale, zp) — see quantKernels.", name)
+		g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-64", name)
+		g.w("\tMOVD dst_base+0(FP), R0")
+		g.w("\tMOVD src_base+24(FP), R1")
+		g.w("\tMOVD n+48(FP), R3")
+		g.dupArg(28, 56, "scale")
+		g.dupArg(29, 60, "zp")
+		g.w("%s_loop:", name)
+		g.w("\tCMP $16, R3")
+		g.w("\tBLT %s_done", name)
+		g.w("\tVLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]")
+		for i := 0; i < 4; i++ {
+			g.w("\tWORD $0x%08X // fdiv v%d /= scale", fdiv(i, i, 28), i)
+			g.w("\tWORD $0x%08X // fadd v%d += zp", fadd(i, i, 29), i)
+			g.w("\tWORD $0x%08X // fcvtns v%d", fcvtns(i, i), i)
+		}
+		narrowStore(uns)
+		g.w("\tSUB $16, R3")
+		g.w("\tB %s_loop", name)
+		g.w("%s_done:", name)
+		g.w("\tRET")
+		g.w("")
+	}
+
+	// requant{u8,i8}_asm(dst []u8/i8, src []int32, n int, mult, off float32):
+	// dst = sat(rne(f32(src)·mult + off)); n multiple of 16.
+	for _, uns := range []bool{true, false} {
+		name := "requantu8"
+		if !uns {
+			name = "requanti8"
+		}
+		g.w("// func %s_asm(dst, src, n, mult, off) — see quantKernels.", name)
+		g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-64", name)
+		g.w("\tMOVD dst_base+0(FP), R0")
+		g.w("\tMOVD src_base+24(FP), R1")
+		g.w("\tMOVD n+48(FP), R3")
+		g.dupArg(28, 56, "mult")
+		g.dupArg(29, 60, "off")
+		g.w("%s_loop:", name)
+		g.w("\tCMP $16, R3")
+		g.w("\tBLT %s_done", name)
+		g.w("\tVLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]")
+		for i := 0; i < 4; i++ {
+			g.w("\tWORD $0x%08X // scvtf v%d", scvtf(i, i), i)
+			g.w("\tWORD $0x%08X // fmul v%d *= mult", fmul(i, i, 28), i)
+			g.w("\tWORD $0x%08X // fadd v%d += off", fadd(i, i, 29), i)
+			g.w("\tWORD $0x%08X // fcvtns v%d", fcvtns(i, i), i)
+		}
+		narrowStore(uns)
+		g.w("\tSUB $16, R3")
+		g.w("\tB %s_loop", name)
+		g.w("%s_done:", name)
+		g.w("\tRET")
+		g.w("")
+	}
+
+	// dequant{u8,i8}_asm(dst []float32, src []u8/i8, n int, scale float32, zp int32):
+	// dst = f32(src − zp)·scale, zero point subtracted in the integer domain;
+	// n multiple of 16.
+	for _, uns := range []bool{true, false} {
+		name := "dequantu8"
+		wide1, wide2 := uint32(0x2F08A400), uint32(0x6F08A400) // ushll/ushll2 .8h
+		wide3, wide4 := uint32(0x2F10A400), uint32(0x6F10A400) // ushll/ushll2 .4s
+		if !uns {
+			name = "dequanti8"
+			wide1, wide2 = 0x0F08A400, 0x4F08A400
+			wide3, wide4 = 0x0F10A400, 0x4F10A400
+		}
+		g.w("// func %s_asm(dst, src, n, scale, zp) — see quantKernels.", name)
+		g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-64", name)
+		g.w("\tMOVD dst_base+0(FP), R0")
+		g.w("\tMOVD src_base+24(FP), R1")
+		g.w("\tMOVD n+48(FP), R3")
+		g.dupArg(28, 56, "scale")
+		g.w("\tMOVWU zp+60(FP), R9")
+		g.w("\tWORD $0x%08X // dup v29.4s, w9 (zp)", dupW(29, 9))
+		g.w("%s_loop:", name)
+		g.w("\tCMP $16, R3")
+		g.w("\tBLT %s_done", name)
+		g.w("\tVLD1.P 16(R1), [V0.B16]")
+		g.w("\tWORD $0x%08X // widen bytes 0-7 → v1.8h", wide1|u(0)<<5|1)
+		g.w("\tWORD $0x%08X // widen bytes 8-15 → v2.8h", wide2|u(0)<<5|2)
+		g.w("\tWORD $0x%08X // v3.4s = lo(v1)", wide3|u(1)<<5|3)
+		g.w("\tWORD $0x%08X // v4.4s = hi(v1)", wide4|u(1)<<5|4)
+		g.w("\tWORD $0x%08X // v5.4s = lo(v2)", wide3|u(2)<<5|5)
+		g.w("\tWORD $0x%08X // v6.4s = hi(v2)", wide4|u(2)<<5|6)
+		for i := 3; i <= 6; i++ {
+			g.w("\tWORD $0x%08X // v%d -= zp", subi(i, i, 29), i)
+			g.w("\tWORD $0x%08X // scvtf v%d", scvtf(i, i), i)
+			g.w("\tWORD $0x%08X // fmul v%d *= scale", fmul(i, i, 28), i)
+		}
+		g.w("\tVST1.P [V3.S4, V4.S4, V5.S4, V6.S4], 64(R0)")
+		g.w("\tSUB $16, R3")
+		g.w("\tB %s_loop", name)
+		g.w("%s_done:", name)
+		g.w("\tRET")
+		g.w("")
+	}
 }

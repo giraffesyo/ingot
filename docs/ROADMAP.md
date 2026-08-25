@@ -60,8 +60,10 @@
 - [x] int8 phase 1: SMMLA/USMMLA GEMM (311 GOPS 1T / 630 MT), Quantize/
       Dequantize/DynamicQuantize/QLinearConv/QLinearMatMul/MatMulInteger,
       quantized zoo conformance (tiny_conv bit-exact vs ORT)
-- [ ] int8 phase 2 (make it fast): direct int8 depthwise kernels, tiled
-      QLinearConv, vectorised requant, SME2 i8→i32 MOPA, amd64 VNNI; bf16
+- [x] int8 phase 2a: tiled/direct QLinearConv paths + vek quant/dequant/requant
+      NEON kernels (mnv3_int8 21 → ~5.5 ms MT, conformance bit-identical)
+- [ ] int8 phase 2b: SMLAL depthwise kernel, small-K qgemm, SDOT mid-tier
+      (non-I8MM arm64), SME2 i8→i32 MOPA, amd64 VNNI; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)

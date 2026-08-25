@@ -268,3 +268,58 @@ func TestDot(t *testing.T) {
 		}
 	}
 }
+
+func TestQuantKernels(t *testing.T) {
+	r := rand.New(rand.NewPCG(31, 32))
+	for _, n := range []int{0, 1, 15, 16, 17, 33, 257, 1000} {
+		f := make([]float32, n)
+		for i := range f {
+			f[i] = r.Float32()*600 - 300
+		}
+		scale, zp := float32(1.7), float32(19)
+		u := make([]uint8, n)
+		QuantU8(u, f, scale, zp)
+		s8 := make([]int8, n)
+		QuantI8(s8, f, scale, zp-30)
+		for i := range f {
+			if w := qSatU8(f[i]/scale + zp); u[i] != w {
+				t.Fatalf("QuantU8[%d]=%d want %d", i, u[i], w)
+			}
+			if w := qSatI8(f[i]/scale + zp - 30); s8[i] != w {
+				t.Fatalf("QuantI8[%d]=%d want %d", i, s8[i], w)
+			}
+		}
+		acc := make([]int32, n)
+		for i := range acc {
+			acc[i] = int32(r.UintN(200000)) - 100000
+		}
+		mult, off := float32(0.00137), float32(101.5)
+		RequantU8(u, acc, mult, off)
+		RequantI8(s8, acc, mult, off-120)
+		for i := range acc {
+			if w := qSatU8(float32(acc[i])*mult + off); u[i] != w {
+				t.Fatalf("RequantU8[%d]=%d want %d", i, u[i], w)
+			}
+			if w := qSatI8(float32(acc[i])*mult + off - 120); s8[i] != w {
+				t.Fatalf("RequantI8[%d]=%d want %d", i, s8[i], w)
+			}
+		}
+		for i := range u {
+			u[i] = uint8(r.UintN(256))
+			s8[i] = int8(r.UintN(256))
+		}
+		out := make([]float32, n)
+		DequantU8(out, u, 0.31, 117)
+		for i := range u {
+			if w := float32(int32(u[i])-117) * 0.31; out[i] != w {
+				t.Fatalf("DequantU8[%d]=%g want %g", i, out[i], w)
+			}
+		}
+		DequantI8(out, s8, 0.031, -5)
+		for i := range s8 {
+			if w := float32(int32(s8[i])+5) * 0.031; out[i] != w {
+				t.Fatalf("DequantI8[%d]=%g want %g", i, out[i], w)
+			}
+		}
+	}
+}
