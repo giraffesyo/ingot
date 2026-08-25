@@ -90,7 +90,11 @@
 - [x] quantized depthwise driver SIMD (WidenS8S16, DeinterleaveS16, corr-in-
       requant, overlapped tail) — det_int8 1T 37.5→31.2 ms, faster than
       ORT-int8 (36) on every remaining metric except rec 1T parity
-- [ ] int8 next: SE-path islands (small), fused epilogues; bf16
+- [x] bf16 kernels + probes: NEON BFMMLA/BFDOT quarter-rate on Apple, SME
+      BFMOPA == f32 FMOPA — bf16 is storage-only here (kernel stays in-tree
+      for Neoverse-class hardware, gated + unwired)
+- [ ] bf16 storage path: bf16 weights for bandwidth-bound GEMV/decode
+      (convert-on-pack); SE-path islands (small), fused epilogues
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
