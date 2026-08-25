@@ -399,3 +399,31 @@ func TestZip2(t *testing.T) {
 		}
 	}
 }
+
+func TestWidenDeint(t *testing.T) {
+	for _, n := range []int{0, 1, 15, 16, 17, 100} {
+		src := make([]int8, n)
+		for i := range src {
+			src[i] = int8(i*13 - 60)
+		}
+		dst := make([]int16, n)
+		WidenS8S16(dst, src)
+		for i := range src {
+			if dst[i] != int16(src[i]) {
+				t.Fatalf("widen[%d]=%d", i, dst[i])
+			}
+		}
+		s16 := make([]int16, n)
+		for i := range s16 {
+			s16[i] = int16(i*7 - 300)
+		}
+		ev := make([]int16, n/2)
+		od := make([]int16, n/2)
+		DeinterleaveS16(ev, od, s16)
+		for i := 0; i < n/2; i++ {
+			if ev[i] != s16[2*i] || od[i] != s16[2*i+1] {
+				t.Fatalf("deint[%d]", i)
+			}
+		}
+	}
+}

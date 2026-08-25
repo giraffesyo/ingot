@@ -529,10 +529,7 @@ func (q *qconvRun) depthwise() {
 			for i := 0; i < pl; i++ {
 				row[i] = pv
 			}
-			src := xc[r*q.W : (r+1)*q.W]
-			for i, v := range src {
-				row[pl+i] = int16(v)
-			}
+			vek.WidenS8S16(row[pl:pl+q.W], xc[r*q.W:(r+1)*q.W])
 			for i := pl + q.W; i < Wp; i++ {
 				row[i] = pv
 			}
@@ -540,19 +537,14 @@ func (q *qconvRun) depthwise() {
 		corr := q.corr(c)
 		mult := q.mult[c]
 		acc := accF[wk*q.OW : (wk+1)*q.OW]
-		fill := func() {
-			for i := range acc {
-				acc[i] = corr
-			}
-		}
 		switch {
 		case fast1:
 			wp := w16[c*pad8 : c*pad8+pad8]
 			for oh := 0; oh < q.OH; oh++ {
-				fill()
+				clear(acc)
 				vek.QDwRowS1(acc, plane[oh*Wp:], wp, q.OW, Wp, q.KH, q.KW)
 				d8, di := q.dstRow(c, n, oh*q.OW, q.OW)
-				q.requant(d8, di, acc, 0, mult)
+				q.requant(d8, di, acc, corr, mult)
 			}
 		case fast2:
 			// de-interleave columns into even/odd halves
@@ -562,24 +554,20 @@ func (q *qconvRun) depthwise() {
 				prow := plane[r*Wp : (r+1)*Wp]
 				er := ev[r*Wh : (r+1)*Wh]
 				orow := od[r*Wh : (r+1)*Wh]
-				i := 0
-				for ; i+1 < Wp; i += 2 {
-					er[i/2] = prow[i]
-					orow[i/2] = prow[i+1]
-				}
-				if i < Wp {
-					er[i/2] = prow[i]
-					orow[i/2] = pv
+				vek.DeinterleaveS16(er[:Wp/2], orow[:Wp/2], prow)
+				if Wp%2 != 0 {
+					er[Wp/2] = prow[Wp-1]
+					orow[Wp/2] = pv
 				}
 			}
 			we := wEO[c*(padE+padO) : c*(padE+padO)+padE]
 			wo := wEO[c*(padE+padO)+padE:]
 			for oh := 0; oh < q.OH; oh++ {
-				fill()
+				clear(acc)
 				vek.QDwRowS1(acc, ev[2*oh*Wh:], we, q.OW, Wh, q.KH, KE)
 				vek.QDwRowS1(acc, od[2*oh*Wh:], wo, q.OW, Wh, q.KH, KO)
 				d8, di := q.dstRow(c, n, oh*q.OW, q.OW)
-				q.requant(d8, di, acc, 0, mult)
+				q.requant(d8, di, acc, corr, mult)
 			}
 		default:
 			w := q.wf[c*taps:]

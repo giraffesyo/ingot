@@ -26,21 +26,38 @@ func qdw5x2s1_asm(acc []int32, src, wp []int16, ncols, W int)
 // SIMD; anything else scalar.
 func QDwRowS1(acc []int32, src, wp []int16, ncols, W, KH, KW int) {
 	m := ncols &^ 7
+	var asm func(acc []int32, src, wp []int16, ncols, W int)
 	switch {
 	case KH == 3 && KW == 3:
-		qdw3x3s1_asm(acc, src, wp, m, W)
+		asm = qdw3x3s1_asm
 	case KH == 5 && KW == 5:
-		qdw5x5s1_asm(acc, src, wp, m, W)
+		asm = qdw5x5s1_asm
 	case KH == 3 && KW == 2:
-		qdw3x2s1_asm(acc, src, wp, m, W)
+		asm = qdw3x2s1_asm
 	case KH == 3 && KW == 1:
-		qdw3x1s1_asm(acc, src, wp, m, W)
+		asm = qdw3x1s1_asm
 	case KH == 5 && KW == 3:
-		qdw5x3s1_asm(acc, src, wp, m, W)
+		asm = qdw5x3s1_asm
 	case KH == 5 && KW == 2:
-		qdw5x2s1_asm(acc, src, wp, m, W)
+		asm = qdw5x2s1_asm
 	default:
-		m = 0
+		qdwTail(acc, src, wp, 0, ncols, W, KH, KW)
+		return
 	}
-	qdwTail(acc, src, wp, m, ncols, W, KH, KW)
+	asm(acc, src, wp, m, W)
+	if t := ncols - m; t > 0 {
+		if ncols >= 8 {
+			// Re-run the kernel on the last (overlapping) 8-column window
+			// into zeroed scratch and add only the fresh tail lanes — the
+			// scalar tail was 25-tap × 4-col work on every deep row
+			// (OW=20 layers), ~7% of det_int8 1T.
+			var tmp [8]int32
+			asm(tmp[:], src[ncols-8:], wp, 8, W)
+			for i := 0; i < t; i++ {
+				acc[m+i] += tmp[8-t+i]
+			}
+			return
+		}
+		qdwTail(acc, src, wp, m, ncols, W, KH, KW)
+	}
 }
