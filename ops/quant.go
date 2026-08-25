@@ -315,10 +315,7 @@ func shiftToS8(dst []int8, x *tensor.Tensor, zx int32) int32 {
 	par.For(chunks, 1, func(c, _ int) {
 		lo := c * unaryChunk
 		hi := min(lo+unaryChunk, len(src))
-		d, s := dst[lo:hi], src[lo:hi]
-		for i, v := range s {
-			d[i] = int8(v ^ 0x80)
-		}
+		vek.ShiftU8S8(dst[lo:hi], src[lo:hi])
 	})
 	return zx - 128
 }
@@ -452,16 +449,11 @@ func (q *qconvRun) corr(m int) int32 {
 // to f32 association, so corr is folded into the offset the same way the
 // kernels compute it.
 func (q *qconvRun) requant(dst8 []uint8, dsti8 []int8, acc []int32, corr int32, mult float32) {
-	if corr != 0 {
-		for i := range acc {
-			acc[i] += corr
-		}
-	}
 	if q.ydt == tensor.U8 {
-		vek.RequantU8(dst8, acc, mult, q.zy)
+		vek.RequantU8(dst8, acc, mult, q.zy, corr)
 		return
 	}
-	vek.RequantI8(dsti8, acc, mult, q.zy)
+	vek.RequantI8(dsti8, acc, mult, q.zy, corr)
 }
 
 func (q *qconvRun) dstRow(m, n, off, ln int) ([]uint8, []int8) {
@@ -617,11 +609,23 @@ func (q *qconvRun) depthwise() {
 	}
 }
 
+// chunkBudget bounds the per-task chunk working set (B columns + i32 acc)
+// for the chunked qconv GEMM paths. Parallel runs keep chunks small so the
+// workers share cache; a single-threaded run owns the whole cache and wants
+// fewer, larger GEMM calls (per-chunk pack/requant overhead, and 64-column
+// slivers sit under the SME dispatch floor).
+func chunkBudget() int {
+	if par.Workers() == 1 {
+		return 1 << 19
+	}
+	return 1 << 17
+}
+
 // pointwise: 1×1 s1 p0 — feed the shifted activations directly as the GEMM's
 // B, chunked over columns, requantizing each tile in-cache.
 func (q *qconvRun) pointwise() {
 	pk := q.o.weights(q.wf, q.G, q.Mg, q.K, q.M)
-	Pc := max(64, (1<<17)/max(1, q.Mg*q.K))
+	Pc := max(64, chunkBudget()/max(1, q.K+4*q.Mg))
 	nChunks := (q.P + Pc - 1) / Pc
 	workers := par.Workers()
 	accT := q.ctx.NewUninit(tensor.I32, workers, q.Mg*Pc)
@@ -649,7 +653,7 @@ func (q *qconvRun) pointwise() {
 // column buffers (padded with the shifted zero point) and in-cache requant.
 func (q *qconvRun) im2colTiled() {
 	pk := q.o.weights(q.wf, q.G, q.Mg, q.K, q.M)
-	rows := max(1, (1<<17)/max(1, q.K*q.OW))
+	rows := max(1, chunkBudget()/max(1, (q.K+4*q.Mg)*q.OW))
 	nChunks := (q.OH + rows - 1) / rows
 	workers := par.Workers()
 	colT := q.ctx.NewUninit(tensor.I8, workers, q.K*rows*q.OW)

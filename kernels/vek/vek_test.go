@@ -294,14 +294,21 @@ func TestQuantKernels(t *testing.T) {
 			acc[i] = int32(r.UintN(200000)) - 100000
 		}
 		mult, off := float32(0.00137), float32(101.5)
-		RequantU8(u, acc, mult, off)
-		RequantI8(s8, acc, mult, off-120)
+		RequantU8(u, acc, mult, off, 777)
+		RequantI8(s8, acc, mult, off-120, -3333)
 		for i := range acc {
-			if w := qSatU8(float32(acc[i])*mult + off); u[i] != w {
+			if w := qSatU8(float32(acc[i]+777)*mult + off); u[i] != w {
 				t.Fatalf("RequantU8[%d]=%d want %d", i, u[i], w)
 			}
-			if w := qSatI8(float32(acc[i])*mult + off - 120); s8[i] != w {
+			if w := qSatI8(float32(acc[i]-3333)*mult + off - 120); s8[i] != w {
 				t.Fatalf("RequantI8[%d]=%d want %d", i, s8[i], w)
+			}
+		}
+		sh := make([]int8, n)
+		ShiftU8S8(sh, u)
+		for i := range u {
+			if w := int8(int32(u[i]) - 128); sh[i] != w {
+				t.Fatalf("ShiftU8S8[%d]=%d want %d", i, sh[i], w)
 			}
 		}
 		for i := range u {

@@ -1092,8 +1092,8 @@ quanti8_loop:
 quanti8_done:
 	RET
 
-// func requantu8_asm(dst, src, n, mult, off) — see quantKernels.
-TEXT ·requantu8_asm(SB), NOSPLIT, $0-64
+// func requantu8_asm(dst, src, n, mult, off, corr) — see quantKernels.
+TEXT ·requantu8_asm(SB), NOSPLIT, $0-68
 	MOVD dst_base+0(FP), R0
 	MOVD src_base+24(FP), R1
 	MOVD n+48(FP), R3
@@ -1101,22 +1101,28 @@ TEXT ·requantu8_asm(SB), NOSPLIT, $0-64
 	WORD $0x4E040D3C // dup v28.4s, w9 (mult)
 	MOVWU off+60(FP), R9
 	WORD $0x4E040D3D // dup v29.4s, w9 (off)
+	MOVWU corr+64(FP), R9
+	WORD $0x4E040D3B // dup v27.4s, w9 (corr)
 requantu8_loop:
 	CMP $16, R3
 	BLT requantu8_done
 	VLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]
+	WORD $0x4EBB8400 // v0 += corr
 	WORD $0x4E21D800 // scvtf v0
 	WORD $0x6E3CDC00 // fmul v0 *= mult
 	WORD $0x4E3DD400 // fadd v0 += off
 	WORD $0x4E21A800 // fcvtns v0
+	WORD $0x4EBB8421 // v1 += corr
 	WORD $0x4E21D821 // scvtf v1
 	WORD $0x6E3CDC21 // fmul v1 *= mult
 	WORD $0x4E3DD421 // fadd v1 += off
 	WORD $0x4E21A821 // fcvtns v1
+	WORD $0x4EBB8442 // v2 += corr
 	WORD $0x4E21D842 // scvtf v2
 	WORD $0x6E3CDC42 // fmul v2 *= mult
 	WORD $0x4E3DD442 // fadd v2 += off
 	WORD $0x4E21A842 // fcvtns v2
+	WORD $0x4EBB8463 // v3 += corr
 	WORD $0x4E21D863 // scvtf v3
 	WORD $0x6E3CDC63 // fmul v3 *= mult
 	WORD $0x4E3DD463 // fadd v3 += off
@@ -1133,8 +1139,8 @@ requantu8_loop:
 requantu8_done:
 	RET
 
-// func requanti8_asm(dst, src, n, mult, off) — see quantKernels.
-TEXT ·requanti8_asm(SB), NOSPLIT, $0-64
+// func requanti8_asm(dst, src, n, mult, off, corr) — see quantKernels.
+TEXT ·requanti8_asm(SB), NOSPLIT, $0-68
 	MOVD dst_base+0(FP), R0
 	MOVD src_base+24(FP), R1
 	MOVD n+48(FP), R3
@@ -1142,22 +1148,28 @@ TEXT ·requanti8_asm(SB), NOSPLIT, $0-64
 	WORD $0x4E040D3C // dup v28.4s, w9 (mult)
 	MOVWU off+60(FP), R9
 	WORD $0x4E040D3D // dup v29.4s, w9 (off)
+	MOVWU corr+64(FP), R9
+	WORD $0x4E040D3B // dup v27.4s, w9 (corr)
 requanti8_loop:
 	CMP $16, R3
 	BLT requanti8_done
 	VLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]
+	WORD $0x4EBB8400 // v0 += corr
 	WORD $0x4E21D800 // scvtf v0
 	WORD $0x6E3CDC00 // fmul v0 *= mult
 	WORD $0x4E3DD400 // fadd v0 += off
 	WORD $0x4E21A800 // fcvtns v0
+	WORD $0x4EBB8421 // v1 += corr
 	WORD $0x4E21D821 // scvtf v1
 	WORD $0x6E3CDC21 // fmul v1 *= mult
 	WORD $0x4E3DD421 // fadd v1 += off
 	WORD $0x4E21A821 // fcvtns v1
+	WORD $0x4EBB8442 // v2 += corr
 	WORD $0x4E21D842 // scvtf v2
 	WORD $0x6E3CDC42 // fmul v2 *= mult
 	WORD $0x4E3DD442 // fadd v2 += off
 	WORD $0x4E21A842 // fcvtns v2
+	WORD $0x4EBB8463 // v3 += corr
 	WORD $0x4E21D863 // scvtf v3
 	WORD $0x6E3CDC63 // fmul v3 *= mult
 	WORD $0x4E3DD463 // fadd v3 += off
@@ -1172,6 +1184,26 @@ requanti8_loop:
 	SUB $16, R3
 	B requanti8_loop
 requanti8_done:
+	RET
+
+// func shiftu8s8_asm(dst, src, n) — see quantKernels.
+TEXT ·shiftu8s8_asm(SB), NOSPLIT, $0-56
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD n+48(FP), R3
+	WORD $0x4F04E41C // movi v28.16b, #0x80
+shiftu8s8_loop:
+	CMP $64, R3
+	BLT shiftu8s8_done
+	VLD1.P 64(R1), [V0.B16, V1.B16, V2.B16, V3.B16]
+	WORD $0x6E3C1C00 // eor v0 ^= 0x80
+	WORD $0x6E3C1C21 // eor v1 ^= 0x80
+	WORD $0x6E3C1C42 // eor v2 ^= 0x80
+	WORD $0x6E3C1C63 // eor v3 ^= 0x80
+	VST1.P [V0.B16, V1.B16, V2.B16, V3.B16], 64(R0)
+	SUB $64, R3
+	B shiftu8s8_loop
+shiftu8s8_done:
 	RET
 
 // func dequantu8_asm(dst, src, n, scale, zp) — see quantKernels.

@@ -16,15 +16,21 @@ func QuantI8(dst []int8, src []float32, scale, zp float32) {
 	}
 }
 
-func RequantU8(dst []uint8, src []int32, mult, off float32) {
+func RequantU8(dst []uint8, src []int32, mult, off float32, corr int32) {
 	for i := 0; i < min(len(dst), len(src)); i++ {
-		dst[i] = qSatU8(float32(src[i])*mult + off)
+		dst[i] = qSatU8(float32(src[i]+corr)*mult + off)
 	}
 }
 
-func RequantI8(dst []int8, src []int32, mult, off float32) {
+func RequantI8(dst []int8, src []int32, mult, off float32, corr int32) {
 	for i := 0; i < min(len(dst), len(src)); i++ {
-		dst[i] = qSatI8(float32(src[i])*mult + off)
+		dst[i] = qSatI8(float32(src[i]+corr)*mult + off)
+	}
+}
+
+func ShiftU8S8(dst []int8, src []uint8) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		dst[i] = int8(src[i] ^ 0x80)
 	}
 }
 
