@@ -1069,3 +1069,34 @@ the shared 4-vCPU runner (informational job, same run's f32 for scale):
 The CI bench job now tracks Qgemm alongside Sgemm. Left for the x86 story:
 AVX2-exact is a dead end by design; an SSE/AVX2 *dot-product-free* widening
 path only if a real pre-VNNI deployment ever demands it.
+
+
+## SDOT mid-tier — M1/Graviton2 int8 within 10% of M2+ (2026-08-25)
+
+The gap between the MMLA kernels (FEAT_I8MM, Armv8.6) and the portable Go
+fallback was the whole M1/Graviton2 class. New FEAT_DotProd tier: 8×12
+SDOT-by-element kernels that reuse the amd64 VNNI layouts (quad-major B,
+row-major C) — the second consumer of those layouts, so the pack/scatter
+plumbing came for free, already cross-arch tested.
+
+Tricks worth keeping: SDOT is s8·s8 only, so the u8s8 kernel flips A with
+0x80 and owes +128·colsum(B) — accumulated with SDOT against the 0x80
+constant itself (0x80 = −128 as s8, so the sums arrive pre-negated and the
+epilogue is a plain SUB); with all 32 vector registers spoken for, the sums
+spill to the stack and quad 0's B is reloaded for its deferred sum pass
+once A's registers free up. qpackbq extends the zip-transpose pack to
+quad-major with one extra uzp1/uzp2 .4s round (det_m24: 94 → 221 GOPS from
+the pack alone).
+
+Same-run 1T vs MMLA on this box (forced-tier benchmark, runs anywhere):
+
+| shape | SDOT | MMLA | portable Go |
+|---|---|---|---|
+| sq512 | **1448 GOPS** | 1410 | ~25 |
+| conv_m64_n16384_k576 | 229 | 236 | — |
+| det_m24_n25600_k864 | 221 | 242 | — |
+
+The dot-product tier lands within ~10% of I8MM — on the machines that
+have both. On actual M1/Graviton2 it replaces the portable kernel, a
+~50× class jump. CI's macos runner is an M1: this tier is now its
+default path through the whole conformance suite.
