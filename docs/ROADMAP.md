@@ -84,8 +84,10 @@
 - [x] amd64 VNNI int8 GEMM: VPDPBUSD 8×12 kernels, quad-major B / row-major C,
       453 GOPS sq512 on CI Ice Lake (2.4× same-run f32); pre-VNNI x86 stays
       portable (AVX2 vpmaddubsw saturates — inexact by construction)
-- [ ] int8 next: shift-in-pack fusion, SE-path islands; SDOT mid-tier
-      (non-I8MM arm64); bf16
+- [x] SDOT mid-tier (Apple M1 / Graviton2): 8×12 SDOT-by-element kernels on
+      the VNNI layouts + qpackbq quad-pack — within ~10% of the MMLA tier
+      (sq512 1448 vs 1410 GOPS 1T same-run)
+- [ ] int8 next: shift-in-pack fusion, SE-path islands; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
