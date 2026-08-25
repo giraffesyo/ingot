@@ -74,8 +74,13 @@
 - [x] quantized PP-OCR part 3: chunk working-set fix, vek.ShiftU8S8, corr
       folded into requant asm, NEON C-tile scatter — det_int8 MT 8.4 ms
       (1.7× faster than ORT-int8, matches our f32 det), 1T 109→44.6 overall
-- [ ] int8 next: Q/DQ island elision, shift-in-pack fusion, rec depthwise 1T;
-      SDOT mid-tier (non-I8MM arm64), amd64 VNNI; bf16
+- [x] quantized PP-OCR part 4: Q/DQ island elision (fold-qdq-affine +
+      fuse-qlut/TBL) + pooled Run outputs w/ Session.Release — det_int8
+      6.2 ms MT (2.2× faster than ORT-int8, 1.3× faster than our f32),
+      1T 38.2 vs ORT 36
+- [ ] int8 next: per-channel islands (BatchNorm), ConvTranspose/Resize in the
+      det head, shift-in-pack fusion; SDOT mid-tier (non-I8MM arm64),
+      amd64 VNNI; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
