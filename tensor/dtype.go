@@ -16,6 +16,7 @@ const (
 	BF16
 	I8
 	U8
+	I16
 	I32
 	I64
 	Bool
@@ -23,7 +24,7 @@ const (
 
 var dtypeNames = [...]string{
 	Invalid: "invalid", F32: "f32", F16: "f16", BF16: "bf16",
-	I8: "i8", U8: "u8", I32: "i32", I64: "i64", Bool: "bool",
+	I8: "i8", U8: "u8", I16: "i16", I32: "i32", I64: "i64", Bool: "bool",
 }
 
 func (d DType) String() string {
@@ -38,7 +39,7 @@ func (d DType) Size() int {
 	switch d {
 	case F32, I32:
 		return 4
-	case F16, BF16:
+	case F16, BF16, I16:
 		return 2
 	case I8, U8, Bool:
 		return 1
