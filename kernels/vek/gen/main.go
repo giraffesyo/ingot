@@ -624,6 +624,48 @@ func (g *gen) quantKernels() {
 		g.w("")
 	}
 
+	// widens8_asm(dst []int16, src []int8, n int): dst = int16(src);
+	// n multiple of 16.
+	g.w("// func widens8_asm(dst, src, n) — s8 → s16 widen.")
+	g.w("TEXT ·widens8_asm(SB), NOSPLIT, $0-56")
+	g.w("\tMOVD dst_base+0(FP), R0")
+	g.w("\tMOVD src_base+24(FP), R1")
+	g.w("\tMOVD n+48(FP), R3")
+	g.w("widens8_loop:")
+	g.w("\tCMP $16, R3")
+	g.w("\tBLT widens8_done")
+	g.w("\tVLD1.P 16(R1), [V0.B16]")
+	g.w("\tWORD $0x0F08A401 // sshll  v1.8h, v0.8b, #0")
+	g.w("\tWORD $0x4F08A402 // sshll2 v2.8h, v0.16b, #0")
+	g.w("\tVST1.P [V1.H8, V2.H8], 32(R0)")
+	g.w("\tSUB $16, R3")
+	g.w("\tB widens8_loop")
+	g.w("widens8_done:")
+	g.w("\tRET")
+	g.w("")
+
+	// deint16_asm(ev, od []int16, src []int16, n int): ev[i]=src[2i],
+	// od[i]=src[2i+1]; n = pairs, multiple of 8.
+	g.w("// func deint16_asm(ev, od, src, n) — even/odd de-interleave of s16.")
+	g.w("TEXT ·deint16_asm(SB), NOSPLIT, $0-80")
+	g.w("\tMOVD ev_base+0(FP), R0")
+	g.w("\tMOVD od_base+24(FP), R1")
+	g.w("\tMOVD src_base+48(FP), R2")
+	g.w("\tMOVD n+72(FP), R3")
+	g.w("deint16_loop:")
+	g.w("\tCMP $8, R3")
+	g.w("\tBLT deint16_done")
+	g.w("\tVLD1.P 32(R2), [V0.H8, V1.H8]")
+	g.w("\tWORD $0x4E411802 // uzp1.8h v2, v0, v1 (even)")
+	g.w("\tWORD $0x4E415803 // uzp2.8h v3, v0, v1 (odd)")
+	g.w("\tVST1.P [V2.H8], 16(R0)")
+	g.w("\tVST1.P [V3.H8], 16(R1)")
+	g.w("\tSUB $8, R3")
+	g.w("\tB deint16_loop")
+	g.w("deint16_done:")
+	g.w("\tRET")
+	g.w("")
+
 	// zip2_asm(dst, a, b []float32, n int, c float32): dst[2i] = a[i]+c,
 	// dst[2i+1] = b[i]+c — the 2×-upsample / stride-2 col2im interleave;
 	// n = len(a), multiple of 8.

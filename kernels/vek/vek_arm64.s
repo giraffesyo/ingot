@@ -1186,6 +1186,42 @@ requanti8_loop:
 requanti8_done:
 	RET
 
+// func widens8_asm(dst, src, n) — s8 → s16 widen.
+TEXT ·widens8_asm(SB), NOSPLIT, $0-56
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD n+48(FP), R3
+widens8_loop:
+	CMP $16, R3
+	BLT widens8_done
+	VLD1.P 16(R1), [V0.B16]
+	WORD $0x0F08A401 // sshll  v1.8h, v0.8b, #0
+	WORD $0x4F08A402 // sshll2 v2.8h, v0.16b, #0
+	VST1.P [V1.H8, V2.H8], 32(R0)
+	SUB $16, R3
+	B widens8_loop
+widens8_done:
+	RET
+
+// func deint16_asm(ev, od, src, n) — even/odd de-interleave of s16.
+TEXT ·deint16_asm(SB), NOSPLIT, $0-80
+	MOVD ev_base+0(FP), R0
+	MOVD od_base+24(FP), R1
+	MOVD src_base+48(FP), R2
+	MOVD n+72(FP), R3
+deint16_loop:
+	CMP $8, R3
+	BLT deint16_done
+	VLD1.P 32(R2), [V0.H8, V1.H8]
+	WORD $0x4E411802 // uzp1.8h v2, v0, v1 (even)
+	WORD $0x4E415803 // uzp2.8h v3, v0, v1 (odd)
+	VST1.P [V2.H8], 16(R0)
+	VST1.P [V3.H8], 16(R1)
+	SUB $8, R3
+	B deint16_loop
+deint16_done:
+	RET
+
 // func zip2_asm(dst, a, b, n, c) — interleave with scalar add.
 TEXT ·zip2_asm(SB), NOSPLIT, $0-84
 	MOVD dst_base+0(FP), R0

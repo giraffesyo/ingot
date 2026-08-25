@@ -18,6 +18,12 @@ func requanti8_asm(dst []int8, src []int32, n int, mult, off float32, corr int32
 func shiftu8s8_asm(dst []int8, src []uint8, n int)
 
 //go:noescape
+func widens8_asm(dst []int16, src []int8, n int)
+
+//go:noescape
+func deint16_asm(ev, od []int16, src []int16, n int)
+
+//go:noescape
 func dequantu8_asm(dst []float32, src []uint8, n int, scale float32, zp int32)
 
 //go:noescape
@@ -60,6 +66,32 @@ func RequantI8(dst []int8, src []int32, mult, off float32, corr int32) {
 	requanti8_asm(dst, src, m, mult, off, corr)
 	for i := m; i < n; i++ {
 		dst[i] = qSatI8(float32(src[i]+corr)*mult + off)
+	}
+}
+
+// WidenS8S16 computes dst = int16(src).
+func WidenS8S16(dst []int16, src []int8) {
+	n := min(len(dst), len(src))
+	m := n &^ 15
+	if m > 0 {
+		widens8_asm(dst, src, m)
+	}
+	for i := m; i < n; i++ {
+		dst[i] = int16(src[i])
+	}
+}
+
+// DeinterleaveS16 splits src into even and odd elements:
+// ev[i] = src[2i], od[i] = src[2i+1], for i < min(len(ev), len(od), len(src)/2).
+func DeinterleaveS16(ev, od, src []int16) {
+	n := min(len(ev), len(od), len(src)/2)
+	m := n &^ 7
+	if m > 0 {
+		deint16_asm(ev, od, src, m)
+	}
+	for i := m; i < n; i++ {
+		ev[i] = src[2*i]
+		od[i] = src[2*i+1]
 	}
 }
 
