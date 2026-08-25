@@ -116,6 +116,11 @@ func (t *Tensor) Reshape(shape ...int) *Tensor {
 	return &Tensor{dtype: t.dtype, shape: s.Clone(), strides: s.Strides(), buf: t.buf, offset: t.offset}
 }
 
+// SharesBuffer reports whether t and u are views of the same storage.
+func (t *Tensor) SharesBuffer(u *Tensor) bool {
+	return u != nil && t != nil && len(t.buf) > 0 && len(u.buf) > 0 && &t.buf[0] == &u.buf[0]
+}
+
 // Clone returns a deep copy (always contiguous).
 func (t *Tensor) Clone() *Tensor {
 	out := New(t.dtype, t.shape...)

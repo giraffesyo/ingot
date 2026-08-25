@@ -46,25 +46,33 @@ func NewDetector(path string) (*Detector, error) {
 
 // ProbMap runs the model and returns the [H,W] probability map plus the scale
 // factors (resized/original) for mapping back to original image coordinates.
+// The returned slice is owned by the caller (never recycled).
 func (d *Detector) ProbMap(img image.Image) (prob []float32, H, W int, sx, sy float64, err error) {
+	prob, H, W, sx, sy, _, err = d.probMap(img)
+	return
+}
+
+func (d *Detector) probMap(img image.Image) (prob []float32, H, W int, sx, sy float64, outs map[string]*tensor.Tensor, err error) {
 	in, sx, sy := preprocessDet(img, d.limit)
-	outs, err := d.sess.Run(map[string]*tensor.Tensor{d.inName: in})
+	outs, err = d.sess.Run(map[string]*tensor.Tensor{d.inName: in})
 	if err != nil {
-		return nil, 0, 0, 0, 0, err
+		return nil, 0, 0, 0, 0, nil, err
 	}
 	out := outs[d.outName]
 	os := out.Shape()
 	if os.Rank() != 4 || os[1] != 1 {
-		return nil, 0, 0, 0, 0, fmt.Errorf("detector: unexpected output shape %v", os)
+		return nil, 0, 0, 0, 0, nil, fmt.Errorf("detector: unexpected output shape %v", os)
 	}
-	return out.F32(), os[2], os[3], sx, sy, nil
+	return out.F32(), os[2], os[3], sx, sy, outs, nil
 }
 
 // Detect returns text boxes in original-image coordinates.
 func (d *Detector) Detect(img image.Image) ([]Box, error) {
-	prob, H, W, sx, sy, err := d.ProbMap(img)
+	prob, H, W, sx, sy, outs, err := d.probMap(img)
 	if err != nil {
 		return nil, err
 	}
-	return boxesFromProb(prob, H, W, sx, sy, d), nil
+	boxes := boxesFromProb(prob, H, W, sx, sy, d)
+	d.sess.Release(outs) // prob fully consumed by boxesFromProb
+	return boxes, nil
 }
