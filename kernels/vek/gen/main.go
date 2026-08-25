@@ -300,6 +300,9 @@ func main() {
 	for _, k := range dwShapes {
 		g.dwconv(k[0], k[1])
 	}
+	for _, k := range dwShapes {
+		g.qdwconv(k[0], k[1])
+	}
 
 	os.Stdout.WriteString(g.b.String())
 }
@@ -655,4 +658,64 @@ func (g *gen) quantKernels() {
 		g.w("\tRET")
 		g.w("")
 	}
+}
+
+// qdwconv emits qdwKxKs1_asm(acc *int32, src *int16, wp *int16, ncols, W):
+// the int8-depthwise row kernel — src is the widened (s16) padded plane, taps
+// accumulate into s32 via SMLAL/SMLAL2 by element (weights preloaded into
+// v12..v15: the H-element form only addresses v0-v15). acc is pre-filled by
+// the caller (bias/zero-point correction); ncols is a multiple of 8.
+func (g *gen) qdwconv(KH, KW int) {
+	name := fmt.Sprintf("qdw%dx%ds1", KH, KW)
+	smlal := func(d, n, m, idx int) uint32 {
+		return 0x0F402000 | u(idx>>2)<<11 | u((idx>>1)&1)<<21 | u(idx&1)<<20 | u(m)<<16 | u(n)<<5 | u(d)
+	}
+	smlal2 := func(d, n, m, idx int) uint32 { return smlal(d, n, m, idx) | 0x40000000 }
+	nw := KH * KW
+	nreg := (nw + 7) / 8
+	g.w("// func %s_asm(acc []int32, src, wp []int16, ncols, W int)", name)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-88", name)
+	g.w("	MOVD acc_base+0(FP), R0")
+	g.w("	MOVD src_base+24(FP), R1")
+	g.w("	MOVD wp_base+48(FP), R2")
+	g.w("	MOVD ncols+72(FP), R3")
+	g.w("	MOVD W+80(FP), R4")
+	g.w("	LSL $1, R4, R4 // row stride in bytes (s16)")
+	g.w("	VLD1 (R2), [%s]", vregListH(12, nreg))
+	g.w("%s_loop:", name)
+	g.w("	CMP $8, R3")
+	g.w("	BLT %s_done", name)
+	g.w("	VLD1 (R0), [V0.S4, V1.S4] // acc[c..c+8)")
+	for kh := 0; kh < KH; kh++ {
+		if kh == 0 {
+			g.w("	MOVD R1, R5")
+		} else {
+			g.w("	ADD R4, R5, R5")
+		}
+		g.w("	MOVD R5, R6")
+		for kw := 0; kw < KW; kw++ {
+			t := kh*KW + kw
+			if kw > 0 {
+				g.w("	ADD $2, R6, R6")
+			}
+			g.w("	VLD1 (R6), [V2.H8]")
+			g.w("	WORD $0x%08X // smlal  v0 += v2.lo * w%d", smlal(0, 2, 12+t/8, t%8), t)
+			g.w("	WORD $0x%08X // smlal2 v1 += v2.hi * w%d", smlal2(1, 2, 12+t/8, t%8), t)
+		}
+	}
+	g.w("	VST1.P [V0.S4, V1.S4], 32(R0)")
+	g.w("	ADD $16, R1, R1")
+	g.w("	SUB $8, R3, R3")
+	g.w("	B %s_loop", name)
+	g.w("%s_done:", name)
+	g.w("	RET")
+	g.w("")
+}
+
+func vregListH(base, n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("V%d.H8", base+i)
+	}
+	return strings.Join(parts, ", ")
 }

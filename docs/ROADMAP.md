@@ -62,8 +62,10 @@
       quantized zoo conformance (tiny_conv bit-exact vs ORT)
 - [x] int8 phase 2a: tiled/direct QLinearConv paths + vek quant/dequant/requant
       NEON kernels (mnv3_int8 21 → ~5.5 ms MT, conformance bit-identical)
-- [ ] int8 phase 2b: SMLAL depthwise kernel, small-K qgemm, SDOT mid-tier
-      (non-I8MM arm64), SME2 i8→i32 MOPA, amd64 VNNI; bf16
+- [x] int8 phase 2b: SMLAL depthwise kernels (vek.QDwRowS1) + qgemm B-pack
+      rewrite (sq512 630→1681 GOPS MT; det-head shape 3×)
+- [ ] int8 phase 2c: SDOT mid-tier (non-I8MM arm64), SME2 i8→i32 MOPA, amd64
+      VNNI, quantized PP-OCR pipeline; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)

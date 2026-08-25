@@ -794,3 +794,28 @@ Queued (phase 2b): SMLAL int8 depthwise kernel, small-K qgemm efficiency,
 SDOT mid-tier for non-I8MM arm64, SME2 i8→i32 MOPA, amd64 VNNI. Note int8
 already wins where GEMMs dominate (sq512 qgemm is 2.9× f32 1T) — the
 depthwise-heavy MobileNet shape is the hardest case, not the typical one.
+
+
+## int8, phase 2b — SMLAL depthwise + the B-pack throttle (2026-08-24)
+
+Two finds:
+- **int8 depthwise row kernels** (`vek.QDwRowS1`, generated SMLAL/SMLAL2
+  by-element over an s16-widened padded plane, stride-2 via the same even/odd
+  de-interleave as f32; weights live in v12-v15 — the H-element form only
+  addresses v0-v15). QLinearConv's depthwise path now accumulates into
+  corr-prefilled s32 rows and requantizes per row in-cache.
+- **The qgemm B-pack was the real throttle**: per-element scalar interleave
+  with div/mod per byte. Rewritten group-major with contiguous reads:
+
+  | shape | before | after (MT GOPS) |
+  |---|---|---|
+  | sq512 | 630 | **1681** |
+  | conv_m64_n16384_k576 | 548 | **1169** |
+  | det-head m24_n25600_k864 | 249 | **752** |
+
+  sq512 1T 311 → 361. The int8 GEMM now runs ~2.5× the f32 NEON MT rate —
+  the ratio the instruction density promises. (Same lesson as every round:
+  the kernel was never the bottleneck; the data movement around it was.)
+
+Remaining for int8: SDOT mid-tier (non-I8MM arm64), SME2 i8→i32 MOPA, amd64
+VNNI, and a quantized PP-OCR pipeline to cash the 2.5× in end-to-end OCR.

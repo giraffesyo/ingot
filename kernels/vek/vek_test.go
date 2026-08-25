@@ -323,3 +323,34 @@ func TestQuantKernels(t *testing.T) {
 		}
 	}
 }
+
+func TestQDwRowS1(t *testing.T) {
+	r := rand.New(rand.NewPCG(41, 42))
+	for _, k := range [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}, {4, 4}} {
+		KH, KW := k[0], k[1]
+		for _, ncols := range []int{0, 1, 7, 8, 9, 16, 17, 33, 100} {
+			W := ncols + KW + 3
+			src := make([]int16, KH*W)
+			for i := range src {
+				src[i] = int16(r.UintN(256)) - 128
+			}
+			wp := make([]int16, (KH*KW+7)/8*8)
+			for i := 0; i < KH*KW; i++ {
+				wp[i] = int16(r.UintN(256)) - 128
+			}
+			got := make([]int32, ncols)
+			want := make([]int32, ncols)
+			for i := range got {
+				got[i] = int32(i) - 5
+				want[i] = got[i]
+			}
+			QDwRowS1(got, src, wp, ncols, W, KH, KW)
+			qdwTail(want, src, wp, 0, ncols, W, KH, KW)
+			for c := range want {
+				if got[c] != want[c] {
+					t.Fatalf("%dx%d n=%d acc[%d]=%d want %d", KH, KW, ncols, c, got[c], want[c])
+				}
+			}
+		}
+	}
+}
