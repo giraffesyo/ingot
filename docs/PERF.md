@@ -1008,3 +1008,33 @@ more than the syscalls it saves (rec 7.9 → 9.2 ms). The guard stays per-call.
 islands (feed tensor Muls, not LUT-able), 2 BatchNorm islands (per-channel
 — needs per-channel requant offsets), f32 ConvTranspose head (3.0 ms),
 Resize (1.7 ms), and the rec MatMul/Softmax f32 tail.
+
+
+## det-head f32 tail + LayerNorm fusion (2026-08-25)
+
+Cleanup round on what part 4 left visible:
+
+- **`vek.Zip2`** (zip1/zip2 .4s + fused scalar add) serves two ops: nearest
+  2× Resize becomes one self-interleave per source row plus a row copy
+  (1.84 → 0.75 ms in det_int8 1T), and the s2·k2 ConvTranspose col2im
+  interleaves its two column planes in one pass (3.27 → 2.55 ms; the rest
+  is the GEMM).
+- **Per-channel QLut**: fuse-qlut now folds [C,1,1]-affines and constant
+  BatchNormalization — the table grows to [C][256] and each NCHW plane
+  reads its channel's row through the same TBL kernel.
+- **fuse-layernorm**: the exported 8-node LayerNorm decomposition
+  (ReduceMean/Sub/Pow/ReduceMean/Add/Sqrt/Div[/Mul/Add]) collapses to one
+  ingot.LayerNorm — 5 sites in rec. gamma/beta fold in only as plain 1-D
+  vectors; a [C,1] gamma is a separate per-channel affine and stays out.
+
+The LayerNorm pass also flushed out a subtle optimizer landmine, worth
+recording: dropping a node whose const input had *just* been detached
+deleted that const from g.Values while a new node still referenced it —
+the stale value id then collided after renumber and the executor fed the
+wrong tensor entirely (symptom: an op receiving i32 or u8 garbage that
+changed per build, since map order picked the victim). Rule: re-home
+surviving consts onto their new consumer BEFORE dropNode runs.
+
+Model-level: det_int8 1T ~37.5 ms (≈ORT-int8's 36 — parity), MT holds
+6.3; rec holds 10.7 / 3.1. The remaining det gap is QLinearConv itself
+(~79%) plus the SE-path islands and the ConvTranspose GEMM.
