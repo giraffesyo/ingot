@@ -847,3 +847,30 @@ NEON one — with the scalar div/mod pack it *lost* to NEON in-model
 The 3.4× kernel gap will show at model level on GEMM-heavy quantized
 workloads (the queued quantized PP-OCR pipeline), not on MobileNet's tiny
 SE convs.
+
+
+## Quantized PP-OCR, part 1 — accuracy and parity (2026-08-24)
+
+`tools/export/ocr_int8.py` quantizes det/rec (convs-only QOperator, per-channel
+s8 weights) with calibration from the synthetic corpus, converting the
+Paddle export's Constant-node weights to initializers first (the ORT
+quantizer requires it).
+
+**Calibration is everything**: rec calibrated on whole pages downscaled to
+48×320 collapsed to 0.33 exact-match; calibrated on real ground-truth line
+crops (tight, height-48, padded to 320 — exactly what the pipeline feeds it)
+it recovers to **0.899** (f32: 0.919; CER 0.017 vs 0.013). det holds at
+F1 0.898 (f32 0.917) with page-level calibration.
+
+Parity vs ORT (TestInt8Parity): det prob-map max abs err **0.0078**; rec
+0.13 at 8/265k elements (softmax tie chains), within the int8 tolerance
+model. Corpus knobs: OCR_DET_ONNX / OCR_REC_ONNX select models per run.
+
+Performance is **not** there yet at model level: under a loaded machine
+(only same-run ratios meaningful) our int8 det runs ~3× ORT's int8 and
+slower than our own f32. Two fixes landed from the profile — a serial
+u8→s8 shift pass per QLinearConv was parking the pool (now parallel), and
+the qgemm work buffers were allocated per chunked call (now sync.Pool) —
+but QLinearConv still dominates (~80%) and needs the driver maturation the
+f32 conv got (fewer, larger GEMM calls; fused shift-in-pack; Q/DQ island
+elision). Deferred to a quiet-machine round with the profile as the map.

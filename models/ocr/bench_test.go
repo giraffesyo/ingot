@@ -26,6 +26,8 @@ var ocrBenchShapes = []struct {
 	{"det_960", "det.onnx", tensor.Shape{1, 3, 960, 960}},
 	{"rec_320", "rec.onnx", tensor.Shape{1, 3, 48, 320}},
 	{"rec_b8_320", "rec.onnx", tensor.Shape{8, 3, 48, 320}},
+	{"det_int8_640", "det_int8.onnx", tensor.Shape{1, 3, 640, 640}},
+	{"rec_int8_320", "rec_int8.onnx", tensor.Shape{1, 3, 48, 320}},
 }
 
 func init() {

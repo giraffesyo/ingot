@@ -66,8 +66,10 @@
       rewrite (sq512 630→1681 GOPS MT; det-head shape 3×)
 - [x] int8 SME: SMOPA s8→s32 GEMM (1.3 TOPS/core 1T, 3.4-3.5× NEON int8),
       auto-1T dispatch via gemm.QPackedA
-- [ ] int8 remaining: SDOT mid-tier (non-I8MM arm64), amd64 VNNI, quantized
-      PP-OCR pipeline; bf16
+- [x] quantized PP-OCR part 1: exporter + GT-crop calibration (rec 0.33→0.90
+      exact — calibration is everything), ORT parity (det 0.0078), corpus knobs
+- [ ] quantized PP-OCR part 2: QLinearConv driver maturation (model-level int8
+      still slower than f32/ORT-int8); SDOT mid-tier, amd64 VNNI; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)

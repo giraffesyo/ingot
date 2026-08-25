@@ -95,7 +95,14 @@ func TestCorpus(t *testing.T) {
 	if err := json.Unmarshal(mb, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	p, err := NewPipeline(dir+"/det.onnx", dir+"/rec.onnx", dir+"/rec_dict.txt")
+	detPath, recPath := dir+"/det.onnx", dir+"/rec.onnx"
+	if v := os.Getenv("OCR_DET_ONNX"); v != "" {
+		detPath = v
+	}
+	if v := os.Getenv("OCR_REC_ONNX"); v != "" {
+		recPath = v
+	}
+	p, err := NewPipeline(detPath, recPath, dir+"/rec_dict.txt")
 	if v := os.Getenv("OCR_REC_BATCH"); v != "" {
 		fmt.Sscan(v, &p.RecBatch)
 	}
