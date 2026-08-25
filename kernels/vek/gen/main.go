@@ -29,6 +29,7 @@ func frintn(d, n int) uint32  { return 0x4E218800 | u(n)<<5 | u(d) }            
 func fcvtns(d, n int) uint32  { return 0x4E21A800 | u(n)<<5 | u(d) }            // f32 → s32 (nearest)
 func shl23(d, n int) uint32   { return 0x4F375400 | u(n)<<5 | u(d) }            // Vd.4S = Vn.4S << 23
 func addi(d, n, m int) uint32 { return 0x4EA08400 | u(m)<<16 | u(n)<<5 | u(d) } // integer add .4S
+func eorb(d, n, m int) uint32 { return 0x6E201C00 | u(m)<<16 | u(n)<<5 | u(d) } // eor .16B
 func fneg(d, n int) uint32    { return 0x6EA0F800 | u(n)<<5 | u(d) }
 func fabs(d, n int) uint32    { return 0x4EA0F800 | u(n)<<5 | u(d) }
 func vand(d, n, m int) uint32 { return 0x4E201C00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd = Vn & Vm
@@ -584,25 +585,30 @@ func (g *gen) quantKernels() {
 		g.w("")
 	}
 
-	// requant{u8,i8}_asm(dst []u8/i8, src []int32, n int, mult, off float32):
-	// dst = sat(rne(f32(src)·mult + off)); n multiple of 16.
+	// requant{u8,i8}_asm(dst []u8/i8, src []int32, n int, mult, off float32,
+	// corr int32): dst = sat(rne(f32(src+corr)·mult + off)); n multiple of 16.
+	// corr is the per-channel zero-point/bias correction, pre-added in the
+	// integer domain (was a separate scalar pass over acc in the qconv driver).
 	for _, uns := range []bool{true, false} {
 		name := "requantu8"
 		if !uns {
 			name = "requanti8"
 		}
-		g.w("// func %s_asm(dst, src, n, mult, off) — see quantKernels.", name)
-		g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-64", name)
+		g.w("// func %s_asm(dst, src, n, mult, off, corr) — see quantKernels.", name)
+		g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-68", name)
 		g.w("\tMOVD dst_base+0(FP), R0")
 		g.w("\tMOVD src_base+24(FP), R1")
 		g.w("\tMOVD n+48(FP), R3")
 		g.dupArg(28, 56, "mult")
 		g.dupArg(29, 60, "off")
+		g.w("\tMOVWU corr+64(FP), R9")
+		g.w("\tWORD $0x%08X // dup v27.4s, w9 (corr)", dupW(27, 9))
 		g.w("%s_loop:", name)
 		g.w("\tCMP $16, R3")
 		g.w("\tBLT %s_done", name)
 		g.w("\tVLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]")
 		for i := 0; i < 4; i++ {
+			g.w("\tWORD $0x%08X // v%d += corr", addi(i, i, 27), i)
 			g.w("\tWORD $0x%08X // scvtf v%d", scvtf(i, i), i)
 			g.w("\tWORD $0x%08X // fmul v%d *= mult", fmul(i, i, 28), i)
 			g.w("\tWORD $0x%08X // fadd v%d += off", fadd(i, i, 29), i)
@@ -615,6 +621,28 @@ func (g *gen) quantKernels() {
 		g.w("\tRET")
 		g.w("")
 	}
+
+	// shiftu8s8_asm(dst []int8, src []uint8, n int): dst = s8(src ^ 0x80)
+	// — the u8→s8 activation shift (x−128 as a byte flip); n multiple of 64.
+	g.w("// func shiftu8s8_asm(dst, src, n) — see quantKernels.")
+	g.w("TEXT ·shiftu8s8_asm(SB), NOSPLIT, $0-56")
+	g.w("\tMOVD dst_base+0(FP), R0")
+	g.w("\tMOVD src_base+24(FP), R1")
+	g.w("\tMOVD n+48(FP), R3")
+	g.w("\tWORD $0x4F04E41C // movi v28.16b, #0x80")
+	g.w("shiftu8s8_loop:")
+	g.w("\tCMP $64, R3")
+	g.w("\tBLT shiftu8s8_done")
+	g.w("\tVLD1.P 64(R1), [V0.B16, V1.B16, V2.B16, V3.B16]")
+	for i := 0; i < 4; i++ {
+		g.w("\tWORD $0x%08X // eor v%d ^= 0x80", eorb(i, i, 28), i)
+	}
+	g.w("\tVST1.P [V0.B16, V1.B16, V2.B16, V3.B16], 64(R0)")
+	g.w("\tSUB $64, R3")
+	g.w("\tB shiftu8s8_loop")
+	g.w("shiftu8s8_done:")
+	g.w("\tRET")
+	g.w("")
 
 	// dequant{u8,i8}_asm(dst []float32, src []u8/i8, n int, scale float32, zp int32):
 	// dst = f32(src − zp)·scale, zero point subtracted in the integer domain;

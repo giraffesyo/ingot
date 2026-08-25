@@ -9,10 +9,13 @@ func quantu8_asm(dst []uint8, src []float32, n int, scale, zp float32)
 func quanti8_asm(dst []int8, src []float32, n int, scale, zp float32)
 
 //go:noescape
-func requantu8_asm(dst []uint8, src []int32, n int, mult, off float32)
+func requantu8_asm(dst []uint8, src []int32, n int, mult, off float32, corr int32)
 
 //go:noescape
-func requanti8_asm(dst []int8, src []int32, n int, mult, off float32)
+func requanti8_asm(dst []int8, src []int32, n int, mult, off float32, corr int32)
+
+//go:noescape
+func shiftu8s8_asm(dst []int8, src []uint8, n int)
 
 //go:noescape
 func dequantu8_asm(dst []float32, src []uint8, n int, scale float32, zp int32)
@@ -40,23 +43,33 @@ func QuantI8(dst []int8, src []float32, scale, zp float32) {
 	}
 }
 
-// RequantU8 computes dst = sat_u8(round_even(f32(src)·mult + off)).
-func RequantU8(dst []uint8, src []int32, mult, off float32) {
+// RequantU8 computes dst = sat_u8(round_even(f32(src+corr)·mult + off)).
+func RequantU8(dst []uint8, src []int32, mult, off float32, corr int32) {
 	n := min(len(dst), len(src))
 	m := n &^ 15
-	requantu8_asm(dst, src, m, mult, off)
+	requantu8_asm(dst, src, m, mult, off, corr)
 	for i := m; i < n; i++ {
-		dst[i] = qSatU8(float32(src[i])*mult + off)
+		dst[i] = qSatU8(float32(src[i]+corr)*mult + off)
 	}
 }
 
-// RequantI8 computes dst = sat_i8(round_even(f32(src)·mult + off)).
-func RequantI8(dst []int8, src []int32, mult, off float32) {
+// RequantI8 computes dst = sat_i8(round_even(f32(src+corr)·mult + off)).
+func RequantI8(dst []int8, src []int32, mult, off float32, corr int32) {
 	n := min(len(dst), len(src))
 	m := n &^ 15
-	requanti8_asm(dst, src, m, mult, off)
+	requanti8_asm(dst, src, m, mult, off, corr)
 	for i := m; i < n; i++ {
-		dst[i] = qSatI8(float32(src[i])*mult + off)
+		dst[i] = qSatI8(float32(src[i]+corr)*mult + off)
+	}
+}
+
+// ShiftU8S8 computes dst = int8(src ^ 0x80) — the u8→s8 shift (x−128).
+func ShiftU8S8(dst []int8, src []uint8) {
+	n := min(len(dst), len(src))
+	m := n &^ 63
+	shiftu8s8_asm(dst, src, m)
+	for i := m; i < n; i++ {
+		dst[i] = int8(src[i] ^ 0x80)
 	}
 }
 

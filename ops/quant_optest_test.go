@@ -141,7 +141,7 @@ func TestQLinearConv(t *testing.T) {
 		{2, 8, 10, 9, 8, 3, 3, 8, 2, 2, 1, 1},  // depthwise 3x3 s2 (SIMD, deinterleave)
 		{1, 6, 11, 12, 6, 5, 5, 6, 2, 2, 2, 2}, // depthwise 5x5 s2 (SIMD)
 		{1, 4, 8, 8, 4, 3, 3, 4, 1, 1, 0, 0},   // depthwise no-pad
-		{1, 6, 5, 5, 4, 1, 1, 2, 1, 1, 0, 0}, // grouped pointwise
+		{1, 6, 5, 5, 4, 1, 1, 2, 1, 1, 0, 0},   // grouped pointwise
 		{1, 16, 9, 9, 8, 3, 3, 1, 1, 1, 1, 1},
 	} {
 		x := make([]uint8, c.N*c.C*c.H*c.W)
