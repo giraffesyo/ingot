@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
 )
 
@@ -93,9 +94,28 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		for j := range rx {
 			rx[j] = clampIdx(nearestIdx(o.nearest, srcCoord(coord, j, OW, W, sw)), W)
 		}
+		// Integer 2× upsample (the FPN case): each output row is either a
+		// self-interleave of a source row or a copy of the previous output
+		// row — no per-element gather.
+		dup2 := OH == 2*H && OW == 2*W
+		for i := 0; dup2 && i < OH; i++ {
+			dup2 = ry[i] == i>>1
+		}
+		for j := 0; dup2 && j < OW; j++ {
+			dup2 = rx[j] == j>>1
+		}
 		par.For(N*C, 1, func(nc, _ int) {
 			src := xf[nc*H*W : (nc+1)*H*W]
 			dst := of[nc*OH*OW : (nc+1)*OH*OW]
+			if dup2 {
+				for ih := 0; ih < H; ih++ {
+					srow := src[ih*W : (ih+1)*W]
+					drow := dst[2*ih*OW : (2*ih+1)*OW]
+					vek.Zip2(drow, srow, srow, 0)
+					copy(dst[(2*ih+1)*OW:(2*ih+2)*OW], drow)
+				}
+				return
+			}
 			for i := 0; i < OH; i++ {
 				srow := src[ry[i]*W:]
 				drow := dst[i*OW : (i+1)*OW]

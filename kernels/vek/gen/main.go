@@ -17,27 +17,29 @@ import (
 )
 
 // NEON .4S encodings (Q=1, sz=0), verified against clang.
-func fadd(d, n, m int) uint32 { return 0x4E20D400 | u(m)<<16 | u(n)<<5 | u(d) }
-func fsub(d, n, m int) uint32 { return 0x4EA0D400 | u(m)<<16 | u(n)<<5 | u(d) }
-func fmul(d, n, m int) uint32 { return 0x6E20DC00 | u(m)<<16 | u(n)<<5 | u(d) }
-func fdiv(d, n, m int) uint32 { return 0x6E20FC00 | u(m)<<16 | u(n)<<5 | u(d) }
-func fmax(d, n, m int) uint32 { return 0x4E20F400 | u(m)<<16 | u(n)<<5 | u(d) }
-func fmin(d, n, m int) uint32 { return 0x4EA0F400 | u(m)<<16 | u(n)<<5 | u(d) }
-func fmla(d, n, m int) uint32 { return 0x4E20CC00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd += Vn*Vm
-func orr(d, n int) uint32     { return 0x4EA01C00 | u(n)<<16 | u(n)<<5 | u(d) } // move Vd=Vn
-func frintn(d, n int) uint32  { return 0x4E218800 | u(n)<<5 | u(d) }            // round to nearest even
-func fcvtns(d, n int) uint32  { return 0x4E21A800 | u(n)<<5 | u(d) }            // f32 → s32 (nearest)
-func shl23(d, n int) uint32   { return 0x4F375400 | u(n)<<5 | u(d) }            // Vd.4S = Vn.4S << 23
-func addi(d, n, m int) uint32 { return 0x4EA08400 | u(m)<<16 | u(n)<<5 | u(d) } // integer add .4S
-func eorb(d, n, m int) uint32 { return 0x6E201C00 | u(m)<<16 | u(n)<<5 | u(d) } // eor .16B
-func fneg(d, n int) uint32    { return 0x6EA0F800 | u(n)<<5 | u(d) }
-func fabs(d, n int) uint32    { return 0x4EA0F800 | u(n)<<5 | u(d) }
-func vand(d, n, m int) uint32 { return 0x4E201C00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd = Vn & Vm
-func vorr(d, n, m int) uint32 { return 0x4EA01C00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd = Vn | Vm
-func dupW(d, wn int) uint32   { return 0x4E040C00 | u(wn)<<5 | u(d) }           // Vd.4S=dup(Wn)
-func movi0(d int) uint32      { return 0x4F000400 | u(d) }                      // Vd.4S=0
-func u(x int) uint32          { return uint32(x) }
-func fbits(f float64) uint32  { return math.Float32bits(float32(f)) }
+func fadd(d, n, m int) uint32  { return 0x4E20D400 | u(m)<<16 | u(n)<<5 | u(d) }
+func fsub(d, n, m int) uint32  { return 0x4EA0D400 | u(m)<<16 | u(n)<<5 | u(d) }
+func fmul(d, n, m int) uint32  { return 0x6E20DC00 | u(m)<<16 | u(n)<<5 | u(d) }
+func fdiv(d, n, m int) uint32  { return 0x6E20FC00 | u(m)<<16 | u(n)<<5 | u(d) }
+func fmax(d, n, m int) uint32  { return 0x4E20F400 | u(m)<<16 | u(n)<<5 | u(d) }
+func fmin(d, n, m int) uint32  { return 0x4EA0F400 | u(m)<<16 | u(n)<<5 | u(d) }
+func fmla(d, n, m int) uint32  { return 0x4E20CC00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd += Vn*Vm
+func orr(d, n int) uint32      { return 0x4EA01C00 | u(n)<<16 | u(n)<<5 | u(d) } // move Vd=Vn
+func frintn(d, n int) uint32   { return 0x4E218800 | u(n)<<5 | u(d) }            // round to nearest even
+func fcvtns(d, n int) uint32   { return 0x4E21A800 | u(n)<<5 | u(d) }            // f32 → s32 (nearest)
+func shl23(d, n int) uint32    { return 0x4F375400 | u(n)<<5 | u(d) }            // Vd.4S = Vn.4S << 23
+func addi(d, n, m int) uint32  { return 0x4EA08400 | u(m)<<16 | u(n)<<5 | u(d) } // integer add .4S
+func eorb(d, n, m int) uint32  { return 0x6E201C00 | u(m)<<16 | u(n)<<5 | u(d) } // eor .16B
+func zip1s(d, n, m int) uint32 { return 0x4E803800 | u(m)<<16 | u(n)<<5 | u(d) } // zip1 .4S
+func zip2s(d, n, m int) uint32 { return 0x4E807800 | u(m)<<16 | u(n)<<5 | u(d) } // zip2 .4S
+func fneg(d, n int) uint32     { return 0x6EA0F800 | u(n)<<5 | u(d) }
+func fabs(d, n int) uint32     { return 0x4EA0F800 | u(n)<<5 | u(d) }
+func vand(d, n, m int) uint32  { return 0x4E201C00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd = Vn & Vm
+func vorr(d, n, m int) uint32  { return 0x4EA01C00 | u(m)<<16 | u(n)<<5 | u(d) } // Vd = Vn | Vm
+func dupW(d, wn int) uint32    { return 0x4E040C00 | u(wn)<<5 | u(d) }           // Vd.4S=dup(Wn)
+func movi0(d int) uint32       { return 0x4F000400 | u(d) }                      // Vd.4S=0
+func u(x int) uint32           { return uint32(x) }
+func fbits(f float64) uint32   { return math.Float32bits(float32(f)) }
 
 // fmlaElem: FMLA Vd.4S += Vn.4S * Vm.S[idx].
 func fmlaElem(d, n, m, idx int) uint32 {
@@ -621,6 +623,35 @@ func (g *gen) quantKernels() {
 		g.w("\tRET")
 		g.w("")
 	}
+
+	// zip2_asm(dst, a, b []float32, n int, c float32): dst[2i] = a[i]+c,
+	// dst[2i+1] = b[i]+c — the 2×-upsample / stride-2 col2im interleave;
+	// n = len(a), multiple of 8.
+	g.w("// func zip2_asm(dst, a, b, n, c) — interleave with scalar add.")
+	g.w("TEXT ·zip2_asm(SB), NOSPLIT, $0-84")
+	g.w("\tMOVD dst_base+0(FP), R0")
+	g.w("\tMOVD a_base+24(FP), R1")
+	g.w("\tMOVD b_base+48(FP), R2")
+	g.w("\tMOVD n+72(FP), R3")
+	g.dupArg(28, 80, "c")
+	g.w("zip2_loop:")
+	g.w("\tCMP $8, R3")
+	g.w("\tBLT zip2_done")
+	g.w("\tVLD1.P 32(R1), [V0.S4, V1.S4]")
+	g.w("\tVLD1.P 32(R2), [V2.S4, V3.S4]")
+	for i := 0; i < 4; i++ {
+		g.w("\tWORD $0x%08X // fadd v%d += c", fadd(i, i, 28), i)
+	}
+	g.w("\tWORD $0x%08X // zip1.4s v4, v0, v2", zip1s(4, 0, 2))
+	g.w("\tWORD $0x%08X // zip2.4s v5, v0, v2", zip2s(5, 0, 2))
+	g.w("\tWORD $0x%08X // zip1.4s v6, v1, v3", zip1s(6, 1, 3))
+	g.w("\tWORD $0x%08X // zip2.4s v7, v1, v3", zip2s(7, 1, 3))
+	g.w("\tVST1.P [V4.S4, V5.S4, V6.S4, V7.S4], 64(R0)")
+	g.w("\tSUB $8, R3")
+	g.w("\tB zip2_loop")
+	g.w("zip2_done:")
+	g.w("\tRET")
+	g.w("")
 
 	// shiftu8s8_asm(dst []int8, src []uint8, n int): dst = s8(src ^ 0x80)
 	// — the u8→s8 activation shift (x−128 as a byte flip); n multiple of 64.

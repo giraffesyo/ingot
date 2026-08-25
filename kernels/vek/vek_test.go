@@ -382,3 +382,20 @@ func TestQLut(t *testing.T) {
 		}
 	}
 }
+
+func TestZip2(t *testing.T) {
+	for _, n := range []int{0, 1, 7, 8, 9, 33, 257} {
+		a := make([]float32, n)
+		b := make([]float32, n)
+		for i := range a {
+			a[i], b[i] = float32(i), float32(-i)
+		}
+		dst := make([]float32, 2*n)
+		Zip2(dst, a, b, 0.5)
+		for i := 0; i < n; i++ {
+			if dst[2*i] != a[i]+0.5 || dst[2*i+1] != b[i]+0.5 {
+				t.Fatalf("n=%d i=%d: got (%v,%v) want (%v,%v)", n, i, dst[2*i], dst[2*i+1], a[i]+0.5, b[i]+0.5)
+			}
+		}
+	}
+}

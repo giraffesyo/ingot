@@ -1186,6 +1186,33 @@ requanti8_loop:
 requanti8_done:
 	RET
 
+// func zip2_asm(dst, a, b, n, c) — interleave with scalar add.
+TEXT ·zip2_asm(SB), NOSPLIT, $0-84
+	MOVD dst_base+0(FP), R0
+	MOVD a_base+24(FP), R1
+	MOVD b_base+48(FP), R2
+	MOVD n+72(FP), R3
+	MOVWU c+80(FP), R9
+	WORD $0x4E040D3C // dup v28.4s, w9 (c)
+zip2_loop:
+	CMP $8, R3
+	BLT zip2_done
+	VLD1.P 32(R1), [V0.S4, V1.S4]
+	VLD1.P 32(R2), [V2.S4, V3.S4]
+	WORD $0x4E3CD400 // fadd v0 += c
+	WORD $0x4E3CD421 // fadd v1 += c
+	WORD $0x4E3CD442 // fadd v2 += c
+	WORD $0x4E3CD463 // fadd v3 += c
+	WORD $0x4E823804 // zip1.4s v4, v0, v2
+	WORD $0x4E827805 // zip2.4s v5, v0, v2
+	WORD $0x4E833826 // zip1.4s v6, v1, v3
+	WORD $0x4E837827 // zip2.4s v7, v1, v3
+	VST1.P [V4.S4, V5.S4, V6.S4, V7.S4], 64(R0)
+	SUB $8, R3
+	B zip2_loop
+zip2_done:
+	RET
+
 // func shiftu8s8_asm(dst, src, n) — see quantKernels.
 TEXT ·shiftu8s8_asm(SB), NOSPLIT, $0-56
 	MOVD dst_base+0(FP), R0
