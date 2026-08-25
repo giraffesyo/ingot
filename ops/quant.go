@@ -977,13 +977,29 @@ func (o *qlutOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		return nil, o.n.Errorf("QLut: missing inputs")
 	}
 	x, tb := in[0], in[1]
-	if x.DType() != tensor.U8 || tb.DType() != tensor.U8 || tb.Numel() != 256 {
-		return nil, o.n.Errorf("QLut: want u8 x and u8[256] table, got %s/%s[%d]", x.DType(), tb.DType(), tb.Numel())
+	if x.DType() != tensor.U8 || tb.DType() != tensor.U8 || tb.Numel()%256 != 0 {
+		return nil, o.n.Errorf("QLut: want u8 x and u8[C*256] table, got %s/%s[%d]", x.DType(), tb.DType(), tb.Numel())
 	}
 	y := ctx.NewUninit(tensor.U8, x.Shape()...)
 	xf, yf := x.U8(), y.U8()
+	tf := tb.U8()
+	if C := tb.Numel() / 256; C > 1 {
+		// Per-channel tables: NCHW x with x.Shape()[1] == C.
+		xs := x.Shape()
+		if len(xs) != 4 || xs[1] != C {
+			return nil, o.n.Errorf("QLut: per-channel table C=%d vs input %v", C, xs)
+		}
+		N, HW := xs[0], xs[2]*xs[3]
+		par.For(N*C, 1, func(nc, _ int) {
+			c := nc % C
+			var lut [256]uint8
+			copy(lut[:], tf[c*256:])
+			vek.QLut(yf[nc*HW:(nc+1)*HW], xf[nc*HW:(nc+1)*HW], &lut)
+		})
+		return []*tensor.Tensor{y}, nil
+	}
 	var lut [256]uint8
-	copy(lut[:], tb.U8())
+	copy(lut[:], tf)
 	chunks := max(1, (len(xf)+unaryChunk-1)/unaryChunk)
 	par.For(chunks, 1, func(c, _ int) {
 		lo := c * unaryChunk

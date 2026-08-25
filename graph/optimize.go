@@ -37,6 +37,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = foldPostAffine(g, stats) || changed
 		changed = foldQDQAffine(g, stats) || changed
 		changed = fuseQLUT(g, stats) || changed
+		changed = fuseLayerNorm(g, stats) || changed
 	}
 	renumber(g)
 	return stats
@@ -950,6 +951,58 @@ func foldQDQAffine(g *Graph, stats map[string]int) bool {
 	return changed
 }
 
+// channelConstAny returns the flattened values of an f32 constant whose shape
+// broadcasts over NCHW channels ([..,C,1,1] or scalar).
+func channelConstAny(v *Value) ([]float32, bool) {
+	if v == nil || v.Const == nil || v.Const.DType() != tensor.F32 {
+		return nil, false
+	}
+	f := v.Const.F32()
+	if len(f) == 1 {
+		return f, true
+	}
+	sh := v.Const.Shape()
+	if len(sh) < 3 || sh[len(sh)-1] != 1 || sh[len(sh)-2] != 1 || sh[len(sh)-3] != len(f) {
+		return nil, false
+	}
+	for _, d := range sh[:len(sh)-3] {
+		if d != 1 {
+			return nil, false
+		}
+	}
+	return f, true
+}
+
+// bnAffine reduces a BatchNormalization with constant parameters to the
+// per-channel affine y = scale·x + shift.
+func bnAffine(u *Node, x *Value) (scale, shift []float32, ok bool) {
+	if len(u.Inputs) < 5 || u.Inputs[0] != x {
+		return nil, nil, false
+	}
+	var p [4][]float32
+	for i := 1; i < 5; i++ {
+		v := u.Inputs[i]
+		if v == nil || v.Const == nil || v.Const.DType() != tensor.F32 {
+			return nil, nil, false
+		}
+		p[i-1] = v.Const.F32()
+	}
+	gamma, beta, mean, vr := p[0], p[1], p[2], p[3]
+	C := len(gamma)
+	if len(beta) != C || len(mean) != C || len(vr) != C {
+		return nil, nil, false
+	}
+	eps := float64(u.Attrs.Float("epsilon", 1e-5))
+	scale = make([]float32, C)
+	shift = make([]float32, C)
+	for c := 0; c < C; c++ {
+		inv := 1 / math.Sqrt(float64(vr[c])+eps)
+		scale[c] = float32(float64(gamma[c]) * inv)
+		shift[c] = beta[c] - scale[c]*mean[c]
+	}
+	return scale, shift, true
+}
+
 // fuseQLUT collapses DequantizeLinear → (scalar elementwise chain) →
 // QuantizeLinear (u8 in, u8 out, per-tensor scales) into a single
 // ingot.QLut node: the whole island is a pure function of one byte, so it
@@ -981,6 +1034,8 @@ func fuseQLUT(g *Graph, stats map[string]int) bool {
 		type stage struct {
 			op    string
 			c     float64
+			cv    []float32 // per-channel const (Mul/Add/Sub) or BN scale
+			bv    []float32 // BN shift
 			right bool
 			lo,
 			hi float64
@@ -1003,11 +1058,24 @@ func fuseQLUT(g *Graph, stats map[string]int) bool {
 			switch {
 			case u.Domain == "" && (u.OpType == "Mul" || u.OpType == "Add" || u.OpType == "Sub" || u.OpType == "Div"):
 				x, c, right, ok := binaryWithConst(u)
-				if !ok || x != cur {
-					u = nil
-				} else {
+				if ok && x == cur {
 					st.c, st.right = float64(c), right
+					break
 				}
+				// Per-channel [..,C,1,1] constant? (Sub only with x on the left.)
+				if u.OpType != "Div" && len(u.Inputs) == 2 {
+					xi, ci := u.Inputs[0], u.Inputs[1]
+					if xi != cur {
+						xi, ci = ci, xi
+					}
+					if xi == cur && ci != nil && ci.Const != nil && (u.OpType != "Sub" || u.Inputs[0] == cur) {
+						if cv, okc := channelConstAny(ci); okc {
+							st.cv = cv
+							break
+						}
+					}
+				}
+				u = nil
 			case u.Domain == "" && u.OpType == "Clip":
 				lo, hi, ok := clipBounds(g, u)
 				if !ok || u.Inputs[0] != cur {
@@ -1022,6 +1090,13 @@ func fuseQLUT(g *Graph, stats map[string]int) bool {
 			case u.Domain == "" && u.OpType == "HardSigmoid":
 				st.alpha = float64(u.Attrs.Float("alpha", 0.2))
 				st.beta = float64(u.Attrs.Float("beta", 0.5))
+			case u.Domain == "" && u.OpType == "BatchNormalization":
+				sc, sh, okbn := bnAffine(u, cur)
+				if !okbn {
+					u = nil
+				} else {
+					st.cv, st.bv = sc, sh
+				}
 			default:
 				u = nil
 			}
@@ -1046,28 +1121,45 @@ func fuseQLUT(g *Graph, stats map[string]int) bool {
 		if !okz2 || z2dt != tensor.U8 {
 			continue
 		}
-		// Build the table.
-		tb := tensor.New(tensor.U8, 256)
-		lut := tb.U8()
-		for v := 0; v < 256; v++ {
-			f := float64(s1) * float64(int32(v)-z1)
+		// Build the table: one 256-entry row, or C rows when any stage is
+		// per-channel (the runtime picks row c for channel c).
+		C := 1
+		for _, st := range stages {
+			if st.cv != nil && len(st.cv) > C {
+				C = len(st.cv)
+			}
+		}
+		mismatch := false
+		for _, st := range stages {
+			if st.cv != nil && len(st.cv) != C && len(st.cv) != 1 {
+				mismatch = true
+			}
+		}
+		if mismatch {
+			continue
+		}
+		eval := func(f float64, c int) float64 {
 			for _, st := range stages {
+				cc := st.c
+				if st.cv != nil {
+					cc = float64(st.cv[min(c, len(st.cv)-1)])
+				}
 				switch st.op {
 				case "Mul":
-					f *= st.c
+					f *= cc
 				case "Add":
-					f += st.c
+					f += cc
 				case "Sub":
-					if st.right {
-						f -= st.c
+					if st.right || st.cv != nil {
+						f -= cc
 					} else {
-						f = st.c - f
+						f = cc - f
 					}
 				case "Div":
 					if st.right {
-						f /= st.c
+						f /= cc
 					} else if f != 0 {
-						f = st.c / f
+						f = cc / f
 					}
 				case "Clip":
 					f = math.Min(math.Max(f, st.lo), st.hi)
@@ -1079,10 +1171,25 @@ func fuseQLUT(g *Graph, stats map[string]int) bool {
 					f = f * math.Min(math.Max(f+3, 0), 6) / 6
 				case "HardSigmoid":
 					f = math.Min(math.Max(st.alpha*f+st.beta, 0), 1)
+				case "BatchNormalization":
+					f = f*cc + float64(st.bv[min(c, len(st.bv)-1)])
 				}
 			}
-			qv := math.RoundToEven(f/float64(s2)) + float64(z2)
-			lut[v] = uint8(math.Min(math.Max(qv, 0), 255))
+			return f
+		}
+		var tb *tensor.Tensor
+		if C == 1 {
+			tb = tensor.New(tensor.U8, 256)
+		} else {
+			tb = tensor.New(tensor.U8, C, 256)
+		}
+		lut := tb.U8()
+		for c := 0; c < C; c++ {
+			for v := 0; v < 256; v++ {
+				f := eval(float64(s1)*float64(int32(v)-z1), c)
+				qv := math.RoundToEven(f/float64(s2)) + float64(z2)
+				lut[c*256+v] = uint8(math.Min(math.Max(qv, 0), 255))
+			}
 		}
 		// Rewire: mutate the DQ node in place (its position is trivially
 		// topological) into QLut(x, table) producing q's output.
@@ -1115,6 +1222,139 @@ func fuseQLUT(g *Graph, stats map[string]int) bool {
 		n.Outputs = []*Value{out}
 		out.Producer = n
 		stats["fuse-qlut"]++
+		changed = true
+	}
+	g.compact(dead)
+	return changed
+}
+
+// fuseLayerNorm rewrites the decomposed pattern
+//
+//	m = ReduceMean(x); d = Sub(x, m); v = ReduceMean(Pow(d, 2));
+//	y = Div(d, Sqrt(Add(v, eps))); out = Add(Mul(y, gamma), beta)
+//
+// into one ingot.LayerNorm(x, gamma, beta) node.
+func fuseLayerNorm(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	for _, rm1 := range g.Nodes {
+		if dead[rm1] || rm1.OpType != "ReduceMean" || rm1.Domain != "" {
+			continue
+		}
+		x := rm1.Inputs[0]
+		sub := g.soleConsumer(rm1.Outputs[0])
+		if sub == nil || dead[sub] || sub.OpType != "Sub" || sub.Inputs[0] != x || sub.Inputs[1] != rm1.Outputs[0] {
+			continue
+		}
+		d := sub.Outputs[0]
+		if len(d.Consumers) != 2 || g.isOutput(d) {
+			continue
+		}
+		var pow, div *Node
+		for _, c := range d.Consumers {
+			switch c.OpType {
+			case "Pow":
+				pow = c
+			case "Div":
+				div = c
+			}
+		}
+		if pow == nil || div == nil || dead[pow] || dead[div] || div.Inputs[0] != d {
+			continue
+		}
+		if e, ok := scalarConst(pow.Inputs[1]); !ok || e != 2 {
+			continue
+		}
+		rm2 := g.soleConsumer(pow.Outputs[0])
+		if rm2 == nil || rm2.OpType != "ReduceMean" {
+			continue
+		}
+		ax1 := rm1.Attrs.Ints("axes", nil)
+		ax2 := rm2.Attrs.Ints("axes", nil)
+		if len(ax1) != 1 || len(ax2) != 1 || ax1[0] != ax2[0] {
+			continue
+		}
+		// The normalized axis must be the innermost one; a positive axis is
+		// only verifiable against a known rank.
+		if ax1[0] != -1 {
+			if !x.HasShape || int(ax1[0]) != len(x.Shape)-1 {
+				continue
+			}
+		}
+		addE := g.soleConsumer(rm2.Outputs[0])
+		if addE == nil || addE.OpType != "Add" {
+			continue
+		}
+		eps, ok := scalarConst(addE.Inputs[1])
+		if !ok {
+			eps, ok = scalarConst(addE.Inputs[0])
+		}
+		if !ok {
+			continue
+		}
+		sq := g.soleConsumer(addE.Outputs[0])
+		if sq == nil || sq.OpType != "Sqrt" || g.soleConsumer(sq.Outputs[0]) != div || div.Inputs[1] != sq.Outputs[0] {
+			continue
+		}
+		// Fold the trailing Mul(gamma)/Add(beta) only when both are plain
+		// 1-D vectors — those provably match the normalized (innermost)
+		// dim. A [C,1]-shaped gamma is a separate per-channel affine (the
+		// pattern normalizes one axis, scales another): fuse the core only.
+		var gamma, beta *Value
+		mul := g.soleConsumer(div.Outputs[0])
+		var add2 *Node
+		if mul != nil && mul.OpType == "Mul" {
+			for _, v := range mul.Inputs {
+				if v != div.Outputs[0] && v != nil && v.Const != nil && v.Const.DType() == tensor.F32 && len(v.Const.Shape()) == 1 {
+					gamma = v
+				}
+			}
+			if gamma != nil {
+				add2 = g.soleConsumer(mul.Outputs[0])
+				if add2 != nil && add2.OpType == "Add" {
+					for _, v := range add2.Inputs {
+						if v != mul.Outputs[0] && v != nil && v.Const != nil && v.Const.DType() == tensor.F32 && len(v.Const.Shape()) == 1 {
+							beta = v
+						}
+					}
+				}
+				if beta == nil {
+					gamma, add2 = nil, nil
+				}
+			}
+		}
+		drop := []*Node{sub, pow, rm2, addE, sq, div}
+		out := div.Outputs[0]
+		ins := []*Value{x}
+		if gamma != nil {
+			drop = append(drop, mul, add2)
+			out = add2.Outputs[0]
+			ins = append(ins, gamma, beta)
+			// Re-home gamma/beta onto rm1 BEFORE dropping mul/add2 — a
+			// consumer-less const gets deleted from g.Values by dropNode,
+			// keeping a stale id that collides after renumber.
+			removeConsumer(gamma, mul)
+			removeConsumer(beta, add2)
+			gamma.Consumers = append(gamma.Consumers, rm1)
+			beta.Consumers = append(beta.Consumers, rm1)
+		}
+		for _, n2 := range drop {
+			dead[n2] = true
+		}
+		removeConsumer(x, sub)
+		for _, n2 := range drop {
+			g.dropNode(n2)
+		}
+		mid := rm1.Outputs[0]
+		delete(g.Values, mid.Name)
+		g.Values[out.Name] = out
+		rm1.OpType, rm1.Domain = "LayerNorm", ingotDomain
+		rm1.Attrs = ops.Attrs{"axis": {Kind: ops.KindInt, I: -1}, "epsilon": fattr(eps)}
+		rm1.Inputs = ins
+		rm1.Outputs = []*Value{out}
+		out.Producer = rm1
+		g.Opsets[ingotDomain] = 1
+		stats["fuse-layernorm"]++
 		changed = true
 	}
 	g.compact(dead)
