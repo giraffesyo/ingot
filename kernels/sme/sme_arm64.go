@@ -4,6 +4,9 @@ package sme
 
 func svl() int64
 func probePeak(iters int64, src *float32)
+
+//go:noescape
+func probeBF16Peak(iters int64, src *uint16)
 func probeLoad(iters int64, a, b *float32)
 func probeN(iters int64, src *float32, variant int64)
 func outerK(a, b *float32, k int64, out *float32)

@@ -18,6 +18,7 @@ import (
 )
 
 func usmmla(d, n, m int) uint32 { return 0x4E80AC00 | uint32(m)<<16 | uint32(n)<<5 | uint32(d) }
+func bfmmla(d, n, m int) uint32 { return 0x6E40EC00 | uint32(m)<<16 | uint32(n)<<5 | uint32(d) }
 func smmla(d, n, m int) uint32  { return 0x4E80A400 | uint32(m)<<16 | uint32(n)<<5 | uint32(d) }
 func movi0(d int) uint32        { return 0x4F000400 | uint32(d) }
 
@@ -132,6 +133,11 @@ func main() {
 	emit(w, "qkernelS8S8", smmla)
 	emitSDOT(w, "qkernelU8S8SDOT", true)
 	emitSDOT(w, "qkernelS8S8SDOT", false)
+	// BFMMLA has the same register geometry as SMMLA — 2×4 bf16 blocks fill
+	// 16-byte registers exactly like 2×8 int8 blocks, and the f32 2×2
+	// accumulator tiles are byte-compatible with the i32 ones — so the
+	// identical emitter serves bf16 with kg meaning 4 k-steps per group.
+	emit(w, "bkernelBF16", bfmmla)
 	os.Stdout.WriteString(b.String())
 }
 

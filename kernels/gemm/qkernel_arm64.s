@@ -395,3 +395,72 @@ qkernelS8S8SDOT_done:
 	VST1.P [V29.S4, V30.S4, V31.S4], 48(R3)
 	RET
 
+// func bkernelBF16(kg int64, ap, bp, ct pointers)
+// ct: 8×12 tile as 4×6 2×2 blocks (96 × s32); see package comment.
+TEXT ·bkernelBF16(SB), NOSPLIT, $0-32
+	MOVD kg+0(FP), R0
+	MOVD ap+8(FP), R1
+	MOVD bp+16(FP), R2
+	MOVD ct+24(FP), R3
+	WORD $0x4F000400 // movi v0.4s, #0
+	WORD $0x4F000401 // movi v1.4s, #0
+	WORD $0x4F000402 // movi v2.4s, #0
+	WORD $0x4F000403 // movi v3.4s, #0
+	WORD $0x4F000404 // movi v4.4s, #0
+	WORD $0x4F000405 // movi v5.4s, #0
+	WORD $0x4F000406 // movi v6.4s, #0
+	WORD $0x4F000407 // movi v7.4s, #0
+	WORD $0x4F000408 // movi v8.4s, #0
+	WORD $0x4F000409 // movi v9.4s, #0
+	WORD $0x4F00040A // movi v10.4s, #0
+	WORD $0x4F00040B // movi v11.4s, #0
+	WORD $0x4F00040C // movi v12.4s, #0
+	WORD $0x4F00040D // movi v13.4s, #0
+	WORD $0x4F00040E // movi v14.4s, #0
+	WORD $0x4F00040F // movi v15.4s, #0
+	WORD $0x4F000410 // movi v16.4s, #0
+	WORD $0x4F000411 // movi v17.4s, #0
+	WORD $0x4F000412 // movi v18.4s, #0
+	WORD $0x4F000413 // movi v19.4s, #0
+	WORD $0x4F000414 // movi v20.4s, #0
+	WORD $0x4F000415 // movi v21.4s, #0
+	WORD $0x4F000416 // movi v22.4s, #0
+	WORD $0x4F000417 // movi v23.4s, #0
+bkernelBF16_loop:
+	VLD1.P 64(R1), [V24.B16, V25.B16, V26.B16, V27.B16] // A rows 0-7 × 8k
+	VLD1.P 64(R2), [V28.B16, V29.B16, V30.B16, V31.B16] // B cols 0-7 × 8k
+	WORD $0x6E5CEF00 // mmla v0 += a0 · b0
+	WORD $0x6E5CEF26 // mmla v6 += a1 · b0
+	WORD $0x6E5CEF4C // mmla v12 += a2 · b0
+	WORD $0x6E5CEF72 // mmla v18 += a3 · b0
+	WORD $0x6E5DEF01 // mmla v1 += a0 · b1
+	WORD $0x6E5DEF27 // mmla v7 += a1 · b1
+	WORD $0x6E5DEF4D // mmla v13 += a2 · b1
+	WORD $0x6E5DEF73 // mmla v19 += a3 · b1
+	WORD $0x6E5EEF02 // mmla v2 += a0 · b2
+	WORD $0x6E5EEF28 // mmla v8 += a1 · b2
+	WORD $0x6E5EEF4E // mmla v14 += a2 · b2
+	WORD $0x6E5EEF74 // mmla v20 += a3 · b2
+	WORD $0x6E5FEF03 // mmla v3 += a0 · b3
+	WORD $0x6E5FEF29 // mmla v9 += a1 · b3
+	WORD $0x6E5FEF4F // mmla v15 += a2 · b3
+	WORD $0x6E5FEF75 // mmla v21 += a3 · b3
+	VLD1.P 32(R2), [V28.B16, V29.B16] // B cols 8-11 × 8k
+	WORD $0x6E5CEF04 // mmla v4 += a0 · b4
+	WORD $0x6E5CEF2A // mmla v10 += a1 · b4
+	WORD $0x6E5CEF50 // mmla v16 += a2 · b4
+	WORD $0x6E5CEF76 // mmla v22 += a3 · b4
+	WORD $0x6E5DEF05 // mmla v5 += a0 · b5
+	WORD $0x6E5DEF2B // mmla v11 += a1 · b5
+	WORD $0x6E5DEF51 // mmla v17 += a2 · b5
+	WORD $0x6E5DEF77 // mmla v23 += a3 · b5
+	SUBS $1, R0, R0
+	BNE  bkernelBF16_loop
+	VST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R3)
+	VST1.P [V4.S4, V5.S4, V6.S4, V7.S4], 64(R3)
+	VST1.P [V8.S4, V9.S4, V10.S4, V11.S4], 64(R3)
+	VST1.P [V12.S4, V13.S4, V14.S4, V15.S4], 64(R3)
+	VST1.P [V16.S4, V17.S4, V18.S4, V19.S4], 64(R3)
+	VST1.P [V20.S4, V21.S4, V22.S4, V23.S4], 64(R3)
+	RET
+

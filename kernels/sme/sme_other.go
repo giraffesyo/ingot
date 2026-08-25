@@ -10,6 +10,7 @@ func Available() bool { return false }
 // requires Available().
 func svl() int64                                        { return 0 }
 func probePeak(int64, *float32)                         {}
+func probeBF16Peak(int64, *uint16)                      {}
 func probeLoad(int64, *float32, *float32)               {}
 func probeN(int64, *float32, int64)                     {}
 func outerK(*float32, *float32, int64, *float32)        {}

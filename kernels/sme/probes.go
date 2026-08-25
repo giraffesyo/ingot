@@ -11,6 +11,10 @@ func SVL() int {
 // ProbePeak runs iters × 4 FMOPA f32 outer products from resident registers.
 func ProbePeak(iters int64, src []float32) { probePeak(iters, &src[0]) }
 
+// ProbeBF16Peak measures peak BFMOPA (bf16→f32 widening outer product)
+// throughput; guard()ed like all streaming-mode entry points.
+func ProbeBF16Peak(iters int64, src []uint16) { guard(func() { probeBF16Peak(iters, &src[0]) }) }
+
 // ProbeLoad runs iters × (2 loads + 4 FMOPA).
 func ProbeLoad(iters int64, a, b []float32) { probeLoad(iters, &a[0], &b[0]) }
 

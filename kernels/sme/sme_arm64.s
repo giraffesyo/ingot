@@ -444,3 +444,26 @@ qzaloop:
 	ADD  R5, R3, R3
 	WORD $0xd503467f // smstop
 	RET
+
+// func probeBF16Peak(iters int64, src *uint16)
+// 4 independent BFMOPA per iteration — peak widening bf16→f32 outer-product
+// throughput (1024 FLOPs per instruction at SVL=64: 16×16 f32 tile × 2-deep).
+TEXT ·probeBF16Peak(SB), NOSPLIT, $0-16
+	MOVD iters+0(FP), R0
+	MOVD src+8(FP), R1
+	WORD $0xd503477f // smstart
+	WORD $0xc00800ff // zero {za}
+	WORD $0x2558e3e0 // ptrue p0.h (16-bit granule: bf16 elements)
+	WORD $0xa4a0a020 // ld1h z0, p0/z, [x1]
+	WORD $0xa4a1a021 // ld1h z1, p0/z, [x1, #1, mul vl]
+	WORD $0xa4a2a022 // ld1h z2, p0/z, [x1, #2, mul vl]
+	WORD $0xa4a3a023 // ld1h z3, p0/z, [x1, #3, mul vl]
+bfpeak:
+	WORD $0x81810000 // bfmopa za0.s, p0/m, p0/m, z0.h, z1.h
+	WORD $0x81820001 // bfmopa za1.s, p0/m, p0/m, z0.h, z2.h
+	WORD $0x81830002 // bfmopa za2.s, p0/m, p0/m, z0.h, z3.h
+	WORD $0x81810043 // bfmopa za3.s, p0/m, p0/m, z2.h, z1.h
+	SUBS $1, R0, R0
+	BNE  bfpeak
+	WORD $0xd503467f // smstop
+	RET
