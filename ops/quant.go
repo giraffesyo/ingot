@@ -963,4 +963,32 @@ func init() {
 		return &dynamicQuantizeLinearOp{n: n}, nil
 	})
 	Register("", "QLinearConv", 10, buildQLinearConv)
+	// Runtime-internal op produced by the graph optimizer's fuse-qlut pass:
+	// an entire DQ → scalar elementwise chain → Q island collapsed into one
+	// u8 → u8 table lookup.
+	Register("ingot", "QLut", 1, func(n NodeInfo) (Op, error) { return &qlutOp{n: n}, nil })
+}
+
+// qlutOp applies a 256-entry u8→u8 lookup table (inputs: x u8, table u8[256]).
+type qlutOp struct{ n NodeInfo }
+
+func (o *qlutOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	if len(in) < 2 || in[0] == nil || in[1] == nil {
+		return nil, o.n.Errorf("QLut: missing inputs")
+	}
+	x, tb := in[0], in[1]
+	if x.DType() != tensor.U8 || tb.DType() != tensor.U8 || tb.Numel() != 256 {
+		return nil, o.n.Errorf("QLut: want u8 x and u8[256] table, got %s/%s[%d]", x.DType(), tb.DType(), tb.Numel())
+	}
+	y := ctx.NewUninit(tensor.U8, x.Shape()...)
+	xf, yf := x.U8(), y.U8()
+	var lut [256]uint8
+	copy(lut[:], tb.U8())
+	chunks := max(1, (len(xf)+unaryChunk-1)/unaryChunk)
+	par.For(chunks, 1, func(c, _ int) {
+		lo := c * unaryChunk
+		hi := min(lo+unaryChunk, len(xf))
+		vek.QLut(yf[lo:hi], xf[lo:hi], &lut)
+	})
+	return []*tensor.Tensor{y}, nil
 }

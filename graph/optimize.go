@@ -35,6 +35,8 @@ func Optimize(g *Graph) map[string]int {
 		changed = foldConvAffine(g, stats) || changed
 		changed = fuseConvAct(g, stats) || changed
 		changed = foldPostAffine(g, stats) || changed
+		changed = foldQDQAffine(g, stats) || changed
+		changed = fuseQLUT(g, stats) || changed
 	}
 	renumber(g)
 	return stats
@@ -764,5 +766,357 @@ func fuseGelu(g *Graph, stats map[string]int) bool {
 		}
 		g.Opsets[ingotDomain] = 1
 	}
+	return changed
+}
+
+// ---- quantized-island passes ----
+
+// intZP reads a scalar integer zero point (u8/i8/i32 const; nil means 0).
+func intZP(v *Value) (int32, tensor.DType, bool) {
+	if v == nil {
+		return 0, tensor.U8, true
+	}
+	if v.Const == nil || v.Const.Numel() != 1 {
+		return 0, 0, false
+	}
+	switch v.Const.DType() {
+	case tensor.U8:
+		return int32(v.Const.U8()[0]), tensor.U8, true
+	case tensor.I8:
+		return int32(v.Const.I8()[0]), tensor.I8, true
+	case tensor.I32:
+		return v.Const.I32()[0], tensor.I32, true
+	}
+	return 0, 0, false
+}
+
+func zpTensor(dt tensor.DType, zp int32) *tensor.Tensor {
+	t := tensor.New(dt)
+	switch dt {
+	case tensor.U8:
+		t.U8()[0] = uint8(zp)
+	case tensor.I8:
+		t.I8()[0] = int8(zp)
+	case tensor.I32:
+		t.I32()[0] = zp
+	}
+	return t
+}
+
+// foldQDQAffine folds QLinearConv → DequantizeLinear → (scalar Mul/Add/Sub/Div)*
+// → QuantizeLinear into the conv's own output quantization: the conv's y_scale
+// becomes s2/a and its y_zero_point rne(b/s2 + z2) — the requantized result
+// then encodes a·r+b at (s2, z2), exactly what the chain's consumers expect.
+// One fewer rounding than the original chain; the zero point must land on a
+// representable integer or the site is skipped.
+func foldQDQAffine(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	for _, n := range g.Nodes {
+		if dead[n] || n.OpType != "QLinearConv" || n.Domain != "" || len(n.Inputs) < 8 {
+			continue
+		}
+		ys, ok := scalarConst(n.Inputs[6])
+		if !ok {
+			continue
+		}
+		yz, yzdt, ok := intZP(n.Inputs[7])
+		if !ok {
+			continue
+		}
+		dq := g.soleConsumer(n.Outputs[0])
+		if dq == nil || dead[dq] || dq.OpType != "DequantizeLinear" || dq.Domain != "" {
+			continue
+		}
+		ds, ok := scalarConst(dq.Inputs[1])
+		var dz int32
+		if !ok {
+			continue
+		}
+		if len(dq.Inputs) > 2 {
+			var okz bool
+			dz, _, okz = intZP(dq.Inputs[2])
+			if !okz {
+				continue
+			}
+		}
+		if ds != ys || dz != yz {
+			continue
+		}
+		// Walk the scalar affine chain.
+		a, b := 1.0, 0.0
+		chain := []*Node{dq}
+		cur := dq.Outputs[0]
+		for {
+			u := g.soleConsumer(cur)
+			if u == nil || dead[u] || u.Domain != "" {
+				chain = nil
+				break
+			}
+			if u.OpType == "QuantizeLinear" {
+				chain = append(chain, u)
+				break
+			}
+			x, c, right, ok := binaryWithConst(u)
+			if !ok || x != cur {
+				chain = nil
+				break
+			}
+			switch u.OpType {
+			case "Mul":
+				a, b = a*float64(c), b*float64(c)
+			case "Add":
+				b += float64(c)
+			case "Sub":
+				if !right {
+					chain = nil
+				} else {
+					b -= float64(c)
+				}
+			case "Div":
+				if !right || c == 0 {
+					chain = nil
+				} else {
+					a, b = a/float64(c), b/float64(c)
+				}
+			default:
+				chain = nil
+			}
+			if chain == nil {
+				break
+			}
+			chain = append(chain, u)
+			cur = u.Outputs[0]
+		}
+		if chain == nil || a == 0 {
+			continue
+		}
+		q := chain[len(chain)-1]
+		s2, ok := scalarConst(q.Inputs[1])
+		if !ok || s2 == 0 {
+			continue
+		}
+		var z2 int32
+		z2dt := tensor.U8
+		if len(q.Inputs) > 2 {
+			z2, z2dt, ok = intZP(q.Inputs[2])
+			if !ok {
+				continue
+			}
+		}
+		if z2dt != yzdt || q.Outputs[0].DType != n.Outputs[0].DType {
+			continue
+		}
+		newScale := float64(s2) / a
+		newZP := math.RoundToEven(b/float64(s2)) + float64(z2)
+		lo, hi := 0.0, 255.0
+		if z2dt == tensor.I8 {
+			lo, hi = -128, 127
+		}
+		if newScale <= 0 || newZP < lo || newZP > hi || newZP != math.Trunc(newZP) && math.Abs(newZP-math.RoundToEven(newZP)) > 1e-3 {
+			continue
+		}
+		// Rewire: conv writes q's output directly with adjusted (scale, zp).
+		st := tensor.New(tensor.F32)
+		st.F32()[0] = float32(newScale)
+		sv := newConst(g, q.Outputs[0].Name+"_fold_scale", st)
+		zv := newConst(g, q.Outputs[0].Name+"_fold_zp", zpTensor(z2dt, int32(math.RoundToEven(newZP))))
+		removeConsumer(n.Inputs[6], n)
+		removeConsumer(n.Inputs[7], n)
+		n.Inputs[6], n.Inputs[7] = sv, zv
+		sv.Consumers = append(sv.Consumers, n)
+		zv.Consumers = append(zv.Consumers, n)
+		out := q.Outputs[0]
+		mid := n.Outputs[0]
+		for _, cn := range chain[:len(chain)-1] {
+			dead[cn] = true
+		}
+		removeConsumer(mid, dq)
+		for _, cn := range chain {
+			if cn != q {
+				g.dropNode(cn)
+			}
+		}
+		g.dropNode(q)
+		g.Values[out.Name] = out
+		out.Producer = n
+		n.Outputs[0] = out
+		delete(g.Values, mid.Name)
+		dead[q] = true
+		stats["fold-qdq-affine"]++
+		changed = true
+	}
+	g.compact(dead)
+	return changed
+}
+
+// fuseQLUT collapses DequantizeLinear → (scalar elementwise chain) →
+// QuantizeLinear (u8 in, u8 out, per-tensor scales) into a single
+// ingot.QLut node: the whole island is a pure function of one byte, so it
+// is exactly representable as a 256-entry table built at optimize time.
+func fuseQLUT(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	for _, n := range g.Nodes {
+		if dead[n] || n.OpType != "DequantizeLinear" || n.Domain != "" {
+			continue
+		}
+		if n.Inputs[0] == nil {
+			continue
+		}
+		s1, ok := scalarConst(n.Inputs[1])
+		if !ok {
+			continue
+		}
+		// x dtype comes from the zero point (the spec ties them); intermediate
+		// Value.DType is not populated at optimize time.
+		if len(n.Inputs) < 3 || n.Inputs[2] == nil {
+			continue
+		}
+		z1, z1dt, okz := intZP(n.Inputs[2])
+		if !okz || z1dt != tensor.U8 {
+			continue
+		}
+		// Collect the elementwise chain as a composed float function.
+		type stage struct {
+			op    string
+			c     float64
+			right bool
+			lo,
+			hi float64
+			alpha, beta float64
+		}
+		var stages []stage
+		chain := []*Node{}
+		cur := n.Outputs[0]
+		var q *Node
+		for {
+			u := g.soleConsumer(cur)
+			if u == nil || dead[u] {
+				break
+			}
+			if u.OpType == "QuantizeLinear" && u.Domain == "" {
+				q = u
+				break
+			}
+			st := stage{op: u.OpType}
+			switch {
+			case u.Domain == "" && (u.OpType == "Mul" || u.OpType == "Add" || u.OpType == "Sub" || u.OpType == "Div"):
+				x, c, right, ok := binaryWithConst(u)
+				if !ok || x != cur {
+					u = nil
+				} else {
+					st.c, st.right = float64(c), right
+				}
+			case u.Domain == "" && u.OpType == "Clip":
+				lo, hi, ok := clipBounds(g, u)
+				if !ok || u.Inputs[0] != cur {
+					u = nil
+				} else {
+					st.lo, st.hi = float64(lo), float64(hi)
+				}
+			case u.Domain == "" && u.OpType == "Relu":
+			case u.Domain == "" && u.OpType == "Sigmoid":
+			case u.OpType == "HardSwish" && (u.Domain == "" || u.Domain == ingotDomain):
+				st.op = "HardSwish"
+			case u.Domain == "" && u.OpType == "HardSigmoid":
+				st.alpha = float64(u.Attrs.Float("alpha", 0.2))
+				st.beta = float64(u.Attrs.Float("beta", 0.5))
+			default:
+				u = nil
+			}
+			if u == nil || len(u.Outputs) != 1 || u.Outputs[0] == nil {
+				break
+			}
+			stages = append(stages, st)
+			chain = append(chain, u)
+			cur = u.Outputs[0]
+		}
+		if q == nil || len(chain) == 0 {
+			continue
+		}
+		s2, ok := scalarConst(q.Inputs[1])
+		if !ok || s2 <= 0 {
+			continue
+		}
+		if len(q.Inputs) < 3 || q.Inputs[2] == nil {
+			continue // need the zp to know the output dtype
+		}
+		z2, z2dt, okz2 := intZP(q.Inputs[2])
+		if !okz2 || z2dt != tensor.U8 {
+			continue
+		}
+		// Build the table.
+		tb := tensor.New(tensor.U8, 256)
+		lut := tb.U8()
+		for v := 0; v < 256; v++ {
+			f := float64(s1) * float64(int32(v)-z1)
+			for _, st := range stages {
+				switch st.op {
+				case "Mul":
+					f *= st.c
+				case "Add":
+					f += st.c
+				case "Sub":
+					if st.right {
+						f -= st.c
+					} else {
+						f = st.c - f
+					}
+				case "Div":
+					if st.right {
+						f /= st.c
+					} else if f != 0 {
+						f = st.c / f
+					}
+				case "Clip":
+					f = math.Min(math.Max(f, st.lo), st.hi)
+				case "Relu":
+					f = math.Max(f, 0)
+				case "Sigmoid":
+					f = 1 / (1 + math.Exp(-f))
+				case "HardSwish":
+					f = f * math.Min(math.Max(f+3, 0), 6) / 6
+				case "HardSigmoid":
+					f = math.Min(math.Max(st.alpha*f+st.beta, 0), 1)
+				}
+			}
+			qv := math.RoundToEven(f/float64(s2)) + float64(z2)
+			lut[v] = uint8(math.Min(math.Max(qv, 0), 255))
+		}
+		// Rewire: mutate the DQ node in place (its position is trivially
+		// topological) into QLut(x, table) producing q's output.
+		out := q.Outputs[0]
+		x := n.Inputs[0]
+		mid := n.Outputs[0]
+		tv := newConst(g, out.Name+"_lut", tb)
+		for _, v := range n.Inputs[1:] {
+			if v != nil {
+				removeConsumer(v, n)
+				if v.Const != nil && len(v.Consumers) == 0 && !g.isOutput(v) {
+					delete(g.Values, v.Name)
+				}
+			}
+		}
+		removeConsumer(mid, chain[0])
+		for _, cn := range chain {
+			dead[cn] = true
+			g.dropNode(cn)
+		}
+		dead[q] = true
+		g.dropNode(q)
+		delete(g.Values, mid.Name)
+		g.Values[out.Name] = out
+		n.OpType, n.Domain = "QLut", ingotDomain
+		g.Opsets[ingotDomain] = 1
+		n.Attrs = nil
+		n.Inputs = []*Value{x, tv}
+		tv.Consumers = append(tv.Consumers, n)
+		n.Outputs = []*Value{out}
+		out.Producer = n
+		stats["fuse-qlut"]++
+		changed = true
+	}
+	g.compact(dead)
 	return changed
 }
