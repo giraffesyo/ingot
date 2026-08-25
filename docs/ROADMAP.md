@@ -78,9 +78,11 @@
       fuse-qlut/TBL) + pooled Run outputs w/ Session.Release — det_int8
       6.2 ms MT (2.2× faster than ORT-int8, 1.3× faster than our f32),
       1T 38.2 vs ORT 36
-- [ ] int8 next: per-channel islands (BatchNorm), ConvTranspose/Resize in the
-      det head, shift-in-pack fusion; SDOT mid-tier (non-I8MM arm64),
-      amd64 VNNI; bf16
+- [x] det-head tail: vek.Zip2 (2× Resize 1.84→0.75 ms, s2k2 ConvTranspose
+      3.27→2.55), per-channel QLut (BatchNorm islands), fuse-layernorm
+      (5 sites in rec) — det_int8 1T ≈ ORT-int8 parity
+- [ ] int8 next: shift-in-pack fusion, SE-path islands; SDOT mid-tier
+      (non-I8MM arm64), amd64 VNNI; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
