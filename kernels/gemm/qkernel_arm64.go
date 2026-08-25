@@ -50,3 +50,6 @@ func qkernelU8S8SDOT(kg int64, ap *uint8, bp *int8, ct *int32)
 
 //go:noescape
 func qkernelS8S8SDOT(kg int64, ap *int8, bp *int8, ct *int32)
+
+//go:noescape
+func bkernelBF16(kg int64, ap *uint16, bp *uint16, ct *float32)
