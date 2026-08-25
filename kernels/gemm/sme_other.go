@@ -18,3 +18,9 @@ func smeSgemmPacked(pa *sme.PackedA, n int, b []float32, ldb int, c []float32, l
 
 // PrefersSME reports whether the SME unit would take this GEMM (never here).
 func PrefersSME(m, n, k int) bool { return false }
+
+func qsmeEligible(m, k int) bool { return false }
+
+func qsmePackA(m, k int, a []int8, lda int) *sme.QPackedA { return nil }
+
+func qsmeGemm(pa *sme.QPackedA, n int, b []int8, ldb int, c []int32, ldc int, parallel bool) {}

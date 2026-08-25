@@ -2,6 +2,7 @@ package gemm
 
 import (
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/sme"
 )
 
 // Quantized GEMM: C_s32 = A_u8 · B_s8 (raw dot products — zero-point
@@ -122,7 +123,8 @@ func QgemmRef(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ldc
 // QPackedA is s8 weights W[m×k] pre-packed for the SMMLA kernel.
 type QPackedA struct {
 	m, k int
-	data []int8 // [panel][k-group][8 rows × 8 bytes]
+	data []int8        // [panel][k-group][8 rows × 8 bytes]
+	sme  *sme.QPackedA // additionally packed for the SME kernel (nil unless enabled+eligible)
 }
 
 // Rows and Cols return the logical dimensions.
@@ -134,6 +136,9 @@ func QPackA(m, k int, a []int8, lda int) *QPackedA {
 	kg := (k + qKG - 1) / qKG
 	mp := (m + qMR - 1) / qMR
 	p := &QPackedA{m: m, k: k, data: make([]int8, mp*kg*qMR*qKG)}
+	if qsmeEligible(m, k) {
+		p.sme = qsmePackA(m, k, a, lda)
+	}
 	for ip := 0; ip < mp; ip++ {
 		i0 := ip * qMR
 		rows := min(qMR, m-i0)
@@ -153,6 +158,10 @@ func QPackA(m, k int, a []int8, lda int) *QPackedA {
 func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, parallel bool) {
 	m, k := pa.m, pa.k
 	if m == 0 || n == 0 {
+		return
+	}
+	if pa.sme != nil && n >= 128 {
+		qsmeGemm(pa.sme, n, b, ldb, c, ldc, parallel)
 		return
 	}
 	if k == 0 {
