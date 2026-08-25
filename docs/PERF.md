@@ -874,3 +874,51 @@ the qgemm work buffers were allocated per chunked call (now sync.Pool) —
 but QLinearConv still dominates (~80%) and needs the driver maturation the
 f32 conv got (fewer, larger GEMM calls; fused shift-in-pack; Q/DQ island
 elision). Deferred to a quiet-machine round with the profile as the map.
+
+
+## Quantized PP-OCR, part 2 — the driver catches up (2026-08-24)
+
+Quiet-window round on the part-1 profile. Baselines at round start:
+det_int8_640 36.0 ms MT / 109 1T, rec_int8_320 14.6 MT / 17.1 1T
+(ORT int8: det 14.2 / 36, rec 4.0 / 9.3; our f32: det ~10 MT / 50 1T).
+
+Three fixes, in profile order:
+
+1. **A mutex in the requant inner loop.** `qconvRun.corr(m)` called
+   `sumWFor(...)` — which takes the weight-cache mutex — per output
+   channel per chunk. Tens of thousands of contended acquisitions per
+   conv; `internal/sync.(*Mutex).lockSlow` was 15.7% flat and the real
+   damage was the park/wake churn around it (60% cum). Fix: resolve
+   `sumW` once into the per-Run struct; `corr` is now two loads.
+   **MT: det 36.0 → 14.7, rec 14.6 → 4.7.** 1T unmoved — no contention
+   with one thread; the same profile showed where 1T actually went:
+2. **`runtime.madvise` 23% at 1T**: the depthwise path `make`d ~15 MB of
+   int16 scratch per conv Run (workers × padded plane). Added an `I16`
+   dtype to `tensor` and the scratch now comes from the arena like every
+   other buffer. Plus a contiguous fast path in `qim2colRows` (sw==1
+   windows are one clipped copy, same as the f32 im2col).
+   **1T: det 109 → 87.**
+3. **The B-pack was 40% of 1T det** (QgemmPackedS8.func1 — the group-major
+   scalar interleave, ~29% flat vs the MMLA kernel's 9.6%). New
+   `qpackb` NEON kernel: an 8×12 byte transpose in three zip rounds
+   (zip1/zip2 .16b→.8h→.4s, clang-verified WORDs); after round 3 each
+   register holds two complete output columns, so v20–v25 store as the
+   96-byte group verbatim. Baseline NEON (no I8MM), shared by both qgemm
+   drivers via `qpackBPanel`; scalar keeps edges and !arm64.
+   **1T: det 87 → 63, rec 18.6 → 16.9.**
+
+End of round (load ~4, count=3):
+
+| bench | MT before → after | 1T before → after | ORT int8 MT / 1T |
+|---|---|---|---|
+| det_int8_640 | 36.0 → **11.8 ms** | 109 → **63** | 14.2 / 36 |
+| rec_int8_320 | 14.6 → **4.4 ms** | 17.1 → **16.9** | 4.0 / 9.3 |
+
+det int8 MT is now **1.2× faster than ORT int8**; rec MT within 10%. The
+1T gap (1.7–1.8×) is the next map: after these fixes the profile is
+kernel + requant + shift — i.e. real work — so the remaining levers are
+fusing the u8→s8 shift into the A-pack, Q/DQ island elision between
+adjacent int8 convs, and SME int8 engagement on the shapes that qualify.
+int8 still doesn't beat our own f32 MT on this machine (11.8 vs ~10 — f32
+has Winograd and wider SIMD maturity); the int8 payoff stays biggest on
+1T/SME and will matter on VNNI-class amd64.

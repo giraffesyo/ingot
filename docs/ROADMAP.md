@@ -68,8 +68,11 @@
       auto-1T dispatch via gemm.QPackedA
 - [x] quantized PP-OCR part 1: exporter + GT-crop calibration (rec 0.33→0.90
       exact — calibration is everything), ORT parity (det 0.0078), corpus knobs
-- [ ] quantized PP-OCR part 2: QLinearConv driver maturation (model-level int8
-      still slower than f32/ORT-int8); SDOT mid-tier, amd64 VNNI; bf16
+- [x] quantized PP-OCR part 2: QLinearConv driver maturation — lock-free corr,
+      pooled I16 depthwise scratch, memcpy qim2col, NEON zip-transpose B-pack
+      (det_int8 MT 36→11.8 ms, beats ORT-int8 14.2; 1T 109→63 vs ORT 36)
+- [ ] quantized PP-OCR part 3: close the int8 1T gap (shift-in-pack fusion,
+      Q/DQ island elision); SDOT mid-tier, amd64 VNNI; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
