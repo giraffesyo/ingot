@@ -362,3 +362,12 @@ func Zip2(dst, a, b []float32, c float32) {
 		dst[2*i+1] = b[i] + c
 	}
 }
+
+// DotBF16 computes Σ a[i]·widen(b[i]) for bf16 weights b (bits<<16).
+func DotBF16(a []float32, b []uint16) float32 {
+	var s float32
+	for i := 0; i < min(len(a), len(b)); i++ {
+		s += a[i] * math.Float32frombits(uint32(b[i])<<16)
+	}
+	return s
+}

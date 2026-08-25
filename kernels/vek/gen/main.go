@@ -278,6 +278,7 @@ func main() {
 
 	g.axpy()
 	g.dot()
+	g.dotBF16()
 	g.quantKernels()
 
 	// erf: two vectors per iteration (register budget), see erfBody.
@@ -483,6 +484,41 @@ func (g *gen) dot() {
 	g.w("\tSUB $16, R3")
 	g.w("\tB loop16")
 	g.w("done:")
+	g.w("\tVST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)")
+	g.w("\tRET")
+	g.w("")
+}
+
+// dotBF16 emits func dotbf16_asm(a []float32, b []uint16, n int, out []float32):
+// out[0:16] = 16 partial sums of a[i]·widen(b[i]) — bf16 weights widened
+// in-register (shll #16), so the weight-side load traffic halves. The FMLA
+// count matches dot_asm; the win is pure bandwidth. n multiple of 16.
+func (g *gen) dotBF16() {
+	g.w("// func dotbf16_asm(a []float32, b []uint16, n int, out []float32)")
+	g.w("TEXT ·dotbf16_asm(SB), NOSPLIT, $0-80")
+	g.w("\tMOVD a_base+0(FP), R0")
+	g.w("\tMOVD b_base+24(FP), R1")
+	g.w("\tMOVD n+48(FP), R3")
+	g.w("\tMOVD out_base+56(FP), R2")
+	for i := 16; i < 20; i++ {
+		g.movi0(i)
+	}
+	g.w("dotbf16_loop:")
+	g.w("\tCMP $16, R3")
+	g.w("\tBLT dotbf16_done")
+	g.w("\tVLD1.P 64(R0), [V0.S4, V1.S4, V2.S4, V3.S4]")
+	g.w("\tVLD1.P 32(R1), [V4.H8, V5.H8]")
+	g.w("\tWORD $0x2E613886 // shll  v6.4s, v4.4h, #16")
+	g.w("\tWORD $0x6E613887 // shll2 v7.4s, v4.8h, #16")
+	g.w("\tWORD $0x%08X // fmla v16 += v0*v6", fmla(16, 0, 6))
+	g.w("\tWORD $0x%08X // fmla v17 += v1*v7", fmla(17, 1, 7))
+	g.w("\tWORD $0x2E6138A6 // shll  v6.4s, v5.4h, #16")
+	g.w("\tWORD $0x6E6138A7 // shll2 v7.4s, v5.8h, #16")
+	g.w("\tWORD $0x%08X // fmla v18 += v2*v6", fmla(18, 2, 6))
+	g.w("\tWORD $0x%08X // fmla v19 += v3*v7", fmla(19, 3, 7))
+	g.w("\tSUB $16, R3")
+	g.w("\tB dotbf16_loop")
+	g.w("dotbf16_done:")
 	g.w("\tVST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)")
 	g.w("\tRET")
 	g.w("")

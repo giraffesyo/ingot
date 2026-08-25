@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 )
 
 // bf16 GEMM: bf16 storage, exact f32 products (8-bit mantissas), f32
@@ -156,4 +157,22 @@ func bscatterTile(ct []float32, c []float32, ldc, rows, cols int) {
 			dst[j] = ct[(bi*6+j>>1)*4+lr+j&1]
 		}
 	}
+}
+
+// BConvert converts f32 weights to bf16 bits (round-to-nearest-even) — the
+// one-time pack step for bf16 weight storage.
+func BConvert(dst []uint16, src []float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		dst[i] = F32ToBF16(src[i])
+	}
+}
+
+// GemvBF16 computes y[n] = W·x for bf16 weights W (n×k row-major bits,
+// leading dim ldw) and f32 x — the bandwidth-bound m=1 decode shape, where
+// bf16 storage halves the weight traffic that is the entire cost.
+func GemvBF16(y []float32, w []uint16, ldw int, x []float32, n, k int) {
+	grain := max(1, minTaskMACs/max(k, 1))
+	par.For(n, grain, func(j, _ int) {
+		y[j] = vek.DotBF16(x[:k], w[j*ldw:j*ldw+k])
+	})
 }

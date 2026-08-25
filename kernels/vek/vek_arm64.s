@@ -1018,6 +1018,35 @@ done:
 	VST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)
 	RET
 
+// func dotbf16_asm(a []float32, b []uint16, n int, out []float32)
+TEXT ·dotbf16_asm(SB), NOSPLIT, $0-80
+	MOVD a_base+0(FP), R0
+	MOVD b_base+24(FP), R1
+	MOVD n+48(FP), R3
+	MOVD out_base+56(FP), R2
+	WORD $0x4F000410 // movi v16.4s, #0
+	WORD $0x4F000411 // movi v17.4s, #0
+	WORD $0x4F000412 // movi v18.4s, #0
+	WORD $0x4F000413 // movi v19.4s, #0
+dotbf16_loop:
+	CMP $16, R3
+	BLT dotbf16_done
+	VLD1.P 64(R0), [V0.S4, V1.S4, V2.S4, V3.S4]
+	VLD1.P 32(R1), [V4.H8, V5.H8]
+	WORD $0x2E613886 // shll  v6.4s, v4.4h, #16
+	WORD $0x6E613887 // shll2 v7.4s, v4.8h, #16
+	WORD $0x4E26CC10 // fmla v16 += v0*v6
+	WORD $0x4E27CC31 // fmla v17 += v1*v7
+	WORD $0x2E6138A6 // shll  v6.4s, v5.4h, #16
+	WORD $0x6E6138A7 // shll2 v7.4s, v5.8h, #16
+	WORD $0x4E26CC52 // fmla v18 += v2*v6
+	WORD $0x4E27CC73 // fmla v19 += v3*v7
+	SUB $16, R3
+	B dotbf16_loop
+dotbf16_done:
+	VST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)
+	RET
+
 // func quantu8_asm(dst, src, n, scale, zp) — see quantKernels.
 TEXT ·quantu8_asm(SB), NOSPLIT, $0-64
 	MOVD dst_base+0(FP), R0
