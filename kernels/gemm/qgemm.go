@@ -98,6 +98,12 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 // layout: reg bi*6+bj, lane l is row 2bi+l/2, col 2bj+l%2) into row-major C.
 // Full tiles take the NEON uzp kernel; edge tiles scatter scalar.
 func qscatterTile(ct []int32, c []int32, ldc, rows, cols int) {
+	if qctRowMajor {
+		for r := 0; r < rows; r++ {
+			copy(c[r*ldc:r*ldc+cols], ct[r*qNR:r*qNR+cols])
+		}
+		return
+	}
 	if hasQpackAsm && rows == qMR && cols == qNR {
 		qscatter(&ct[0], &c[0], int64(ldc))
 		return
@@ -117,6 +123,25 @@ func qscatterTile(ct []int32, c []int32, ldc, rows, cols int) {
 // Full panels take the NEON zip-transpose kernel (it loads 16 bytes per row, so
 // it needs j0+16 <= ldb and whole k-groups); edges fall back to the scalar loop.
 func qpackBPanel(bp []int8, b []int8, ldb, k, kg, j0, cols int) {
+	if qpackQuad {
+		// amd64 VNNI layout: [g][q(2)][j(12)][4] bytes.
+		if cols < qNR || k%qKG != 0 {
+			clear(bp[:kg*qNR*qKG])
+		}
+		for g := 0; g < kg; g++ {
+			q0 := g * qKG
+			ko := min(qKG, k-q0)
+			dst := bp[g*qNR*qKG:]
+			for o := 0; o < ko; o++ {
+				src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
+				d := dst[(o>>2)*qNR*4+o&3:]
+				for j, v := range src {
+					d[j*4] = v
+				}
+			}
+		}
+		return
+	}
 	if hasQpackAsm && cols == qNR && k%qKG == 0 && j0+16 <= ldb {
 		qpackb(&bp[0], &b[j0], int64(ldb), int64(kg))
 		return
@@ -199,8 +224,10 @@ var qworkPool = sync.Pool{New: func() any { return &qwork{} }}
 
 func getQwork(need int) *qwork {
 	w := qworkPool.Get().(*qwork)
-	if cap(w.bp) < need {
-		w.bp = make([]int8, need)
+	// +16: the VNNI kernel's 64-byte loads read 16 bytes past each 48-byte
+	// B quad; the slack keeps the final load in-bounds.
+	if cap(w.bp) < need+16 {
+		w.bp = make([]int8, need+16)
 	}
 	w.bp = w.bp[:need]
 	return w

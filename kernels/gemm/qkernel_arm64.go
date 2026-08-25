@@ -8,6 +8,12 @@ import "golang.org/x/sys/cpu"
 // Apple M1 and Graviton2-class cores have only dot products — they take the
 // portable kernel until an SDOT mid-tier lands (int8 phase 2). Detection via
 // x/sys/cpu (hwcap on linux, sysctl on darwin).
+// arm64 keeps the MMLA layouts: group-major B, 2×2-block C.
+var (
+	qpackQuad   = false
+	qctRowMajor = false
+)
+
 var (
 	qkernel = func() func(int64, *uint8, *int8, *int32) {
 		if cpu.ARM64.HasI8MM {

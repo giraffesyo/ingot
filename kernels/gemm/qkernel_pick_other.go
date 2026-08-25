@@ -1,9 +1,11 @@
-//go:build !arm64
+//go:build !arm64 && !amd64
 
 package gemm
 
-// qkernel / qkernelS8: portable fallbacks (amd64 VNNI kernels are TODO).
+// qkernel / qkernelS8: portable fallbacks.
 var (
-	qkernel   = qkernelGeneric
-	qkernelS8 = qkernelS8Generic
+	qkernel     = qkernelGeneric
+	qkernelS8   = qkernelS8Generic
+	qpackQuad   = false
+	qctRowMajor = false
 )
