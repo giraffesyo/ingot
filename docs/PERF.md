@@ -1100,3 +1100,33 @@ The dot-product tier lands within ~10% of I8MM — on the machines that
 have both. On actual M1/Graviton2 it replaces the portable kernel, a
 ~50× class jump. CI's macos runner is an M1: this tier is now its
 default path through the whole conformance suite.
+
+
+## Quantized depthwise goes SIMD — int8 sweeps the board (2026-08-25)
+
+After the island rounds, the profile said the quantized depthwise WRAPPER
+was 26.6% of det_int8 1T while the SMLAL row kernel it wraps barely
+registered. Four fixes, all driver-side:
+
+- **vek.WidenS8S16** (SSHLL): the s8→s16 plane widen was a scalar Go loop —
+  the single largest flat item in the whole profile.
+- **vek.DeinterleaveS16** (UZP .8h): the stride-2 even/odd split, ditto.
+- **corr through the requant kernel** instead of a scalar acc-fill per
+  output row (the parameter existed since the sumW round; acc init is now
+  a plain clear()).
+- **Overlapped-window tail**: OW=20 deep layers ran 25-tap scalar work on
+  4 of every 20 columns (~7% of det 1T). QDwRowS1 now re-runs the kernel
+  on the last 8-column window into zeroed scratch and adds only the fresh
+  lanes — accumulate-safe, no kernel change.
+
+| bench | MT | 1T | ORT int8 MT / 1T |
+|---|---|---|---|
+| det_int8_640 | 6.2 ms | **31.2** | 14.2 / 36 |
+| rec_int8_320 | **2.9 ms** | 9.7 | 4.0 / 9.3 |
+
+**det_int8 1T is now faster than ORT-int8** — the last ORT lead on this
+hardware is rec 1T at 1.04×, i.e. parity. rec_int8 MT (2.9) also dips
+under our own f32 rec. Cumulative int8 arc: det 36→6.2 MT (5.8×),
+109→31.2 1T (3.5×). Both models are ~78% QLinearConv now; what's left is
+kernel-level (SME shapes at 1T, fused epilogues) and the f32 tails
+(ConvTranspose GEMM, rec attention).

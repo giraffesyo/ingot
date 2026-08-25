@@ -87,7 +87,10 @@
 - [x] SDOT mid-tier (Apple M1 / Graviton2): 8×12 SDOT-by-element kernels on
       the VNNI layouts + qpackbq quad-pack — within ~10% of the MMLA tier
       (sq512 1448 vs 1410 GOPS 1T same-run)
-- [ ] int8 next: shift-in-pack fusion, SE-path islands; bf16
+- [x] quantized depthwise driver SIMD (WidenS8S16, DeinterleaveS16, corr-in-
+      requant, overlapped tail) — det_int8 1T 37.5→31.2 ms, faster than
+      ORT-int8 (36) on every remaining metric except rec 1T parity
+- [ ] int8 next: SE-path islands (small), fused epilogues; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
