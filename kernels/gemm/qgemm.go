@@ -66,13 +66,19 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 		bp := wb.bp
 		j0 := jp * qNR
 		cols := min(qNR, n-j0)
-		clear(bp)
-		for p := 0; p < k; p++ {
-			g, o := p/qKG, p%qKG
-			src := b[p*ldb+j0:]
+		if cols < qNR || k%qKG != 0 {
+			clear(bp)
+		}
+		for g := 0; g < kg; g++ {
+			q0 := g * qKG
+			ko := min(qKG, k-q0)
 			dst := bp[g*qNR*qKG:]
-			for j := 0; j < cols; j++ {
-				dst[j*qKG+o] = src[j]
+			for o := 0; o < ko; o++ {
+				src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
+				d := dst[o:]
+				for j, v := range src {
+					d[j*qKG] = v
+				}
 			}
 		}
 		for ip := 0; ip < mp; ip++ {
@@ -171,13 +177,19 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 		bp := wb.bp
 		j0 := jp * qNR
 		cols := min(qNR, n-j0)
-		clear(bp)
-		for q := 0; q < k; q++ {
-			g, o := q/qKG, q%qKG
-			src := b[q*ldb+j0:]
+		if cols < qNR || k%qKG != 0 {
+			clear(bp)
+		}
+		for g := 0; g < kg; g++ {
+			q0 := g * qKG
+			ko := min(qKG, k-q0)
 			dst := bp[g*qNR*qKG:]
-			for j := 0; j < cols; j++ {
-				dst[j*qKG+o] = src[j]
+			for o := 0; o < ko; o++ {
+				src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
+				d := dst[o:]
+				for j, v := range src {
+					d[j*qKG] = v
+				}
 			}
 		}
 		for ip := 0; ip < mp; ip++ {
@@ -194,7 +206,7 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 			}
 		}
 	}
-	if !parallel || np == 1 {
+	if !parallel || np == 1 || m*n*k < 4*minTaskMACs {
 		for jp := 0; jp < np; jp++ {
 			task(jp, 0)
 		}

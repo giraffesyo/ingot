@@ -323,6 +323,7 @@ type qlinearConvOp struct {
 	packMu  sync.Mutex
 	packed  []*gemm.QPackedA
 	sumW    []int32 // ΣW per output channel
+	dwW16   []int16 // depthwise: s16 taps per channel, padded to 8
 	packSrc *int8
 }
 
@@ -463,65 +464,144 @@ func (q *qconvRun) dstRow(m, n, off, ln int) ([]uint8, []int8) {
 }
 
 // depthwise: one channel per task — pad the plane with the shifted zero
-// point, accumulate the taps in int32, requantize in-cache. Covers any
-// kernel/stride/dilation.
+// point, widen it to s16 once, accumulate the taps into corr-prefilled s32
+// rows (vek.QDwRowS1 for the 3×3/5×5 stride-1/2 dilation-1 shapes, with the
+// stride-2 even/odd column de-interleave from the f32 path; scalar taps
+// otherwise), and requantize each row in-cache.
 func (q *qconvRun) depthwise() {
 	sh, sw := q.o.conv.strides[0], q.o.conv.strides[1]
 	dh, dw := q.o.conv.dilations[0], q.o.conv.dilations[1]
 	pt, pl, pb, pr := q.pads[0], q.pads[1], q.pads[2], q.pads[3]
 	Hp, Wp := q.H+pt+pb, q.W+pl+pr
+	Wh := (Wp + 1) / 2
+	fast1 := sh == 1 && sw == 1 && dh == 1 && dw == 1 && q.KH == q.KW && (q.KH == 3 || q.KH == 5)
+	fast2 := sh == 2 && sw == 2 && dh == 1 && dw == 1 && q.KH == q.KW && (q.KH == 3 || q.KH == 5)
+	taps := q.KH * q.KW
+	pad8 := (taps + 7) / 8 * 8
+	var w16 []int16
+	if fast1 || fast2 {
+		w16 = q.o.dw16For(q.wf, q.C, taps)
+	}
+	// per-worker scratch: s16 padded plane + optional even/odd halves. One
+	// allocation per Run (no i16 pool dtype); amortised across all channels.
+	per := Hp*Wp + 2*Hp*Wh
 	workers := par.Workers()
-	scratch := q.ctx.NewUninit(tensor.I8, workers, Hp*Wp)
-	sf := scratch.I8()
+	s16All := make([]int16, workers*per)
 	accT := q.ctx.NewUninit(tensor.I32, workers, q.OW)
 	accF := accT.I32()
-	pv := int8(q.zx)
+	// stride-2 sub-kernel weights (even/odd column taps), built per call: tiny.
+	var wEO []int16
+	KE, KO := (q.KW+1)/2, q.KW/2
+	padE, padO := (q.KH*KE+7)/8*8, (q.KH*KO+7)/8*8
+	if fast2 {
+		wEO = make([]int16, q.C*(padE+padO))
+		for c := 0; c < q.C; c++ {
+			for kh := 0; kh < q.KH; kh++ {
+				for kw := 0; kw < q.KW; kw++ {
+					v := w16[c*pad8+kh*q.KW+kw]
+					if kw%2 == 0 {
+						wEO[c*(padE+padO)+kh*KE+kw/2] = v
+					} else {
+						wEO[c*(padE+padO)+padE+kh*KO+kw/2] = v
+					}
+				}
+			}
+		}
+	}
+	pv := int16(q.zx)
 	par.For(q.N*q.C, 1, func(nc, wk int) {
 		n, c := nc/q.C, nc%q.C
 		xc := q.xf[nc*q.H*q.W:]
-		pad := sf[wk*Hp*Wp : (wk+1)*Hp*Wp]
-		for i := range pad[:pt*Wp] {
-			pad[i] = pv
+		s16 := s16All[wk*per : (wk+1)*per]
+		plane := s16[:Hp*Wp]
+		// pad + widen in one pass
+		for i := range plane[:pt*Wp] {
+			plane[i] = pv
 		}
-		for i := (pt + q.H) * Wp; i < len(pad); i++ {
-			pad[i] = pv
+		for i := (pt + q.H) * Wp; i < len(plane); i++ {
+			plane[i] = pv
 		}
 		for r := 0; r < q.H; r++ {
-			row := pad[(pt+r)*Wp : (pt+r+1)*Wp]
+			row := plane[(pt+r)*Wp : (pt+r+1)*Wp]
 			for i := 0; i < pl; i++ {
 				row[i] = pv
 			}
-			copy(row[pl:pl+q.W], xc[r*q.W:(r+1)*q.W])
+			src := xc[r*q.W : (r+1)*q.W]
+			for i, v := range src {
+				row[pl+i] = int16(v)
+			}
 			for i := pl + q.W; i < Wp; i++ {
 				row[i] = pv
 			}
 		}
-		w := q.wf[c*q.KH*q.KW:]
 		corr := q.corr(c)
 		mult := q.mult[c]
 		acc := accF[wk*q.OW : (wk+1)*q.OW]
-		for oh := 0; oh < q.OH; oh++ {
-			clear(acc)
-			for kh := 0; kh < q.KH; kh++ {
-				src := pad[(oh*sh+kh*dh)*Wp:]
-				for kw := 0; kw < q.KW; kw++ {
-					wv := int32(w[kh*q.KW+kw])
-					if wv == 0 {
-						continue
-					}
-					s := src[kw*dw:]
-					for ow := 0; ow < q.OW; ow++ {
-						acc[ow] += wv * int32(s[ow*sw])
-					}
+		fill := func() {
+			for i := range acc {
+				acc[i] = corr
+			}
+		}
+		switch {
+		case fast1:
+			wp := w16[c*pad8 : c*pad8+pad8]
+			for oh := 0; oh < q.OH; oh++ {
+				fill()
+				vek.QDwRowS1(acc, plane[oh*Wp:], wp, q.OW, Wp, q.KH, q.KW)
+				d8, di := q.dstRow(c, n, oh*q.OW, q.OW)
+				q.requant(d8, di, acc, 0, mult)
+			}
+		case fast2:
+			// de-interleave columns into even/odd halves
+			ev := s16[Hp*Wp : Hp*Wp+Hp*Wh]
+			od := s16[Hp*Wp+Hp*Wh : Hp*Wp+2*Hp*Wh]
+			for r := 0; r < Hp; r++ {
+				prow := plane[r*Wp : (r+1)*Wp]
+				er := ev[r*Wh : (r+1)*Wh]
+				orow := od[r*Wh : (r+1)*Wh]
+				i := 0
+				for ; i+1 < Wp; i += 2 {
+					er[i/2] = prow[i]
+					orow[i/2] = prow[i+1]
+				}
+				if i < Wp {
+					er[i/2] = prow[i]
+					orow[i/2] = pv
 				}
 			}
-			d8, di := q.dstRow(c, n, oh*q.OW, q.OW)
-			q.requant(d8, di, acc, corr, mult)
+			we := wEO[c*(padE+padO) : c*(padE+padO)+padE]
+			wo := wEO[c*(padE+padO)+padE:]
+			for oh := 0; oh < q.OH; oh++ {
+				fill()
+				vek.QDwRowS1(acc, ev[2*oh*Wh:], we, q.OW, Wh, q.KH, KE)
+				vek.QDwRowS1(acc, od[2*oh*Wh:], wo, q.OW, Wh, q.KH, KO)
+				d8, di := q.dstRow(c, n, oh*q.OW, q.OW)
+				q.requant(d8, di, acc, 0, mult)
+			}
+		default:
+			w := q.wf[c*taps:]
+			for oh := 0; oh < q.OH; oh++ {
+				clear(acc)
+				for kh := 0; kh < q.KH; kh++ {
+					src := plane[(oh*sh+kh*dh)*Wp:]
+					for kw := 0; kw < q.KW; kw++ {
+						wv := int32(w[kh*q.KW+kw])
+						if wv == 0 {
+							continue
+						}
+						sr := src[kw*dw:]
+						for ow := 0; ow < q.OW; ow++ {
+							acc[ow] += wv * int32(sr[ow*sw])
+						}
+					}
+				}
+				d8, di := q.dstRow(c, n, oh*q.OW, q.OW)
+				q.requant(d8, di, acc, corr, mult)
+			}
 		}
 	})
 	if q.ctx.Pool != nil {
 		q.ctx.Pool.Put(accT)
-		q.ctx.Pool.Put(scratch)
 	}
 }
 
@@ -629,6 +709,27 @@ func (o *qlinearConvOp) weights(wf []int8, G, Mg, K, M int) []*gemm.QPackedA {
 	return o.packed
 }
 
+// dw16For returns the per-channel s16 taps (padded to 8) for the depthwise
+// row kernels, cached alongside ΣW/packed panels.
+func (o *qlinearConvOp) dw16For(wf []int8, C, taps int) []int16 {
+	o.packMu.Lock()
+	defer o.packMu.Unlock()
+	if o.packSrc != &wf[0] {
+		o.packed, o.sumW, o.dwW16, o.packSrc = nil, nil, nil, &wf[0]
+	}
+	if o.dwW16 == nil {
+		pad := (taps + 7) / 8 * 8
+		w16 := make([]int16, C*pad)
+		for c := 0; c < C; c++ {
+			for t := 0; t < taps; t++ {
+				w16[c*pad+t] = int16(wf[c*taps+t])
+			}
+		}
+		o.dwW16 = w16
+	}
+	return o.dwW16
+}
+
 func (o *qlinearConvOp) sumWFor(wf []int8, G, Mg, K, M int) []int32 {
 	o.packMu.Lock()
 	defer o.packMu.Unlock()
@@ -638,11 +739,11 @@ func (o *qlinearConvOp) sumWFor(wf []int8, G, Mg, K, M int) []int32 {
 
 // fill populates the cached ΣW (always) and packed panels (when needed).
 func (o *qlinearConvOp) fill(wf []int8, G, Mg, K, M int, needPack bool) {
-	if o.packSrc == &wf[0] && (!needPack || o.packed != nil) {
+	if o.packSrc == &wf[0] && o.sumW != nil && (!needPack || o.packed != nil) {
 		return
 	}
 	if o.packSrc != &wf[0] {
-		o.packed, o.sumW = nil, nil
+		o.packed, o.sumW, o.dwW16 = nil, nil, nil
 	}
 	if o.sumW == nil {
 		sumW := make([]int32, M)

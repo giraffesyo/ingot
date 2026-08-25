@@ -1886,3 +1886,419 @@ loop:
 done:
 	RET
 
+// func qdw3x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
+TEXT ·qdw3x3s1_asm(SB), NOSPLIT, $0-88
+	MOVD acc_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wp_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $1, R4, R4 // row stride in bytes (s16)
+	VLD1 (R2), [V12.H8, V13.H8]
+qdw3x3s1_loop:
+	CMP $8, R3
+	BLT qdw3x3s1_done
+	VLD1 (R0), [V0.S4, V1.S4] // acc[c..c+8)
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2040 // smlal  v0 += v2.lo * w0
+	WORD $0x4F4C2041 // smlal2 v1 += v2.hi * w0
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2040 // smlal  v0 += v2.lo * w1
+	WORD $0x4F5C2041 // smlal2 v1 += v2.hi * w1
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2040 // smlal  v0 += v2.lo * w2
+	WORD $0x4F6C2041 // smlal2 v1 += v2.hi * w2
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2040 // smlal  v0 += v2.lo * w3
+	WORD $0x4F7C2041 // smlal2 v1 += v2.hi * w3
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2840 // smlal  v0 += v2.lo * w4
+	WORD $0x4F4C2841 // smlal2 v1 += v2.hi * w4
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2840 // smlal  v0 += v2.lo * w5
+	WORD $0x4F5C2841 // smlal2 v1 += v2.hi * w5
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2840 // smlal  v0 += v2.lo * w6
+	WORD $0x4F6C2841 // smlal2 v1 += v2.hi * w6
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2840 // smlal  v0 += v2.lo * w7
+	WORD $0x4F7C2841 // smlal2 v1 += v2.hi * w7
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4D2040 // smlal  v0 += v2.lo * w8
+	WORD $0x4F4D2041 // smlal2 v1 += v2.hi * w8
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	ADD $16, R1, R1
+	SUB $8, R3, R3
+	B qdw3x3s1_loop
+qdw3x3s1_done:
+	RET
+
+// func qdw5x5s1_asm(acc []int32, src, wp []int16, ncols, W int)
+TEXT ·qdw5x5s1_asm(SB), NOSPLIT, $0-88
+	MOVD acc_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wp_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $1, R4, R4 // row stride in bytes (s16)
+	VLD1 (R2), [V12.H8, V13.H8, V14.H8, V15.H8]
+qdw5x5s1_loop:
+	CMP $8, R3
+	BLT qdw5x5s1_done
+	VLD1 (R0), [V0.S4, V1.S4] // acc[c..c+8)
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2040 // smlal  v0 += v2.lo * w0
+	WORD $0x4F4C2041 // smlal2 v1 += v2.hi * w0
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2040 // smlal  v0 += v2.lo * w1
+	WORD $0x4F5C2041 // smlal2 v1 += v2.hi * w1
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2040 // smlal  v0 += v2.lo * w2
+	WORD $0x4F6C2041 // smlal2 v1 += v2.hi * w2
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2040 // smlal  v0 += v2.lo * w3
+	WORD $0x4F7C2041 // smlal2 v1 += v2.hi * w3
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2840 // smlal  v0 += v2.lo * w4
+	WORD $0x4F4C2841 // smlal2 v1 += v2.hi * w4
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2840 // smlal  v0 += v2.lo * w5
+	WORD $0x4F5C2841 // smlal2 v1 += v2.hi * w5
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2840 // smlal  v0 += v2.lo * w6
+	WORD $0x4F6C2841 // smlal2 v1 += v2.hi * w6
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2840 // smlal  v0 += v2.lo * w7
+	WORD $0x4F7C2841 // smlal2 v1 += v2.hi * w7
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4D2040 // smlal  v0 += v2.lo * w8
+	WORD $0x4F4D2041 // smlal2 v1 += v2.hi * w8
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5D2040 // smlal  v0 += v2.lo * w9
+	WORD $0x4F5D2041 // smlal2 v1 += v2.hi * w9
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6D2040 // smlal  v0 += v2.lo * w10
+	WORD $0x4F6D2041 // smlal2 v1 += v2.hi * w10
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7D2040 // smlal  v0 += v2.lo * w11
+	WORD $0x4F7D2041 // smlal2 v1 += v2.hi * w11
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4D2840 // smlal  v0 += v2.lo * w12
+	WORD $0x4F4D2841 // smlal2 v1 += v2.hi * w12
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5D2840 // smlal  v0 += v2.lo * w13
+	WORD $0x4F5D2841 // smlal2 v1 += v2.hi * w13
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6D2840 // smlal  v0 += v2.lo * w14
+	WORD $0x4F6D2841 // smlal2 v1 += v2.hi * w14
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7D2840 // smlal  v0 += v2.lo * w15
+	WORD $0x4F7D2841 // smlal2 v1 += v2.hi * w15
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4E2040 // smlal  v0 += v2.lo * w16
+	WORD $0x4F4E2041 // smlal2 v1 += v2.hi * w16
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5E2040 // smlal  v0 += v2.lo * w17
+	WORD $0x4F5E2041 // smlal2 v1 += v2.hi * w17
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6E2040 // smlal  v0 += v2.lo * w18
+	WORD $0x4F6E2041 // smlal2 v1 += v2.hi * w18
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7E2040 // smlal  v0 += v2.lo * w19
+	WORD $0x4F7E2041 // smlal2 v1 += v2.hi * w19
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4E2840 // smlal  v0 += v2.lo * w20
+	WORD $0x4F4E2841 // smlal2 v1 += v2.hi * w20
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5E2840 // smlal  v0 += v2.lo * w21
+	WORD $0x4F5E2841 // smlal2 v1 += v2.hi * w21
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6E2840 // smlal  v0 += v2.lo * w22
+	WORD $0x4F6E2841 // smlal2 v1 += v2.hi * w22
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7E2840 // smlal  v0 += v2.lo * w23
+	WORD $0x4F7E2841 // smlal2 v1 += v2.hi * w23
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4F2040 // smlal  v0 += v2.lo * w24
+	WORD $0x4F4F2041 // smlal2 v1 += v2.hi * w24
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	ADD $16, R1, R1
+	SUB $8, R3, R3
+	B qdw5x5s1_loop
+qdw5x5s1_done:
+	RET
+
+// func qdw3x2s1_asm(acc []int32, src, wp []int16, ncols, W int)
+TEXT ·qdw3x2s1_asm(SB), NOSPLIT, $0-88
+	MOVD acc_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wp_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $1, R4, R4 // row stride in bytes (s16)
+	VLD1 (R2), [V12.H8]
+qdw3x2s1_loop:
+	CMP $8, R3
+	BLT qdw3x2s1_done
+	VLD1 (R0), [V0.S4, V1.S4] // acc[c..c+8)
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2040 // smlal  v0 += v2.lo * w0
+	WORD $0x4F4C2041 // smlal2 v1 += v2.hi * w0
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2040 // smlal  v0 += v2.lo * w1
+	WORD $0x4F5C2041 // smlal2 v1 += v2.hi * w1
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2040 // smlal  v0 += v2.lo * w2
+	WORD $0x4F6C2041 // smlal2 v1 += v2.hi * w2
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2040 // smlal  v0 += v2.lo * w3
+	WORD $0x4F7C2041 // smlal2 v1 += v2.hi * w3
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2840 // smlal  v0 += v2.lo * w4
+	WORD $0x4F4C2841 // smlal2 v1 += v2.hi * w4
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2840 // smlal  v0 += v2.lo * w5
+	WORD $0x4F5C2841 // smlal2 v1 += v2.hi * w5
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	ADD $16, R1, R1
+	SUB $8, R3, R3
+	B qdw3x2s1_loop
+qdw3x2s1_done:
+	RET
+
+// func qdw3x1s1_asm(acc []int32, src, wp []int16, ncols, W int)
+TEXT ·qdw3x1s1_asm(SB), NOSPLIT, $0-88
+	MOVD acc_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wp_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $1, R4, R4 // row stride in bytes (s16)
+	VLD1 (R2), [V12.H8]
+qdw3x1s1_loop:
+	CMP $8, R3
+	BLT qdw3x1s1_done
+	VLD1 (R0), [V0.S4, V1.S4] // acc[c..c+8)
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2040 // smlal  v0 += v2.lo * w0
+	WORD $0x4F4C2041 // smlal2 v1 += v2.hi * w0
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2040 // smlal  v0 += v2.lo * w1
+	WORD $0x4F5C2041 // smlal2 v1 += v2.hi * w1
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2040 // smlal  v0 += v2.lo * w2
+	WORD $0x4F6C2041 // smlal2 v1 += v2.hi * w2
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	ADD $16, R1, R1
+	SUB $8, R3, R3
+	B qdw3x1s1_loop
+qdw3x1s1_done:
+	RET
+
+// func qdw5x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
+TEXT ·qdw5x3s1_asm(SB), NOSPLIT, $0-88
+	MOVD acc_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wp_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $1, R4, R4 // row stride in bytes (s16)
+	VLD1 (R2), [V12.H8, V13.H8]
+qdw5x3s1_loop:
+	CMP $8, R3
+	BLT qdw5x3s1_done
+	VLD1 (R0), [V0.S4, V1.S4] // acc[c..c+8)
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2040 // smlal  v0 += v2.lo * w0
+	WORD $0x4F4C2041 // smlal2 v1 += v2.hi * w0
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2040 // smlal  v0 += v2.lo * w1
+	WORD $0x4F5C2041 // smlal2 v1 += v2.hi * w1
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2040 // smlal  v0 += v2.lo * w2
+	WORD $0x4F6C2041 // smlal2 v1 += v2.hi * w2
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2040 // smlal  v0 += v2.lo * w3
+	WORD $0x4F7C2041 // smlal2 v1 += v2.hi * w3
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2840 // smlal  v0 += v2.lo * w4
+	WORD $0x4F4C2841 // smlal2 v1 += v2.hi * w4
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2840 // smlal  v0 += v2.lo * w5
+	WORD $0x4F5C2841 // smlal2 v1 += v2.hi * w5
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2840 // smlal  v0 += v2.lo * w6
+	WORD $0x4F6C2841 // smlal2 v1 += v2.hi * w6
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2840 // smlal  v0 += v2.lo * w7
+	WORD $0x4F7C2841 // smlal2 v1 += v2.hi * w7
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4D2040 // smlal  v0 += v2.lo * w8
+	WORD $0x4F4D2041 // smlal2 v1 += v2.hi * w8
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5D2040 // smlal  v0 += v2.lo * w9
+	WORD $0x4F5D2041 // smlal2 v1 += v2.hi * w9
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6D2040 // smlal  v0 += v2.lo * w10
+	WORD $0x4F6D2041 // smlal2 v1 += v2.hi * w10
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7D2040 // smlal  v0 += v2.lo * w11
+	WORD $0x4F7D2041 // smlal2 v1 += v2.hi * w11
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4D2840 // smlal  v0 += v2.lo * w12
+	WORD $0x4F4D2841 // smlal2 v1 += v2.hi * w12
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5D2840 // smlal  v0 += v2.lo * w13
+	WORD $0x4F5D2841 // smlal2 v1 += v2.hi * w13
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6D2840 // smlal  v0 += v2.lo * w14
+	WORD $0x4F6D2841 // smlal2 v1 += v2.hi * w14
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	ADD $16, R1, R1
+	SUB $8, R3, R3
+	B qdw5x3s1_loop
+qdw5x3s1_done:
+	RET
+
+// func qdw5x2s1_asm(acc []int32, src, wp []int16, ncols, W int)
+TEXT ·qdw5x2s1_asm(SB), NOSPLIT, $0-88
+	MOVD acc_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD wp_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD W+80(FP), R4
+	LSL $1, R4, R4 // row stride in bytes (s16)
+	VLD1 (R2), [V12.H8, V13.H8]
+qdw5x2s1_loop:
+	CMP $8, R3
+	BLT qdw5x2s1_done
+	VLD1 (R0), [V0.S4, V1.S4] // acc[c..c+8)
+	MOVD R1, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2040 // smlal  v0 += v2.lo * w0
+	WORD $0x4F4C2041 // smlal2 v1 += v2.hi * w0
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2040 // smlal  v0 += v2.lo * w1
+	WORD $0x4F5C2041 // smlal2 v1 += v2.hi * w1
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2040 // smlal  v0 += v2.lo * w2
+	WORD $0x4F6C2041 // smlal2 v1 += v2.hi * w2
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2040 // smlal  v0 += v2.lo * w3
+	WORD $0x4F7C2041 // smlal2 v1 += v2.hi * w3
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4C2840 // smlal  v0 += v2.lo * w4
+	WORD $0x4F4C2841 // smlal2 v1 += v2.hi * w4
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5C2840 // smlal  v0 += v2.lo * w5
+	WORD $0x4F5C2841 // smlal2 v1 += v2.hi * w5
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F6C2840 // smlal  v0 += v2.lo * w6
+	WORD $0x4F6C2841 // smlal2 v1 += v2.hi * w6
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F7C2840 // smlal  v0 += v2.lo * w7
+	WORD $0x4F7C2841 // smlal2 v1 += v2.hi * w7
+	ADD R4, R5, R5
+	MOVD R5, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F4D2040 // smlal  v0 += v2.lo * w8
+	WORD $0x4F4D2041 // smlal2 v1 += v2.hi * w8
+	ADD $2, R6, R6
+	VLD1 (R6), [V2.H8]
+	WORD $0x0F5D2040 // smlal  v0 += v2.lo * w9
+	WORD $0x4F5D2041 // smlal2 v1 += v2.hi * w9
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	ADD $16, R1, R1
+	SUB $8, R3, R3
+	B qdw5x2s1_loop
+qdw5x2s1_done:
+	RET
+
