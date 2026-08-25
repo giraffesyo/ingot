@@ -960,3 +960,51 @@ f32, it's a footprint win at equal speed. Cumulative part 1→3:
 det_int8 MT 36 → 8.4 (4.3×), 1T 109 → 44.6 (2.4×). Remaining 1T gap vs
 ORT (1.2–1.3×): shift-in-pack fusion and Q/DQ island elision are still
 open; rec depthwise at 1T is the next profile item.
+
+
+## Quantized PP-OCR, part 4 — island elision: 2.2× faster than ORT (2026-08-25)
+
+Two threads this round: allocator noise, then the Q/DQ islands themselves.
+
+**Buffer ownership.** The det_int8 1T profile showed 37% `runtime.madvise`
+(darwin `MADV_FREE`/`REUSE` churn). The trail led through the tensor pool —
+which converges fine (bounded warm-up misses, verified with a pointer
+trace) — to `Session.Run` cloning every graph output, ~1.9 MB/run of
+garbage cycling pages. Outputs now stay pooled; callers hand them back via
+the new `Session.Release` (pipeline + benches do; others fall back to GC,
+still cheaper than the clone). Bonus find from the same trace: a **view
+output could return its shared buffer to the pool while still alive**
+(latent use-after-free, never bitten only by node ordering luck) — aliased
+inputs now leave pool custody for the run.
+
+**Q/DQ islands.** Convs-only quantization leaves every QLinearConv trailed
+by `DQ → Mul → Add [→ HardSwish → Mul → Add] → Q` (Paddle reparam blocks) —
+25% of det_int8 1T as five-plus full-tensor f32 passes per conv. Two new
+optimizer passes:
+
+- **fold-qdq-affine**: scalar-affine-only islands fold into the conv's own
+  output quantization (`y_scale := s2/a`, `y_zp := rne(b/s2+z2)`) — the
+  requantized bytes then mean exactly what the chain's consumers expect.
+  Zero runtime cost; one fewer rounding than before.
+- **fuse-qlut**: any remaining island is a pure function of one input byte
+  → evaluated into a 256-entry table at optimize time, one `ingot.QLut`
+  node at runtime (33 sites det, 27 rec). Backed by a TBL/TBX NEON kernel
+  (table pinned in v16–v31, four 64-entry stages/16B; 3.4× the scalar loop).
+
+ORT parity is unchanged to the last bit of tolerance (det 0.0078; rec
+12/265k). Also tried and **rejected**: routing SME calls through a
+persistent signal-masked server thread to amortize the guard's two SVCs
+per GEMM (pthreadSigmask is 21.7% of rec f32 1T) — waking a locked M costs
+more than the syscalls it saves (rec 7.9 → 9.2 ms). The guard stays per-call.
+
+| bench | MT | 1T | ORT int8 MT / 1T | our f32 same run |
+|---|---|---|---|---|
+| det_int8_640 | **6.2 ms** | **38.2** | 14.2 / 36 | 8.1 MT |
+| rec_int8_320 | **3.0 ms** | **10.5** | 4.0 / 9.3 | 2.8 MT |
+
+**det int8: 2.2× faster than ORT int8 MT, 1.3× faster than our own f32.**
+1T is now within 6–13% of ORT int8. Cumulative part 1→4: det MT 36 → 6.2
+(5.8×), 1T 109 → 38.2 (2.9×). Left on the table: SE-path HardSigmoid
+islands (feed tensor Muls, not LUT-able), 2 BatchNorm islands (per-channel
+— needs per-channel requant offsets), f32 ConvTranspose head (3.0 ms),
+Resize (1.7 ms), and the rec MatMul/Softmax f32 tail.
