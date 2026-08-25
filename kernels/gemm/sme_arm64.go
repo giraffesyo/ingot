@@ -60,3 +60,14 @@ func smeSgemmPacked(pa *sme.PackedA, n int, b []float32, ldb int, c []float32, l
 // m×n×k GEMM to the SME unit — used by higher-level fusions (Winograd) to
 // yield: measured 1T order is SME > Winograd > im2col.
 func PrefersSME(m, n, k int) bool { return smeEligible(m, n, k) }
+
+// int8 on the SME unit follows the same policy: measured 3.4-3.5× the NEON
+// int8 GEMM single-threaded (sq512 1316 vs 374 GOPS), contended at MT;
+// small M wastes the 32-row ZA panels.
+func qsmeEligible(m, k int) bool { return smeMode > 0 && m >= 32 && k >= 64 }
+
+func qsmePackA(m, k int, a []int8, lda int) *sme.QPackedA { return sme.QPackA(m, k, a, lda) }
+
+func qsmeGemm(pa *sme.QPackedA, n int, b []int8, ldb int, c []int32, ldc int, parallel bool) {
+	sme.QgemmPackedS8(pa, n, b, ldb, c, ldc, parallel)
+}

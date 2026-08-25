@@ -307,3 +307,140 @@ zaloop:
 	ADD  R5, R3, R3
 	WORD $0xd503467f // smstop
 	RET
+
+// func qzakernel(kg int64, ap, bp *int8, c *int32, ldc4 int64)
+// C[32×32] s32 = Σ over groups of 4 k-steps of the widening s8 outer product:
+// SMOPA accumulates ZA[r][c] += Σ_i a[4r+i]·b[4c+i] — 1024 MACs per
+// instruction, 4× the f32 FMOPA density. ap/bp are packed as
+// [group][half][16 lanes][4 bytes] (zero-padded); ldc4 = C row stride bytes.
+TEXT ·qzakernel(SB), NOSPLIT, $0-40
+	MOVD kg+0(FP), R0
+	MOVD ap+8(FP), R1
+	MOVD bp+16(FP), R2
+	MOVD c+24(FP), R3
+	MOVD ldc4+32(FP), R5
+	MOVD $16, R4
+	WORD $0xd503477f // smstart
+	WORD $0xc00800ff // zero {za}
+	WORD $0x2598e3e0 // ptrue p0.s
+	WORD $0x2518e3e1 // ptrue p1.b
+qzaloop:
+	WORD $0xa400a420 // ld1b z0, p1/z, [x1]              a rows 0-15
+	WORD $0xa401a421 // ld1b z1, p1/z, [x1, #1, mul vl] a rows 16-31
+	WORD $0x04215041 // addvl x1, x1, #2
+	WORD $0xa400a442 // ld1b z2, p1/z, [x2]              b cols 0-15
+	WORD $0xa401a443 // ld1b z3, p1/z, [x2, #1, mul vl]  b cols 16-31
+	WORD $0x04225042 // addvl x2, x2, #2
+	WORD $0xa0822400 // smopa za0.s, p1/m, p1/m, z0.b, z2.b
+	WORD $0xa0832401 // smopa za1.s, p1/m, p1/m, z0.b, z3.b
+	WORD $0xa0822422 // smopa za2.s, p1/m, p1/m, z1.b, z2.b
+	WORD $0xa0832423 // smopa za3.s, p1/m, p1/m, z1.b, z3.b
+	SUBS $1, R0, R0
+	BNE  qzaloop
+	// store 32x32 C block: za0/za1 = rows 0-15, za2/za3 = rows 16-31
+	MOVW $0, R12
+	WORD $0xe0bf0060 // st1w {za0h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a40064 // st1w {za1h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0061 // st1w {za0h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a40065 // st1w {za1h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0062 // st1w {za0h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a40066 // st1w {za1h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0063 // st1w {za0h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a40067 // st1w {za1h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	MOVW $4, R12
+	WORD $0xe0bf0060 // st1w {za0h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a40064 // st1w {za1h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0061 // st1w {za0h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a40065 // st1w {za1h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0062 // st1w {za0h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a40066 // st1w {za1h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0063 // st1w {za0h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a40067 // st1w {za1h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	MOVW $8, R12
+	WORD $0xe0bf0060 // st1w {za0h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a40064 // st1w {za1h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0061 // st1w {za0h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a40065 // st1w {za1h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0062 // st1w {za0h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a40066 // st1w {za1h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0063 // st1w {za0h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a40067 // st1w {za1h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	MOVW $12, R12
+	WORD $0xe0bf0060 // st1w {za0h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a40064 // st1w {za1h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0061 // st1w {za0h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a40065 // st1w {za1h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0062 // st1w {za0h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a40066 // st1w {za1h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0063 // st1w {za0h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a40067 // st1w {za1h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	MOVW $0, R12
+	WORD $0xe0bf0068 // st1w {za2h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a4006c // st1w {za3h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0069 // st1w {za2h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a4006d // st1w {za3h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006a // st1w {za2h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a4006e // st1w {za3h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006b // st1w {za2h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a4006f // st1w {za3h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	MOVW $4, R12
+	WORD $0xe0bf0068 // st1w {za2h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a4006c // st1w {za3h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0069 // st1w {za2h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a4006d // st1w {za3h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006a // st1w {za2h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a4006e // st1w {za3h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006b // st1w {za2h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a4006f // st1w {za3h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	MOVW $8, R12
+	WORD $0xe0bf0068 // st1w {za2h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a4006c // st1w {za3h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0069 // st1w {za2h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a4006d // st1w {za3h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006a // st1w {za2h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a4006e // st1w {za3h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006b // st1w {za2h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a4006f // st1w {za3h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	MOVW $12, R12
+	WORD $0xe0bf0068 // st1w {za2h.s[w12, 0]}, p0, [x3]
+	WORD $0xe0a4006c // st1w {za3h.s[w12, 0]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf0069 // st1w {za2h.s[w12, 1]}, p0, [x3]
+	WORD $0xe0a4006d // st1w {za3h.s[w12, 1]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006a // st1w {za2h.s[w12, 2]}, p0, [x3]
+	WORD $0xe0a4006e // st1w {za3h.s[w12, 2]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xe0bf006b // st1w {za2h.s[w12, 3]}, p0, [x3]
+	WORD $0xe0a4006f // st1w {za3h.s[w12, 3]}, p0, [x3, x4, lsl #2]
+	ADD  R5, R3, R3
+	WORD $0xd503467f // smstop
+	RET

@@ -819,3 +819,31 @@ Two finds:
 
 Remaining for int8: SDOT mid-tier (non-I8MM arm64), SME2 i8→i32 MOPA, amd64
 VNNI, and a quantized PP-OCR pipeline to cash the 2.5× in end-to-end OCR.
+
+
+## int8, phase 2c — SMOPA: 1.3 TOPS on one core (2026-08-24)
+
+`sme.QgemmPackedS8`: the s8→s32 GEMM on the SME unit. SMOPA accumulates a
+widening 4-way outer product per instruction — 1024 MACs, 4× the f32 FMOPA
+density — with the same 32×32 C-block geometry and signal-mask guard as
+Sgemm. One trap worth recording: SMOPA's two predicates are **byte**-granule
+(they gate individual s8 elements); a ptrue.s predicate silently keeps one
+product in four (the all-ones probe made the pattern obvious). Exact-match
+oracle across edge shapes.
+
+Single-thread (loaded box; same-run comparisons):
+
+| shape | SME int8 | NEON int8 | × | f32 SME, for scale |
+|---|---|---|---|---|
+| sq512 | **1316 GOPS** | 374 | 3.5 | 411 |
+| rec 480·240·480 | **1203** | 357 | 3.4 | 343 |
+| det-head m24 | 92 | 93 | — | (32-row panels wasted) |
+
+Dispatch mirrors f32: gemm.QPackA dual-packs when the SME policy is active
+(m ≥ 32, k ≥ 64) and QgemmPackedS8 routes at n ≥ 128; MT stays NEON (matrix
+units contend). The SME B-pack needed the same group-major rewrite as the
+NEON one — with the scalar div/mod pack it *lost* to NEON in-model
+(mnv3_int8 1T 8.8 ms) and with it fixed it wins (6.16 vs 6.72 forced-NEON).
+The 3.4× kernel gap will show at model level on GEMM-heavy quantized
+workloads (the queued quantized PP-OCR pipeline), not on MobileNet's tiny
+SE convs.

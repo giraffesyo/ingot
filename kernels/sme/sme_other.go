@@ -14,3 +14,5 @@ func probeLoad(int64, *float32, *float32)               {}
 func probeN(int64, *float32, int64)                     {}
 func outerK(*float32, *float32, int64, *float32)        {}
 func zakernel(kc int64, ap, bp, c *float32, ldc4 int64) { panic("sme: not available") }
+
+func qzakernel(kg int64, ap, bp *int8, c *int32, ldc4 int64) { panic("sme: not available") }
