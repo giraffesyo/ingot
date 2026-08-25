@@ -77,16 +77,7 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 			i0 := ip * qMR
 			rows := min(qMR, m-i0)
 			qkernel(int64(kg), &ap[ip*kg*qMR*qKG], &bp[0], &wb.ct[0])
-			// scatter the 2×2-block tile into row-major C:
-			// value (reg=bi*6+bj, lane l) is row 2bi+l/2, col 2bj+l%2.
-			for r := 0; r < rows; r++ {
-				dst := c[(i0+r)*ldc+j0 : (i0+r)*ldc+j0+cols]
-				bi := r >> 1
-				lr := (r & 1) << 1
-				for j := 0; j < cols; j++ {
-					dst[j] = wb.ct[(bi*6+j>>1)*4+lr+j&1]
-				}
-			}
+			qscatterTile(wb.ct[:], c[(i0)*ldc+j0:], ldc, rows, cols)
 		}
 	}
 	if serial {
@@ -99,6 +90,24 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 	for _, w := range bufs {
 		if w != nil {
 			putQwork(w)
+		}
+	}
+}
+
+// qscatterTile writes the micro-kernel's 8×12 accumulator tile (2×2-block
+// layout: reg bi*6+bj, lane l is row 2bi+l/2, col 2bj+l%2) into row-major C.
+// Full tiles take the NEON uzp kernel; edge tiles scatter scalar.
+func qscatterTile(ct []int32, c []int32, ldc, rows, cols int) {
+	if hasQpackAsm && rows == qMR && cols == qNR {
+		qscatter(&ct[0], &c[0], int64(ldc))
+		return
+	}
+	for r := 0; r < rows; r++ {
+		dst := c[r*ldc : r*ldc+cols]
+		bi := r >> 1
+		lr := (r & 1) << 1
+		for j := 0; j < cols; j++ {
+			dst[j] = ct[(bi*6+j>>1)*4+lr+j&1]
 		}
 	}
 }
@@ -241,14 +250,7 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 			i0 := ip * qMR
 			rows := min(qMR, m-i0)
 			qkernelS8(int64(kg), &pa.data[ip*kg*qMR*qKG], &bp[0], &wb.ct[0])
-			for r := 0; r < rows; r++ {
-				dst := c[(i0+r)*ldc+j0 : (i0+r)*ldc+j0+cols]
-				bi := r >> 1
-				lr := (r & 1) << 1
-				for j := 0; j < cols; j++ {
-					dst[j] = wb.ct[(bi*6+j>>1)*4+lr+j&1]
-				}
-			}
+			qscatterTile(wb.ct[:], c[i0*ldc+j0:], ldc, rows, cols)
 		}
 	}
 	if serial {
