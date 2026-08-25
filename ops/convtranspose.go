@@ -140,6 +140,15 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 						b = bias[oc]
 					}
 					for kh := 0; kh < KH; kh++ {
+						if sw == 2 && KW == 2 {
+							// One interleave writes the whole output row.
+							cr0 := cf[((ocg*KH+kh)*KW+0)*HW:]
+							cr1 := cf[((ocg*KH+kh)*KW+1)*HW:]
+							for ih := ih0; ih < ih1; ih++ {
+								vek.Zip2(op[(ih*sh+kh)*OW:(ih*sh+kh)*OW+2*W], cr0[ih*W:(ih+1)*W], cr1[ih*W:(ih+1)*W], b)
+							}
+							continue
+						}
 						for kw := 0; kw < KW; kw++ {
 							cr := cf[((ocg*KH+kh)*KW+kw)*HW:]
 							for ih := ih0; ih < ih1; ih++ {

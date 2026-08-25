@@ -168,3 +168,13 @@ func Gelu(dst, src []float32) {
 		dst[i] = 0.5 * x * (1 + float32(math.Erf(float64(x)/math.Sqrt2)))
 	}
 }
+
+// Zip2 interleaves two rows with a scalar add: dst[2i] = a[i]+c,
+// dst[2i+1] = b[i]+c.
+func Zip2(dst, a, b []float32, c float32) {
+	n := min(len(a), len(b), len(dst)/2)
+	for i := 0; i < n; i++ {
+		dst[2*i] = a[i] + c
+		dst[2*i+1] = b[i] + c
+	}
+}

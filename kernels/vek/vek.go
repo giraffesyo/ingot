@@ -8,6 +8,9 @@ import "math"
 func add_asm(dst, a, b []float32, n int)
 
 //go:noescape
+func zip2_asm(dst, a, b []float32, n int, c float32)
+
+//go:noescape
 func sub_asm(dst, a, b []float32, n int)
 
 //go:noescape
@@ -223,6 +226,20 @@ func LeakyRelu(dst, src []float32, alpha float32) {
 			v *= alpha
 		}
 		dst[i] = v
+	}
+}
+
+// Zip2 interleaves two rows with a scalar add: dst[2i] = a[i]+c,
+// dst[2i+1] = b[i]+c (the 2×-upsample / stride-2 col2im primitive).
+func Zip2(dst, a, b []float32, c float32) {
+	n := min(len(a), len(b), len(dst)/2)
+	m := n &^ 7
+	if m > 0 {
+		zip2_asm(dst, a, b, m, c)
+	}
+	for i := m; i < n; i++ {
+		dst[2*i] = a[i] + c
+		dst[2*i+1] = b[i] + c
 	}
 }
 
