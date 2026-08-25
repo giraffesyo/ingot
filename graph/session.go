@@ -67,6 +67,19 @@ func (s *Session) Stats() []OpStat {
 // Runs returns the number of profiled runs (divide Stats totals by this).
 func (s *Session) Runs() int { return s.runs }
 
+// Release hands a Run's outputs back to the session's buffer pool. Optional:
+// callers that skip it simply leave the buffers to the GC. Call it only once
+// per Run result, only after the caller is done reading the tensors, and never
+// for tensors it still holds references to. Constant outputs (detached clones)
+// are ignored by the pool.
+func (s *Session) Release(res map[string]*tensor.Tensor) {
+	for _, t := range res {
+		if t != nil {
+			s.pool.Put(t)
+		}
+	}
+}
+
 // NodeStats returns per-node timing (cumulative over profiled runs) in
 // execution order.
 func (s *Session) NodeStats() []struct {
@@ -241,15 +254,19 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 				}
 				continue
 			}
-			if isOutput[id] {
-				// Detach from pool so the caller owns it; the pooled original
-				// goes straight back.
-				orig := t
-				t = t.Clone()
-				s.pool.Put(orig)
-			}
+			// Graph outputs stay pooled but are excluded from internal
+			// release — the caller owns them until it hands them back via
+			// Release (or lets the GC take them).
 			vals[id] = t
 			pooled[id] = !isOutput[id]
+			// A view output (Reshape & friends) shares its input's buffer:
+			// that buffer must not return to the pool while the view lives,
+			// so the aliased input leaves the pool's custody for this run.
+			for _, inID := range st.in {
+				if inID >= 0 && pooled[inID] && t.SharesBuffer(vals[inID]) {
+					pooled[inID] = false
+				}
+			}
 		}
 		// Release inputs whose last use was this step.
 		for _, id := range st.in {

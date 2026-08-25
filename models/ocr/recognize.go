@@ -112,6 +112,7 @@ func (r *Recognizer) RecognizeBatch(img image.Image, boxes []Box) ([]string, []f
 		}
 		texts[i], confs[i] = t, c
 	}
+	r.sess.Release(outs) // decoded to strings above; tensors no longer referenced
 	return texts, confs, nil
 }
 
