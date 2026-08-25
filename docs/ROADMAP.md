@@ -81,8 +81,11 @@
 - [x] det-head tail: vek.Zip2 (2× Resize 1.84→0.75 ms, s2k2 ConvTranspose
       3.27→2.55), per-channel QLut (BatchNorm islands), fuse-layernorm
       (5 sites in rec) — det_int8 1T ≈ ORT-int8 parity
+- [x] amd64 VNNI int8 GEMM: VPDPBUSD 8×12 kernels, quad-major B / row-major C,
+      453 GOPS sq512 on CI Ice Lake (2.4× same-run f32); pre-VNNI x86 stays
+      portable (AVX2 vpmaddubsw saturates — inexact by construction)
 - [ ] int8 next: shift-in-pack fusion, SE-path islands; SDOT mid-tier
-      (non-I8MM arm64), amd64 VNNI; bf16
+      (non-I8MM arm64); bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
