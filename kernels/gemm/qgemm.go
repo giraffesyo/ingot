@@ -1,6 +1,8 @@
 package gemm
 
 import (
+	"sync"
+
 	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/kernels/sme"
 )
@@ -53,16 +55,19 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 	if w := int(int64(m) * int64(n) * int64(k) / (4 * minTaskMACs)); w < workers {
 		workers = max(w, 1)
 	}
-	// Per-worker: packed B panel (kg × 12 × 4 bytes) + col-major tile.
-	type wbuf struct {
-		bp []int8
-		ct [qMR * qNR]int32
+	need := kg * qNR * qKG
+	serial := workers <= 1 || np == 1
+	var bufs []*qwork
+	if serial {
+		bufs = []*qwork{getQwork(need)}
+	} else {
+		bufs = make([]*qwork, par.Workers())
 	}
-	bufs := make([]wbuf, par.Workers())
 	task := func(jp, wk int) {
-		wb := &bufs[wk]
-		if wb.bp == nil {
-			wb.bp = make([]int8, kg*qNR*qKG)
+		wb := bufs[wk]
+		if wb == nil {
+			wb = getQwork(need)
+			bufs[wk] = wb
 		}
 		bp := wb.bp
 		j0 := jp * qNR
@@ -98,13 +103,18 @@ func QgemmU8S8(m, n, k int, a []uint8, lda int, b []int8, ldb int, c []int32, ld
 			}
 		}
 	}
-	if workers <= 1 || np == 1 {
+	if serial {
 		for jp := 0; jp < np; jp++ {
 			task(jp, 0)
 		}
-		return
+	} else {
+		par.For(np, max(1, (4*macroTaskMACs)/max(qNR*m*k, 1)), task)
 	}
-	par.For(np, max(1, (4*macroTaskMACs)/max(qNR*m*k, 1)), task)
+	for _, w := range bufs {
+		if w != nil {
+			putQwork(w)
+		}
+	}
 }
 
 // QgemmRef is the scalar reference (the oracle in tests).
@@ -153,6 +163,30 @@ func QPackA(m, k int, a []int8, lda int) *QPackedA {
 	return p
 }
 
+// qwork holds a worker's packed-B panel and output tile, pooled on a plain
+// free list (like gemmCtx) so per-tile serial calls from conv chunk loops
+// allocate nothing in steady state.
+type qwork struct {
+	bp []int8
+	ct [qMR * qNR]int32
+}
+
+// sync.Pool: per-P caches, so the per-chunk serial calls from conv loops on
+// 18 workers don't contend on one mutex (they did). Buffers are small (a few
+// KB), so GC clearing them is fine.
+var qworkPool = sync.Pool{New: func() any { return &qwork{} }}
+
+func getQwork(need int) *qwork {
+	w := qworkPool.Get().(*qwork)
+	if cap(w.bp) < need {
+		w.bp = make([]int8, need)
+	}
+	w.bp = w.bp[:need]
+	return w
+}
+
+func putQwork(w *qwork) { qworkPool.Put(w) }
+
 // QgemmPackedS8 computes C[m×n] (s32) = pa · B[k×n] (s8, stride ldb) — raw
 // dot products; zero-point compensation is the caller's.
 func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, parallel bool) {
@@ -173,15 +207,19 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 	kg := (k + qKG - 1) / qKG
 	mp := (m + qMR - 1) / qMR
 	np := (n + qNR - 1) / qNR
-	type wbuf struct {
-		bp []int8
-		ct [qMR * qNR]int32
+	need := kg * qNR * qKG
+	serial := !parallel || np == 1 || m*n*k < 4*minTaskMACs
+	var bufs []*qwork
+	if serial {
+		bufs = []*qwork{getQwork(need)}
+	} else {
+		bufs = make([]*qwork, par.Workers())
 	}
-	bufs := make([]wbuf, par.Workers())
 	task := func(jp, wk int) {
-		wb := &bufs[wk]
-		if wb.bp == nil {
-			wb.bp = make([]int8, kg*qNR*qKG)
+		wb := bufs[wk]
+		if wb == nil {
+			wb = getQwork(need)
+			bufs[wk] = wb
 		}
 		bp := wb.bp
 		j0 := jp * qNR
@@ -215,11 +253,16 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 			}
 		}
 	}
-	if !parallel || np == 1 || m*n*k < 4*minTaskMACs {
+	if serial {
 		for jp := 0; jp < np; jp++ {
 			task(jp, 0)
 		}
-		return
+	} else {
+		par.For(np, max(1, (4*macroTaskMACs)/max(qNR*m*k, 1)), task)
 	}
-	par.For(np, max(1, (4*macroTaskMACs)/max(qNR*m*k, 1)), task)
+	for _, w := range bufs {
+		if w != nil {
+			putQwork(w)
+		}
+	}
 }

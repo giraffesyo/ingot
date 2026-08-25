@@ -302,16 +302,24 @@ func s8Weights(n NodeInfo, w, wzp *tensor.Tensor) ([]int8, error) {
 }
 
 // shiftToS8 converts an activation tensor to s8 with its zero point adjusted:
-// u8 x → x−128 (zx′ = zx−128); s8 passes through.
+// u8 x → x−128 (zx′ = zx−128); s8 passes through. Chunked in parallel — a
+// serial full-activation pass per QLinearConv parks the whole worker pool
+// (profiled: half the runtime went to park/wake churn around these).
 func shiftToS8(dst []int8, x *tensor.Tensor, zx int32) int32 {
 	if x.DType() == tensor.I8 {
 		copy(dst, x.I8())
 		return zx
 	}
 	src := x.U8()
-	for i, v := range src {
-		dst[i] = int8(v ^ 0x80)
-	}
+	chunks := max(1, (len(src)+unaryChunk-1)/unaryChunk)
+	par.For(chunks, 1, func(c, _ int) {
+		lo := c * unaryChunk
+		hi := min(lo+unaryChunk, len(src))
+		d, s := dst[lo:hi], src[lo:hi]
+		for i, v := range s {
+			d[i] = int8(v ^ 0x80)
+		}
+	})
 	return zx - 128
 }
 

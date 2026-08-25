@@ -13,6 +13,8 @@ SHAPES = [
     ("det_960", "det.onnx", (1, 3, 960, 960)),
     ("rec_320", "rec.onnx", (1, 3, 48, 320)),
     ("rec_b8_320", "rec.onnx", (8, 3, 48, 320)),
+    ("det_int8_640", "det_int8.onnx", (1, 3, 640, 640)),
+    ("rec_int8_320", "rec_int8.onnx", (1, 3, 48, 320)),
 ]
 
 def main():
