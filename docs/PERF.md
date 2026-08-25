@@ -1038,3 +1038,34 @@ surviving consts onto their new consumer BEFORE dropNode runs.
 Model-level: det_int8 1T ~37.5 ms (≈ORT-int8's 36 — parity), MT holds
 6.3; rec holds 10.7 / 3.1. The remaining det gap is QLinearConv itself
 (~79%) plus the SE-path islands and the ConvTranspose GEMM.
+
+
+## int8 goes x86 — AVX-512 VNNI kernels (2026-08-25)
+
+amd64 int8 GEMM ran on the portable Go kernel until now. New VPDPBUSD
+micro-kernels close that gap — exact i32 accumulation, which is the whole
+reason to require VNNI: the AVX2 `vpmaddubsw` formulation saturates in its
+i16 stage and can't pass the reference oracles, so pre-VNNI x86
+deliberately stays portable rather than approximately fast.
+
+Same 8×12 driver contract as the arm64 MMLA kernels, two arch-owned layout
+differences selected at runtime with the kernel: quad-major B panels
+([g][2q][12j][4]) and row-major C via masked 48-byte stores. S8S8 flips A
+to u8 in-register (VPXORD 0x80) and subtracts 128·colsum(B) accumulated by
+a ones-VPDPBUSD — 2 instructions per 384 MACs of overhead.
+
+Developed blind (Rosetta has no AVX-512): the layout plumbing is pinned on
+every arch by Go models of the kernel contract (TestQgemmQuadLayout), and
+the asm passed the VsRef oracles on CI's Ice Lake first try. Numbers from
+the shared 4-vCPU runner (informational job, same run's f32 for scale):
+
+| bench (MT, 4 vCPU) | int8 VNNI | f32 same run | × |
+|---|---|---|---|
+| sq512 packed | **453 GOPS** | 190 GFLOPS | 2.4 |
+| conv_m64_n16384_k576 | 219–229 | 161 | 1.4 |
+| rec 480·240·480 | 258 | — | — |
+| det_m24 (small-M) | 108 | — | (panel waste, as on arm64) |
+
+The CI bench job now tracks Qgemm alongside Sgemm. Left for the x86 story:
+AVX2-exact is a dead end by design; an SSE/AVX2 *dot-product-free* widening
+path only if a real pre-VNNI deployment ever demands it.
