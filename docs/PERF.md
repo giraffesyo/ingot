@@ -1130,3 +1130,33 @@ under our own f32 rec. Cumulative int8 arc: det 36→6.2 MT (5.8×),
 109→31.2 1T (3.5×). Both models are ~78% QLinearConv now; what's left is
 kernel-level (SME shapes at 1T, fused epilogues) and the f32 tails
 (ConvTranspose GEMM, rec attention).
+
+
+## bf16, measured and mostly buried (2026-08-26)
+
+The planned bf16 arc opened with kernels and closed with a verdict. Three
+first-party measurements on Apple silicon:
+
+| path | measured | reference point |
+|---|---|---|
+| NEON BFMMLA 8×12 kernel | 68.6 GFLOPS | SMMLA, byte-identical stream: 552 GOPS |
+| NEON BFDOT | 72 GFLOPS | f32 FMLA: ~500+ |
+| SME BFMOPA (probe) | 2.17 TFLOPS/core | f32 FMOPA: 2.17 — identical |
+
+Apple runs the NEON bf16 block at quarter pipe rate, and the SME unit
+retires BFMOPA at half FMOPA's instruction rate — the 2-deep widening is
+a wash. **On this hardware bf16 buys zero compute anywhere.** Its real
+value is storage: halved weight memory and halved weight-side bandwidth,
+which matters for the bandwidth-bound shapes (GEMV/decode, m=1) — that's
+the direction the roadmap keeps.
+
+Engineering notes: the BFMMLA kernel cost almost nothing to build —
+BFMMLA's 2×4-bf16 blocks are byte-identical to SMMLA's 2×8-int8 ones, so
+the same genq emitter produces it (one opcode constant), the packed
+layouts carry over with kg meaning 4 k-steps, and the f32 accumulator
+tiles alias the i32 scatter bit-for-bit. It stays in-tree (oracle-tested,
+benched, gated behind FEAT_BF16 + explicit API, wired into no model): on
+Neoverse V2/Grace it may be genuinely fast, and that costs us nothing to
+leave ready. bf16 numerics: products of 8-bit mantissas are exact in f32,
+so the only kernel error is f32 summation — the oracle tolerance is the
+same shape as f32 GEMM's.
