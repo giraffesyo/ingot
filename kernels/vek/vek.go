@@ -68,6 +68,9 @@ func gelu_asm(dst, src []float32, n int)
 func dot_asm(a, b []float32, n int, out []float32)
 
 //go:noescape
+func dotbf16_asm(a []float32, b []uint16, n int, out []float32)
+
+//go:noescape
 func dwconv3x3s1_asm(dst, src, wpacked []float32, ncols, W int)
 
 //go:noescape
@@ -350,6 +353,24 @@ func DwRowS1(dst, src, wpacked []float32, ncols, W, KH, KW int) {
 
 // Dot returns Σ a[i]*b[i] over min lengths, accumulated in several
 // independent SIMD lanes (the summation order differs from a sequential loop).
+// DotBF16 computes Σ a[i]·widen(b[i]) for bf16 weights b (bits, f32 = bits<<16).
+func DotBF16(a []float32, b []uint16) float32 {
+	n := min(len(a), len(b))
+	m := n &^ 15
+	var s float32
+	if m > 0 {
+		var parts [16]float32
+		dotbf16_asm(a, b, m, parts[:])
+		for _, v := range parts {
+			s += v
+		}
+	}
+	for i := m; i < n; i++ {
+		s += a[i] * math.Float32frombits(uint32(b[i])<<16)
+	}
+	return s
+}
+
 func Dot(a, b []float32) float32 {
 	n := min(len(a), len(b))
 	m := n &^ 15
