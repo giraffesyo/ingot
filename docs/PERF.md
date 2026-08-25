@@ -773,3 +773,24 @@ The int8 optimization phase needs: direct int8 depthwise kernels, the tiled
 conv structure from the f32 path, vectorised requant, and eventually SME2's
 i8→i32 MOPA (4× the f32 rate). Full QOperator coverage (QLinearAdd/
 QLinearGlobalAveragePool — com.microsoft contrib ops) is a separate gap.
+
+
+## int8, phase 2a — tiled QLinearConv + vek quantization kernels (2026-08-24)
+
+QLinearConv rewritten on the f32 conv's structure: a direct depthwise path
+(padded s8 plane, int32 taps, in-cache requant — off the GEMM entirely), a
+direct pointwise path (activations fed straight to the SMMLA GEMM, chunked
+over columns), and a row-tiled im2col path with per-worker byte buffers.
+New NEON kernels mirror the scalar quantization semantics bit for bit
+(conformance unchanged, tiny_conv_int8 still 7.5e-9 vs ORT):
+`vek.QuantU8/I8` (FDIV — division semantics preserved), `DequantU8/I8`
+(zero point subtracted in the integer domain before SCVTF), `RequantU8/I8`
+(SCVTF → FMUL → FADD → FCVTNS → saturating narrows).
+
+mobilenet_v3_small_int8: **21 ms → ~5.5 ms MT** across phase 2a (Q+DQ
+2.2 → 0.7 ms; QLinearConv 13 → 4.2 ms). Still ~2× the f32 model: the
+remaining 77% is QLinearConv — scalar depthwise taps and small-K QGEMMs.
+Queued (phase 2b): SMLAL int8 depthwise kernel, small-K qgemm efficiency,
+SDOT mid-tier for non-I8MM arm64, SME2 i8→i32 MOPA, amd64 VNNI. Note int8
+already wins where GEMMs dominate (sq512 qgemm is 2.9× f32 1T) — the
+depthwise-heavy MobileNet shape is the hardest case, not the typical one.

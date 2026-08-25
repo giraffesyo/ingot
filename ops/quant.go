@@ -17,6 +17,7 @@ import (
 
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
 )
 
@@ -104,7 +105,16 @@ func (o *quantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor,
 	if len(sc) == 1 {
 		s0 := sc[0]
 		z := float32(zpi[0])
-		quantAll(out, xf, func(i int) (float32, float32) { return s0, z })
+		chunks := max(1, (len(xf)+unaryChunk-1)/unaryChunk)
+		par.For(chunks, 1, func(c, _ int) {
+			lo := c * unaryChunk
+			hi := min(lo+unaryChunk, len(xf))
+			if out.DType() == tensor.U8 {
+				vek.QuantU8(out.U8()[lo:hi], xf[lo:hi], s0, z)
+			} else {
+				vek.QuantI8(out.I8()[lo:hi], xf[lo:hi], s0, z)
+			}
+		})
 		return []*tensor.Tensor{out}, nil
 	}
 	// per-axis
@@ -186,8 +196,15 @@ func (o *dequantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tenso
 		par.For(chunks, 1, func(c, _ int) {
 			lo := c * unaryChunk
 			hi := min(lo+unaryChunk, n)
-			for i := lo; i < hi; i++ {
-				of[i] = float32(get(i)-z) * s
+			switch x.DType() {
+			case tensor.U8:
+				vek.DequantU8(of[lo:hi], x.U8()[lo:hi], s, z)
+			case tensor.I8:
+				vek.DequantI8(of[lo:hi], x.I8()[lo:hi], s, z)
+			default:
+				for i := lo; i < hi; i++ {
+					of[i] = float32(get(i)-z) * s
+				}
 			}
 		})
 		return []*tensor.Tensor{out}, nil
@@ -366,110 +383,286 @@ func (o *qlinearConvOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, er
 		}
 		mult[m] = xs0 * s / ys0
 	}
-	pk, sumW := o.weights(wf, G, Mg, K, M)
-	// shift activations to s8 once
+	zy := float32(yzpi[0])
+	// shift activations to s8 once (u8 → x−128; one pass)
 	xsh := ctx.NewUninit(tensor.I8, xs...)
 	zx := shiftToS8(xsh.I8(), x, xzpi[0])
-	zy := float32(yzpi[0])
-	out := ctx.NewUninit(ydt, N, M, OH, OW)
-	acc := ctx.NewUninit(tensor.I32, Mg, P)
-	accf := acc.I32()
-	col := ctx.NewUninit(tensor.I8, K, P)
-	cf := col.I8()
 	xf := xsh.I8()
-	for n := 0; n < N; n++ {
-		for g := 0; g < G; g++ {
-			qim2col(xf[(n*C+g*Cg)*H*W:], cf, int8(zx), Cg, H, W, KH, KW, OH, OW, pads, o.conv.strides, o.conv.dilations)
-			gemm.QgemmPackedS8(pk[g], P, cf, P, accf, P, true)
-			// requantize rows
-			par.For(Mg, max(1, 4096/max(P, 1)), func(mi, _ int) {
-				m := g*Mg + mi
-				corr := -zx * sumW[m]
-				if bias != nil {
-					corr += bias[m]
-				}
-				row := accf[mi*P : (mi+1)*P]
-				if ydt == tensor.U8 {
-					dst := out.U8()[(n*M+m)*P : (n*M+m+1)*P]
-					for i, v := range row {
-						dst[i] = satU8(float32(v+corr)*mult[m] + zy)
-					}
-				} else {
-					dst := out.I8()[(n*M+m)*P : (n*M+m+1)*P]
-					for i, v := range row {
-						dst[i] = satI8(float32(v+corr)*mult[m] + zy)
-					}
-				}
-			})
-		}
+	out := ctx.NewUninit(ydt, N, M, OH, OW)
+	q := &qconvRun{
+		o: o, ctx: ctx, xf: xf, wf: wf, bias: bias, out: out, ydt: ydt,
+		mult: mult, zx: zx, zy: zy,
+		N: N, C: C, H: H, W: W, M: M, G: G, Cg: Cg, Mg: Mg, K: K,
+		KH: KH, KW: KW, OH: OH, OW: OW, P: P, pads: pads,
+	}
+	depthwise := G == C && Cg == 1 && Mg == 1
+	pointwise := KH == 1 && KW == 1 && o.conv.strides == [2]int{1, 1} && pads == [4]int{} && o.conv.dilations == [2]int{1, 1}
+	switch {
+	case depthwise:
+		q.depthwise()
+	case pointwise:
+		q.pointwise()
+	default:
+		q.im2colTiled()
 	}
 	if ctx.Pool != nil {
-		ctx.Pool.Put(col)
-		ctx.Pool.Put(acc)
 		ctx.Pool.Put(xsh)
 	}
 	return []*tensor.Tensor{out}, nil
 }
 
-func (o *qlinearConvOp) weights(wf []int8, G, Mg, K, M int) ([]*gemm.QPackedA, []int32) {
-	o.packMu.Lock()
-	defer o.packMu.Unlock()
-	if o.packSrc == &wf[0] {
-		return o.packed, o.sumW
-	}
-	pk := make([]*gemm.QPackedA, G)
-	sumW := make([]int32, M)
-	for g := 0; g < G; g++ {
-		pk[g] = gemm.QPackA(Mg, K, wf[g*Mg*K:], K)
-	}
-	for m := 0; m < M; m++ {
-		var s int32
-		for p := 0; p < K; p++ {
-			s += int32(wf[m*K+p])
-		}
-		sumW[m] = s
-	}
-	o.packed, o.sumW, o.packSrc = pk, sumW, &wf[0]
-	return pk, sumW
+// qconvRun carries one QLinearConv invocation's state across its paths.
+type qconvRun struct {
+	o    *qlinearConvOp
+	ctx  *Ctx
+	xf   []int8
+	wf   []int8
+	bias []int32
+	out  *tensor.Tensor
+	ydt  tensor.DType
+	mult []float32
+	zx   int32
+	zy   float32
+
+	N, C, H, W, M, G, Cg, Mg, K int
+	KH, KW, OH, OW, P           int
+	pads                        [4]int
 }
 
-// qim2col: byte version of im2col. ONNX pads the quantized tensor with the
-// activation zero point, so a padded tap must contribute 0 after the uniform
-// per-channel correction −zx′·ΣW: padding with zx′ makes every tap, padded or
-// not, contribute (x − zx′)·w.
-func qim2col(x, col []int8, padVal int8, C, H, W, KH, KW, OH, OW int, pads [4]int, strides, dil [2]int) {
-	sh, sw := strides[0], strides[1]
-	dh, dw := dil[0], dil[1]
-	pt, pl := pads[0], pads[1]
-	P := OH * OW
-	K := C * KH * KW
-	grain := max(1, 8192/max(P, 1))
-	par.For(K, grain, func(k, _ int) {
-		c := k / (KH * KW)
-		kh := (k / KW) % KH
-		kw := k % KW
-		xc := x[c*H*W : (c+1)*H*W]
-		row := col[k*P : (k+1)*P]
-		for oh := 0; oh < OH; oh++ {
+func (q *qconvRun) corr(m int) int32 {
+	c := -q.zx * q.o.sumWFor(q.wf, q.G, q.Mg, q.K, q.M)[m]
+	if q.bias != nil {
+		c += q.bias[m]
+	}
+	return c
+}
+
+// requant writes sat(round((acc+corr)·mult) + zy) for one row segment via the
+// vek kernels: (v+corr)·mult + zy = v·mult + (corr·mult + zy) — exact only up
+// to f32 association, so corr is folded into the offset the same way the
+// kernels compute it.
+func (q *qconvRun) requant(dst8 []uint8, dsti8 []int8, acc []int32, corr int32, mult float32) {
+	if corr != 0 {
+		for i := range acc {
+			acc[i] += corr
+		}
+	}
+	if q.ydt == tensor.U8 {
+		vek.RequantU8(dst8, acc, mult, q.zy)
+		return
+	}
+	vek.RequantI8(dsti8, acc, mult, q.zy)
+}
+
+func (q *qconvRun) dstRow(m, n, off, ln int) ([]uint8, []int8) {
+	base := (n*q.M+m)*q.P + off
+	if q.ydt == tensor.U8 {
+		return q.out.U8()[base : base+ln], nil
+	}
+	return nil, q.out.I8()[base : base+ln]
+}
+
+// depthwise: one channel per task — pad the plane with the shifted zero
+// point, accumulate the taps in int32, requantize in-cache. Covers any
+// kernel/stride/dilation.
+func (q *qconvRun) depthwise() {
+	sh, sw := q.o.conv.strides[0], q.o.conv.strides[1]
+	dh, dw := q.o.conv.dilations[0], q.o.conv.dilations[1]
+	pt, pl, pb, pr := q.pads[0], q.pads[1], q.pads[2], q.pads[3]
+	Hp, Wp := q.H+pt+pb, q.W+pl+pr
+	workers := par.Workers()
+	scratch := q.ctx.NewUninit(tensor.I8, workers, Hp*Wp)
+	sf := scratch.I8()
+	accT := q.ctx.NewUninit(tensor.I32, workers, q.OW)
+	accF := accT.I32()
+	pv := int8(q.zx)
+	par.For(q.N*q.C, 1, func(nc, wk int) {
+		n, c := nc/q.C, nc%q.C
+		xc := q.xf[nc*q.H*q.W:]
+		pad := sf[wk*Hp*Wp : (wk+1)*Hp*Wp]
+		for i := range pad[:pt*Wp] {
+			pad[i] = pv
+		}
+		for i := (pt + q.H) * Wp; i < len(pad); i++ {
+			pad[i] = pv
+		}
+		for r := 0; r < q.H; r++ {
+			row := pad[(pt+r)*Wp : (pt+r+1)*Wp]
+			for i := 0; i < pl; i++ {
+				row[i] = pv
+			}
+			copy(row[pl:pl+q.W], xc[r*q.W:(r+1)*q.W])
+			for i := pl + q.W; i < Wp; i++ {
+				row[i] = pv
+			}
+		}
+		w := q.wf[c*q.KH*q.KW:]
+		corr := q.corr(c)
+		mult := q.mult[c]
+		acc := accF[wk*q.OW : (wk+1)*q.OW]
+		for oh := 0; oh < q.OH; oh++ {
+			clear(acc)
+			for kh := 0; kh < q.KH; kh++ {
+				src := pad[(oh*sh+kh*dh)*Wp:]
+				for kw := 0; kw < q.KW; kw++ {
+					wv := int32(w[kh*q.KW+kw])
+					if wv == 0 {
+						continue
+					}
+					s := src[kw*dw:]
+					for ow := 0; ow < q.OW; ow++ {
+						acc[ow] += wv * int32(s[ow*sw])
+					}
+				}
+			}
+			d8, di := q.dstRow(c, n, oh*q.OW, q.OW)
+			q.requant(d8, di, acc, corr, mult)
+		}
+	})
+	if q.ctx.Pool != nil {
+		q.ctx.Pool.Put(accT)
+		q.ctx.Pool.Put(scratch)
+	}
+}
+
+// pointwise: 1×1 s1 p0 — feed the shifted activations directly as the GEMM's
+// B, chunked over columns, requantizing each tile in-cache.
+func (q *qconvRun) pointwise() {
+	pk := q.o.weights(q.wf, q.G, q.Mg, q.K, q.M)
+	Pc := max(64, (1<<17)/max(1, q.Mg*q.K))
+	nChunks := (q.P + Pc - 1) / Pc
+	workers := par.Workers()
+	accT := q.ctx.NewUninit(tensor.I32, workers, q.Mg*Pc)
+	accF := accT.I32()
+	par.For(q.N*q.G*nChunks, 1, func(t, wk int) {
+		ch := t % nChunks
+		ng := t / nChunks
+		n, g := ng/q.G, ng%q.G
+		p0 := ch * Pc
+		pc := min(Pc, q.P-p0)
+		acc := accF[wk*q.Mg*Pc:]
+		gemm.QgemmPackedS8(pk[g], pc, q.xf[(n*q.C+g*q.Cg)*q.P+p0:], q.P, acc, pc, false)
+		for mi := 0; mi < q.Mg; mi++ {
+			m := g*q.Mg + mi
+			d8, di := q.dstRow(m, n, p0, pc)
+			q.requant(d8, di, acc[mi*pc:(mi+1)*pc], q.corr(m), q.mult[m])
+		}
+	})
+	if q.ctx.Pool != nil {
+		q.ctx.Pool.Put(accT)
+	}
+}
+
+// im2colTiled: general conv, tiled over output rows with per-worker byte
+// column buffers (padded with the shifted zero point) and in-cache requant.
+func (q *qconvRun) im2colTiled() {
+	pk := q.o.weights(q.wf, q.G, q.Mg, q.K, q.M)
+	rows := max(1, (1<<17)/max(1, q.K*q.OW))
+	nChunks := (q.OH + rows - 1) / rows
+	workers := par.Workers()
+	colT := q.ctx.NewUninit(tensor.I8, workers, q.K*rows*q.OW)
+	colF := colT.I8()
+	accT := q.ctx.NewUninit(tensor.I32, workers, q.Mg*rows*q.OW)
+	accF := accT.I32()
+	pv := int8(q.zx)
+	par.For(q.N*q.G*nChunks, 1, func(t, wk int) {
+		ch := t % nChunks
+		ng := t / nChunks
+		n, g := ng/q.G, ng%q.G
+		oh0 := ch * rows
+		oh1 := min(oh0+rows, q.OH)
+		pc := (oh1 - oh0) * q.OW
+		cf := colF[wk*q.K*rows*q.OW:][:q.K*pc]
+		q.qim2colRows(q.xf[(n*q.C+g*q.Cg)*q.H*q.W:], cf, pv, oh0, oh1)
+		acc := accF[wk*q.Mg*rows*q.OW:]
+		gemm.QgemmPackedS8(pk[g], pc, cf, pc, acc, pc, false)
+		for mi := 0; mi < q.Mg; mi++ {
+			m := g*q.Mg + mi
+			d8, di := q.dstRow(m, n, oh0*q.OW, pc)
+			q.requant(d8, di, acc[mi*pc:(mi+1)*pc], q.corr(m), q.mult[m])
+		}
+	})
+	if q.ctx.Pool != nil {
+		q.ctx.Pool.Put(accT)
+		q.ctx.Pool.Put(colT)
+	}
+}
+
+// qim2colRows fills the byte column matrix for output rows [oh0,oh1).
+func (q *qconvRun) qim2colRows(x, col []int8, pv int8, oh0, oh1 int) {
+	sh, sw := q.o.conv.strides[0], q.o.conv.strides[1]
+	dh, dw := q.o.conv.dilations[0], q.o.conv.dilations[1]
+	pt, pl := q.pads[0], q.pads[1]
+	pc := (oh1 - oh0) * q.OW
+	for k := 0; k < q.K; k++ {
+		c := k / (q.KH * q.KW)
+		kh := (k / q.KW) % q.KH
+		kw := k % q.KW
+		xc := x[c*q.H*q.W : (c+1)*q.H*q.W]
+		row := col[k*pc : (k+1)*pc]
+		for oh := oh0; oh < oh1; oh++ {
 			ih := oh*sh + kh*dh - pt
-			dst := row[oh*OW : (oh+1)*OW]
-			if ih < 0 || ih >= H {
+			dst := row[(oh-oh0)*q.OW : (oh-oh0+1)*q.OW]
+			if ih < 0 || ih >= q.H {
 				for i := range dst {
-					dst[i] = padVal
+					dst[i] = pv
 				}
 				continue
 			}
-			src := xc[ih*W : (ih+1)*W]
-			for ow := 0; ow < OW; ow++ {
+			src := xc[ih*q.W : (ih+1)*q.W]
+			for ow := 0; ow < q.OW; ow++ {
 				iw := ow*sw + kw*dw - pl
-				if iw < 0 || iw >= W {
-					dst[ow] = padVal
+				if iw < 0 || iw >= q.W {
+					dst[ow] = pv
 				} else {
 					dst[ow] = src[iw]
 				}
 			}
 		}
-	})
+	}
+}
+
+func (o *qlinearConvOp) weights(wf []int8, G, Mg, K, M int) []*gemm.QPackedA {
+	o.packMu.Lock()
+	defer o.packMu.Unlock()
+	o.fill(wf, G, Mg, K, M, true)
+	return o.packed
+}
+
+func (o *qlinearConvOp) sumWFor(wf []int8, G, Mg, K, M int) []int32 {
+	o.packMu.Lock()
+	defer o.packMu.Unlock()
+	o.fill(wf, G, Mg, K, M, false)
+	return o.sumW
+}
+
+// fill populates the cached ΣW (always) and packed panels (when needed).
+func (o *qlinearConvOp) fill(wf []int8, G, Mg, K, M int, needPack bool) {
+	if o.packSrc == &wf[0] && (!needPack || o.packed != nil) {
+		return
+	}
+	if o.packSrc != &wf[0] {
+		o.packed, o.sumW = nil, nil
+	}
+	if o.sumW == nil {
+		sumW := make([]int32, M)
+		for m := 0; m < M; m++ {
+			var s int32
+			for p := 0; p < K; p++ {
+				s += int32(wf[m*K+p])
+			}
+			sumW[m] = s
+		}
+		o.sumW = sumW
+	}
+	if needPack && o.packed == nil {
+		pk := make([]*gemm.QPackedA, G)
+		for g := 0; g < G; g++ {
+			pk[g] = gemm.QPackA(Mg, K, wf[g*Mg*K:], K)
+		}
+		o.packed = pk
+	}
+	o.packSrc = &wf[0]
 }
 
 // ---- QLinearMatMul / MatMulInteger ----
