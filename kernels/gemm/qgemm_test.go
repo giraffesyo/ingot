@@ -121,8 +121,13 @@ func BenchmarkQgemmPackedS8(b *testing.B) {
 // (Apple M1, Graviton2) is exercised on every machine.
 func TestQgemmFallbackKernels(t *testing.T) {
 	savedU, savedS := qkernel, qkernelS8
+	savedQ, savedR := qpackQuad, qctRowMajor
 	qkernel, qkernelS8 = qkernelGeneric, qkernelS8Generic
-	defer func() { qkernel, qkernelS8 = savedU, savedS }()
+	qpackQuad, qctRowMajor = false, false
+	defer func() {
+		qkernel, qkernelS8 = savedU, savedS
+		qpackQuad, qctRowMajor = savedQ, savedR
+	}()
 	t.Run("u8s8", TestQgemmU8S8VsRef)
 	t.Run("packedS8", TestQgemmPackedS8VsRef)
 }
@@ -151,7 +156,12 @@ func TestQPackBPanel(t *testing.T) {
 			for j := 0; j < cols; j++ {
 				for o := 0; o < qKG; o++ {
 					q := g*qKG + o
-					if q < tc.k {
+					if q >= tc.k {
+						continue
+					}
+					if qpackQuad {
+						want[g*qNR*qKG+(o>>2)*qNR*4+j*4+o&3] = b[q*tc.n+tc.j0+j]
+					} else {
 						want[g*qNR*qKG+j*qKG+o] = b[q*tc.n+tc.j0+j]
 					}
 				}
@@ -161,4 +171,66 @@ func TestQPackBPanel(t *testing.T) {
 			t.Errorf("k=%d n=%d j0=%d: pack mismatch", tc.k, tc.n, tc.j0)
 		}
 	}
+}
+
+// Go models of the VNNI kernels' contract (quad-major B, row-major C) so the
+// amd64 layout plumbing is exercised on every arch; the asm itself is
+// validated by the same VsRef tests on VNNI hardware.
+func qkernelU8S8QuadRef(kg int64, ap *uint8, bp *int8, ct *int32) {
+	a := unsafeSliceU8(ap, int(kg)*qMR*qKG)
+	b := unsafeSliceI8(bp, int(kg)*qNR*qKG)
+	c := unsafeSliceI32(ct, qMR*qNR)
+	clear(c)
+	for g := 0; g < int(kg); g++ {
+		for q := 0; q < 2; q++ {
+			for r := 0; r < qMR; r++ {
+				for j := 0; j < qNR; j++ {
+					var s int32
+					for t := 0; t < 4; t++ {
+						av := int32(a[g*qMR*qKG+r*qKG+q*4+t])
+						bv := int32(b[g*qNR*qKG+q*qNR*4+j*4+t])
+						s += av * bv
+					}
+					c[r*qNR+j] += s
+				}
+			}
+		}
+	}
+}
+
+func qkernelS8S8QuadRef(kg int64, ap *int8, bp *int8, ct *int32) {
+	a := unsafeSliceI8(ap, int(kg)*qMR*qKG)
+	b := unsafeSliceI8(bp, int(kg)*qNR*qKG)
+	c := unsafeSliceI32(ct, qMR*qNR)
+	clear(c)
+	for g := 0; g < int(kg); g++ {
+		for q := 0; q < 2; q++ {
+			for r := 0; r < qMR; r++ {
+				for j := 0; j < qNR; j++ {
+					var s int32
+					for t := 0; t < 4; t++ {
+						av := int32(a[g*qMR*qKG+r*qKG+q*4+t])
+						bv := int32(b[g*qNR*qKG+q*qNR*4+j*4+t])
+						s += av * bv
+					}
+					c[r*qNR+j] += s
+				}
+			}
+		}
+	}
+}
+
+// TestQgemmQuadLayout forces the amd64 VNNI layout (quad-major B pack,
+// row-major C scatter) with the Go kernel models, on every architecture.
+func TestQgemmQuadLayout(t *testing.T) {
+	savedU, savedS := qkernel, qkernelS8
+	savedQ, savedR := qpackQuad, qctRowMajor
+	qkernel, qkernelS8 = qkernelU8S8QuadRef, qkernelS8S8QuadRef
+	qpackQuad, qctRowMajor = true, true
+	defer func() {
+		qkernel, qkernelS8 = savedU, savedS
+		qpackQuad, qctRowMajor = savedQ, savedR
+	}()
+	t.Run("u8s8", TestQgemmU8S8VsRef)
+	t.Run("packedS8", TestQgemmPackedS8VsRef)
 }
