@@ -400,7 +400,7 @@ func (o *qlinearConvOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, er
 	out := ctx.NewUninit(ydt, N, M, OH, OW)
 	q := &qconvRun{
 		o: o, ctx: ctx, xf: xf, wf: wf, bias: bias, out: out, ydt: ydt,
-		mult: mult, zx: zx, zy: zy,
+		mult: mult, sumW: o.sumWFor(wf, G, Mg, K, M), zx: zx, zy: zy,
 		N: N, C: C, H: H, W: W, M: M, G: G, Cg: Cg, Mg: Mg, K: K,
 		KH: KH, KW: KW, OH: OH, OW: OW, P: P, pads: pads,
 	}
@@ -430,6 +430,7 @@ type qconvRun struct {
 	out  *tensor.Tensor
 	ydt  tensor.DType
 	mult []float32
+	sumW []int32 // ΣW per output channel, resolved once (corr is on hot paths)
 	zx   int32
 	zy   float32
 
@@ -439,7 +440,7 @@ type qconvRun struct {
 }
 
 func (q *qconvRun) corr(m int) int32 {
-	c := -q.zx * q.o.sumWFor(q.wf, q.G, q.Mg, q.K, q.M)[m]
+	c := -q.zx * q.sumW[m]
 	if q.bias != nil {
 		c += q.bias[m]
 	}
@@ -490,11 +491,13 @@ func (q *qconvRun) depthwise() {
 	if fast1 || fast2 {
 		w16 = q.o.dw16For(q.wf, q.C, taps)
 	}
-	// per-worker scratch: s16 padded plane + optional even/odd halves. One
-	// allocation per Run (no i16 pool dtype); amortised across all channels.
+	// per-worker scratch: s16 padded plane + optional even/odd halves, from
+	// the tensor pool (a make here churned ~15 MB per depthwise conv at 640²
+	// — runtime.madvise was 23%% of the 1T profile).
 	per := Hp*Wp + 2*Hp*Wh
 	workers := par.Workers()
-	s16All := make([]int16, workers*per)
+	s16T := q.ctx.NewUninit(tensor.I16, workers, per)
+	s16All := s16T.I16()
 	accT := q.ctx.NewUninit(tensor.I32, workers, q.OW)
 	accF := accT.I32()
 	// stride-2 sub-kernel weights (even/odd column taps), built per call: tiny.
@@ -610,6 +613,7 @@ func (q *qconvRun) depthwise() {
 	})
 	if q.ctx.Pool != nil {
 		q.ctx.Pool.Put(accT)
+		q.ctx.Pool.Put(s16T)
 	}
 }
 
@@ -698,6 +702,22 @@ func (q *qconvRun) qim2colRows(x, col []int8, pv int8, oh0, oh1 int) {
 				continue
 			}
 			src := xc[ih*q.W : (ih+1)*q.W]
+			if sw == 1 && dw == 1 {
+				// contiguous window with clipped edges: one copy
+				start := kw - pl
+				lo := max(0, -start)
+				hi := min(q.OW, q.W-start)
+				for i := 0; i < min(lo, q.OW); i++ {
+					dst[i] = pv
+				}
+				if hi > lo {
+					copy(dst[lo:hi], src[start+lo:start+hi])
+				}
+				for i := max(hi, 0); i < q.OW; i++ {
+					dst[i] = pv
+				}
+				continue
+			}
 			for ow := 0; ow < q.OW; ow++ {
 				iw := ow*sw + kw*dw - pl
 				if iw < 0 || iw >= q.W {
