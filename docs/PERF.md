@@ -922,3 +922,41 @@ adjacent int8 convs, and SME int8 engagement on the shapes that qualify.
 int8 still doesn't beat our own f32 MT on this machine (11.8 vs ~10 — f32
 has Winograd and wider SIMD maturity); the int8 payoff stays biggest on
 1T/SME and will matter on VNNI-class amd64.
+
+
+## Quantized PP-OCR, part 3 — int8 passes f32 (2026-08-24)
+
+The part-2 profile said the remaining 1T time was "real work"; it wasn't,
+quite. Four more finds:
+
+1. **Chunk sizing bug**: the qconv chunk formulas divided the cache budget
+   by the packed *weight* size, so every big conv floored at 64-column
+   slivers — tiny GEMM calls, per-chunk overhead, and permanently under
+   the SME n≥128 dispatch floor. Chunks are now sized by the actual
+   per-chunk working set (B + i32 acc), larger budget at 1T.
+   (MT det 11.8 → 10.1 on its own; also why int8 SME never fired
+   in-model — with real chunk widths it still doesn't pay here, NEON+
+   driver wins, but now for the right reason.)
+2. **`vek.ShiftU8S8`**: the u8→s8 shift was a scalar `v^0x80` loop —
+   9.8% of det 1T. One NEON EOR pass now.
+3. **corr folded into `vek.Requant{U8,I8}`**: the per-channel correction
+   was a separate scalar sweep over acc before every requant; it's now a
+   vector pre-add inside the existing asm pass.
+4. **`qscatter`**: the 2×2-block → row-major C scatter (top flat item
+   after the B-pack went SIMD, 11%). Each accumulator register viewed as
+   .2d holds an even-row column pair low and the odd-row pair high, so a
+   full 8×12 tile is 6 uzp + two 48-byte stores per row pair.
+
+End of round (quiet window, count=3, same-run f32 comparison):
+
+| bench | MT | 1T | ORT int8 MT / 1T | our f32 same run |
+|---|---|---|---|---|
+| det_int8_640 | **8.4 ms** | **44.6** | 14.2 / 36 | 8.3 MT |
+| rec_int8_320 | **3.7 ms** | **12.5** | 4.0 / 9.3 | 2.9 MT |
+
+**det int8 MT is 1.7× faster than ORT int8 and now matches our f32 det**
+— the quantized detection pipeline is no longer a perf regression against
+f32, it's a footprint win at equal speed. Cumulative part 1→3:
+det_int8 MT 36 → 8.4 (4.3×), 1T 109 → 44.6 (2.4×). Remaining 1T gap vs
+ORT (1.2–1.3×): shift-in-pack fusion and Q/DQ island elision are still
+open; rec depthwise at 1T is the next profile item.

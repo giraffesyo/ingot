@@ -71,8 +71,11 @@
 - [x] quantized PP-OCR part 2: QLinearConv driver maturation — lock-free corr,
       pooled I16 depthwise scratch, memcpy qim2col, NEON zip-transpose B-pack
       (det_int8 MT 36→11.8 ms, beats ORT-int8 14.2; 1T 109→63 vs ORT 36)
-- [ ] quantized PP-OCR part 3: close the int8 1T gap (shift-in-pack fusion,
-      Q/DQ island elision); SDOT mid-tier, amd64 VNNI; bf16
+- [x] quantized PP-OCR part 3: chunk working-set fix, vek.ShiftU8S8, corr
+      folded into requant asm, NEON C-tile scatter — det_int8 MT 8.4 ms
+      (1.7× faster than ORT-int8, matches our f32 det), 1T 109→44.6 overall
+- [ ] int8 next: Q/DQ island elision, shift-in-pack fusion, rec depthwise 1T;
+      SDOT mid-tier (non-I8MM arm64), amd64 VNNI; bf16
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
