@@ -361,3 +361,24 @@ func TestQDwRowS1(t *testing.T) {
 		}
 	}
 }
+
+func TestQLut(t *testing.T) {
+	var tab [256]uint8
+	for i := range tab {
+		tab[i] = uint8((i*7 + 13) % 256)
+	}
+	for _, n := range []int{0, 1, 15, 16, 17, 64, 255, 4096} {
+		src := make([]uint8, n)
+		for i := range src {
+			i8 := uint8(i * 31)
+			src[i] = i8
+		}
+		dst := make([]uint8, n)
+		QLut(dst, src, &tab)
+		for i := range src {
+			if dst[i] != tab[src[i]] {
+				t.Fatalf("n=%d: QLut[%d]=%d want %d", n, i, dst[i], tab[src[i]])
+			}
+		}
+	}
+}
