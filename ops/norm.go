@@ -7,6 +7,8 @@ import (
 	"github.com/giraffesyo/ingot/tensor"
 )
 
+const ingotDomainNorm = "ingot"
+
 // layerNormOp: normalise over dims [axis, rank) with per-element scale/bias.
 type layerNormOp struct {
 	n    NodeInfo
@@ -15,12 +17,26 @@ type layerNormOp struct {
 }
 
 func (o *layerNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
-	if len(in) < 2 || in[0] == nil || in[1] == nil {
-		return nil, o.n.Errorf("need X and Scale")
+	if len(in) < 1 || in[0] == nil {
+		return nil, o.n.Errorf("need X")
 	}
-	x, scale := in[0], in[1]
+	x := in[0]
+	var scale *tensor.Tensor
+	if len(in) > 1 && in[1] != nil {
+		scale = in[1]
+	}
+	if x.DType() != tensor.F32 || (scale != nil && scale.DType() != tensor.F32) {
+		sd := "nil"
+		if scale != nil {
+			sd = scale.DType().String()
+		}
+		return nil, o.n.Errorf("LayerNorm: want f32 inputs, got x=%s scale=%s", x.DType(), sd)
+	}
 	var bias []float32
 	if len(in) > 2 && in[2] != nil {
+		if in[2].DType() != tensor.F32 {
+			return nil, o.n.Errorf("LayerNorm: want f32 bias, got %s", in[2].DType())
+		}
 		bias = in[2].F32()
 	}
 	xs := x.Shape()
@@ -38,9 +54,12 @@ func (o *layerNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	for _, d := range xs[axis:] {
 		D *= d
 	}
-	sf := scale.F32()
-	if len(sf) != D {
-		return nil, o.n.Errorf("scale numel %d != normalised size %d", len(sf), D)
+	var sf []float32
+	if scale != nil {
+		sf = scale.F32()
+		if len(sf) != D {
+			return nil, o.n.Errorf("scale numel %d != normalised size %d", len(sf), D)
+		}
 	}
 	out := ctx.New(tensor.F32, xs...)
 	xf, of := x.F32(), out.F32()
@@ -64,11 +83,16 @@ func (o *layerNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 		}
 		inv := float32(1 / math.Sqrt(vs/float64(D)+float64(eps)))
 		m := float32(mean)
-		if bias != nil {
+		switch {
+		case sf == nil:
+			for j, v := range row {
+				dst[j] = (v - m) * inv
+			}
+		case bias != nil:
 			for j, v := range row {
 				dst[j] = (v-m)*inv*sf[j] + bias[j]
 			}
-		} else {
+		default:
 			for j, v := range row {
 				dst[j] = (v - m) * inv * sf[j]
 			}
@@ -171,6 +195,9 @@ func (o *instanceNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, e
 }
 
 func init() {
+	Register(ingotDomainNorm, "LayerNorm", 1, func(n NodeInfo) (Op, error) {
+		return &layerNormOp{n: n, axis: int(n.Attrs.Int("axis", -1)), eps: n.Attrs.Float("epsilon", 1e-5)}, nil
+	})
 	Register("", "LayerNormalization", 17, func(n NodeInfo) (Op, error) {
 		return &layerNormOp{n: n, axis: int(n.Attrs.Int("axis", -1)), eps: n.Attrs.Float("epsilon", 1e-5)}, nil
 	})
