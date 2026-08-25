@@ -21,6 +21,104 @@ func usmmla(d, n, m int) uint32 { return 0x4E80AC00 | uint32(m)<<16 | uint32(n)<
 func smmla(d, n, m int) uint32  { return 0x4E80A400 | uint32(m)<<16 | uint32(n)<<5 | uint32(d) }
 func movi0(d int) uint32        { return 0x4F000400 | uint32(d) }
 
+func sdotElt(d, n, m, idx int) uint32 {
+	return 0x4F80E000 | uint32(idx&1)<<21 | uint32(idx>>1)<<11 | uint32(m)<<16 | uint32(n)<<5 | uint32(d)
+}
+func eorB(d, n, m int) uint32 { return 0x6E201C00 | uint32(m)<<16 | uint32(n)<<5 | uint32(d) }
+func subS(d, n, m int) uint32 { return 0x6EA08400 | uint32(m)<<16 | uint32(n)<<5 | uint32(d) } // sub .4s
+func movi80(d int) uint32     { return 0x4F04E400 | uint32(d) }                                // movi .16b #0x80
+
+// emitSDOT writes an 8×12 dot-product kernel (FEAT_DotProd — Apple M1,
+// Graviton2, most Armv8.2 cores; the tier below I8MM). B is quad-major
+// ([g][2q][12j][4], the same layout as the amd64 VNNI kernels) and C is
+// written row-major: acc(r,c) = v(8+r·3+c), rows stored as contiguous
+// three-register VST1s. SDOT is s8·s8; the u8s8 variant flips A with 0x80
+// (v7, re-materialised per group) and subtracts the compensation
+// −128·colsum(B), accumulated on the stack with SDOT against v7 itself
+// (0x80 = −128 as s8) — quad 0's B is reloaded for its sum pass after the
+// row SDOTs, once A's registers are free for scratch.
+func emitSDOT(w func(string, ...any), name string, flipA bool) {
+	acc := func(r, c int) int { return 8 + r*3 + c }
+	frame := 0
+	if flipA {
+		frame = 48
+	}
+	w("// func %s(kg int64, ap, bp, ct pointers)", name)
+	w("// A [g][8r][8o], B quad-major [g][2q][12j][4], C row-major 8×12.")
+	w("TEXT ·%s(SB), NOSPLIT, $%d-32", name, frame)
+	w("\tMOVD kg+0(FP), R0")
+	w("\tMOVD ap+8(FP), R1")
+	w("\tMOVD bp+16(FP), R2")
+	w("\tMOVD ct+24(FP), R3")
+	for r := 0; r < 8; r++ {
+		for c := 0; c < 3; c++ {
+			d := acc(r, c)
+			w("\tWORD $0x%08X // movi v%d.4s, #0", movi0(d), d)
+		}
+	}
+	if flipA {
+		w("\tMOVD ZR, R5")
+		for off := 8; off <= 48; off += 8 {
+			w("\tMOVD R5, sums-%d(SP)", off)
+		}
+	}
+	w("%s_loop:", name)
+	w("\tCBZ R0, %s_done", name)
+	if flipA {
+		w("\tMOVD R2, R4 // quad 0 pointer, for the deferred sum pass")
+	}
+	w("\tVLD1.P 64(R1), [V0.B16, V1.B16, V2.B16, V3.B16] // A rows 0-7 × 8k")
+	if flipA {
+		w("\tWORD $0x%08X // movi v7.16b, #0x80", movi80(7))
+		for a := 0; a < 4; a++ {
+			w("\tWORD $0x%08X // eor v%d ^= 0x80 (u8 → s8)", eorB(a, a, 7), a)
+		}
+	}
+	for q := 0; q < 2; q++ {
+		w("\tVLD1.P 48(R2), [V4.B16, V5.B16, V6.B16] // B quad %d, cols 0-11", q)
+		for r := 0; r < 8; r++ {
+			areg, aelt := r>>1, (r&1)<<1|q
+			for c := 0; c < 3; c++ {
+				d := acc(r, c)
+				w("\tWORD $0x%08X // sdot v%d += b%d · a[r%d,q%d]", sdotElt(d, 4+c, areg, aelt), d, c, r, q)
+			}
+		}
+	}
+	if flipA {
+		// A registers are dead now: v0 is the sum scratch. Quad 1's B is
+		// still live in v4-v6; quad 0's is reloaded from R4.
+		for c := 0; c < 3; c++ {
+			w("\tFMOVQ sums-%d(SP), F0", 48-16*c)
+			w("\tWORD $0x%08X // sum%d += b%d(q1) · (−128)", sdotElt(0, 4+c, 7, 0), c, c)
+			w("\tFMOVQ F0, sums-%d(SP)", 48-16*c)
+		}
+		w("\tVLD1 (R4), [V4.B16, V5.B16, V6.B16] // reload B quad 0")
+		for c := 0; c < 3; c++ {
+			w("\tFMOVQ sums-%d(SP), F0", 48-16*c)
+			w("\tWORD $0x%08X // sum%d += b%d(q0) · (−128)", sdotElt(0, 4+c, 7, 0), c, c)
+			w("\tFMOVQ F0, sums-%d(SP)", 48-16*c)
+		}
+	}
+	w("\tSUB $1, R0, R0")
+	w("\tB %s_loop", name)
+	w("%s_done:", name)
+	if flipA {
+		// acc(r,c) −= sums[c] (sums hold −128·colsum: subtract to add back).
+		for c := 0; c < 3; c++ {
+			w("\tFMOVQ sums-%d(SP), F0", 48-16*c)
+			for r := 0; r < 8; r++ {
+				d := acc(r, c)
+				w("\tWORD $0x%08X // v%d -= (−128·colsum%d)", subS(d, d, 0), d, c)
+			}
+		}
+	}
+	for r := 0; r < 8; r++ {
+		w("\tVST1.P [V%d.S4, V%d.S4, V%d.S4], 48(R3)", acc(r, 0), acc(r, 1), acc(r, 2))
+	}
+	w("\tRET")
+	w("")
+}
+
 func main() {
 	var b strings.Builder
 	w := func(f string, a ...any) { fmt.Fprintf(&b, f+"\n", a...) }
@@ -32,6 +130,8 @@ func main() {
 	w("")
 	emit(w, "qkernelU8S8", usmmla)
 	emit(w, "qkernelS8S8", smmla)
+	emitSDOT(w, "qkernelU8S8SDOT", true)
+	emitSDOT(w, "qkernelS8S8SDOT", false)
 	os.Stdout.WriteString(b.String())
 }
 

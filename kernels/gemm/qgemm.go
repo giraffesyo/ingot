@@ -124,7 +124,13 @@ func qscatterTile(ct []int32, c []int32, ldc, rows, cols int) {
 // it needs j0+16 <= ldb and whole k-groups); edges fall back to the scalar loop.
 func qpackBPanel(bp []int8, b []int8, ldb, k, kg, j0, cols int) {
 	if qpackQuad {
-		// amd64 VNNI layout: [g][q(2)][j(12)][4] bytes.
+		// Quad-major layout ([g][q(2)][j(12)][4] bytes): amd64 VNNI and the
+		// arm64 SDOT tier. On arm64 the zip-transpose kernel handles full
+		// panels; scalar keeps the edges (and amd64 entirely, for now).
+		if hasQpackAsm && cols == qNR && k%qKG == 0 && j0+16 <= ldb {
+			qpackbq(&bp[0], &b[j0], int64(ldb), int64(kg))
+			return
+		}
 		if cols < qNR || k%qKG != 0 {
 			clear(bp[:kg*qNR*qKG])
 		}

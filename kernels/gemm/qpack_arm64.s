@@ -69,3 +69,74 @@ loop:
 	SUBS $1, R3, R3
 	BNE  loop
 	RET
+
+// qpackbq is qpackb for the quad-major layout consumed by the SDOT kernels
+// (bp[g*96 + q*48 + j*4 + t] = B[g*8+q*4+t][j]): identical loads and zip
+// transpose, then a uzp1/uzp2 .4s pass splits each column pair's 8 bytes
+// into its quad-0 and quad-1 dwords before the stores.
+//
+// func qpackbq(dst *int8, src *int8, ldb int64, groups int64)
+TEXT ·qpackbq(SB), NOSPLIT, $0-32
+	MOVD dst+0(FP), R0
+	MOVD src+8(FP), R1
+	MOVD ldb+16(FP), R2
+	MOVD groups+24(FP), R3
+	LSL  $3, R2, R6 // 8*ldb: src advance per group
+
+qloop:
+	MOVD R1, R4
+	VLD1 (R4), [V0.B16]
+	ADD  R2, R4
+	VLD1 (R4), [V1.B16]
+	ADD  R2, R4
+	VLD1 (R4), [V2.B16]
+	ADD  R2, R4
+	VLD1 (R4), [V3.B16]
+	ADD  R2, R4
+	VLD1 (R4), [V4.B16]
+	ADD  R2, R4
+	VLD1 (R4), [V5.B16]
+	ADD  R2, R4
+	VLD1 (R4), [V6.B16]
+	ADD  R2, R4
+	VLD1 (R4), [V7.B16]
+
+	// round 1: interleave row pairs (bytes)
+	WORD $0x4e013808 // zip1.16b v8, v0, v1
+	WORD $0x4e033849 // zip1.16b v9, v2, v3
+	WORD $0x4e05388a // zip1.16b v10, v4, v5
+	WORD $0x4e0738cb // zip1.16b v11, v6, v7
+	WORD $0x4e01780c // zip2.16b v12, v0, v1
+	WORD $0x4e03784d // zip2.16b v13, v2, v3
+	WORD $0x4e05788e // zip2.16b v14, v4, v5
+	WORD $0x4e0778cf // zip2.16b v15, v6, v7
+
+	// round 2: interleave row quads (16-bit units = col × 2 rows)
+	WORD $0x4e493910 // zip1.8h v16, v8, v9
+	WORD $0x4e497911 // zip2.8h v17, v8, v9
+	WORD $0x4e4b3952 // zip1.8h v18, v10, v11
+	WORD $0x4e4b7953 // zip2.8h v19, v10, v11
+	WORD $0x4e4d399a // zip1.8h v26, v12, v13
+	WORD $0x4e4f39db // zip1.8h v27, v14, v15
+
+	// round 3: full columns (32-bit units = col × 4 rows)
+	WORD $0x4e923a14 // zip1.4s v20, v16, v18 (cols 0,1)
+	WORD $0x4e927a15 // zip2.4s v21, v16, v18 (cols 2,3)
+	WORD $0x4e933a36 // zip1.4s v22, v17, v19 (cols 4,5)
+	WORD $0x4e937a37 // zip2.4s v23, v17, v19 (cols 6,7)
+	WORD $0x4e9b3b58 // zip1.4s v24, v26, v27 (cols 8,9)
+	WORD $0x4e9b7b59 // zip2.4s v25, v26, v27 (cols 10,11)
+
+	WORD $0x4e951a88 // uzp1.4s v8, v20, v21 (quad0 cols 0-3)
+	WORD $0x4e971ac9 // uzp1.4s v9, v22, v23 (quad0 cols 4-7)
+	WORD $0x4e991b0a // uzp1.4s v10, v24, v25 (quad0 cols 8-11)
+	WORD $0x4e955a8b // uzp2.4s v11, v20, v21 (quad1 cols 0-3)
+	WORD $0x4e975acc // uzp2.4s v12, v22, v23 (quad1 cols 4-7)
+	WORD $0x4e995b0d // uzp2.4s v13, v24, v25 (quad1 cols 8-11)
+	VST1.P [V8.B16, V9.B16, V10.B16], 48(R0)
+	VST1.P [V11.B16, V12.B16, V13.B16], 48(R0)
+
+	ADD  R6, R1
+	SUBS $1, R3, R3
+	BNE  qloop
+	RET
