@@ -139,9 +139,22 @@ func Workers() int {
 	return nworkers
 }
 
-// For runs fn(i, w) for i in [0,n); see Run. The closure escapes (one
-// allocation per call) — prefer Run with a pooled Task in hot paths.
-func For(n, grain int, fn func(i, w int)) { Run(n, grain, Func(fn)) }
+// For runs fn(i, w) for i in [0,n); see Run. The closure itself escapes (one
+// allocation per call at the caller); the Task box is pooled here — prefer
+// Run with a pooled pointer Task to get to zero in the hottest paths.
+func For(n, grain int, fn func(i, w int)) {
+	t := funcTaskPool.Get().(*funcTask)
+	t.fn = fn
+	Run(n, grain, t)
+	t.fn = nil
+	funcTaskPool.Put(t)
+}
+
+type funcTask struct{ fn func(i, w int) }
+
+func (t *funcTask) Run(i, w int) { t.fn(i, w) }
+
+var funcTaskPool = sync.Pool{New: func() any { return new(funcTask) }}
 
 // Run calls t.Run(i, w) for i in [0,n), where w is the id of the worker running
 // it (0 is the caller). Consecutive indices are handed out in chunks of grain.
