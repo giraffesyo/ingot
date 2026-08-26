@@ -98,9 +98,11 @@
 - [x] fused attention (ingot.MHA): 11-node exported MHA pattern → one op
       (scale in GEMM alpha, transposed-B K, strided output writes); both rec
       blocks fuse, parity/accuracy unchanged
-- [ ] SE-path islands (small), fused epilogues; bf16 storage in the
-      executor (Linear/MatMul weight auto-conversion, opt-in); transformer
-      zoo model (ViT/BERT block) to exercise MHA at scale
+- [x] generic SDPA fusion (ingot.SDPA): torch-export attention core incl.
+      masked decoder blocks — 5 zoo blocks fused, llmblock −12% at toy scale
+- [ ] const-fold pass (tiny_transformer's SDPA blocks on it; architecture
+      sketch promised it); SE-path islands, fused epilogues; bf16 executor
+      wiring; larger-seq transformer zoo model to show SDPA at scale
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
