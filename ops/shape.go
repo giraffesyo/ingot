@@ -19,11 +19,11 @@ func normAxis(axis, rank int) (int, error) {
 	return axis, nil
 }
 
-// copyView copies t's bytes into a new tensor of the same dtype and `shape`.
-func copyView(ctx *Ctx, t *tensor.Tensor, shape tensor.Shape) *tensor.Tensor {
-	out := ctx.New(t.DType(), shape...)
-	copy(out.Bytes(), t.Bytes())
-	return out
+// copyView returns a zero-copy view of t with `shape`. The name survives from
+// when this copied: the executor's alias guard keeps a view's shared buffer
+// out of the pool while the view lives, so no copy is needed.
+func copyView(_ *Ctx, t *tensor.Tensor, shape tensor.Shape) *tensor.Tensor {
+	return t.Reshape(shape...)
 }
 
 // ---- Reshape ----
@@ -49,7 +49,15 @@ func (o *reshapeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 		want = in[1].I64()
 	}
 	xs := x.Shape()
-	shape := make(tensor.Shape, len(want))
+	var sbuf [8]int
+	shape := tensor.Shape(sbuf[:0])
+	if len(want) > len(sbuf) {
+		shape = make(tensor.Shape, 0, len(want))
+	}
+	shape = shape[:len(want)]
+	for i := range shape {
+		shape[i] = 0
+	}
 	neg := -1
 	known := 1
 	for i, d := range want {
@@ -132,24 +140,31 @@ func (o *squeezeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 	x := in[0]
 	xs := x.Shape()
 	axes := o.axes(in)
+	var sbuf [8]int
 	var shape tensor.Shape
 	if o.unsq {
 		rank := len(xs) + len(axes)
-		set := map[int]bool{}
+		if rank > 64 {
+			return nil, o.n.Errorf("rank %d too large", rank)
+		}
+		var set uint64
 		for _, a := range axes {
 			ax := int(a)
 			if ax < 0 {
 				ax += rank
 			}
-			if ax < 0 || ax >= rank || set[ax] {
+			if ax < 0 || ax >= rank || set&(1<<ax) != 0 {
 				return nil, o.n.Errorf("bad axes %v", axes)
 			}
-			set[ax] = true
+			set |= 1 << ax
 		}
-		shape = make(tensor.Shape, 0, rank)
+		shape = tensor.Shape(sbuf[:0])
+		if rank > len(sbuf) {
+			shape = make(tensor.Shape, 0, rank)
+		}
 		src := 0
 		for i := 0; i < rank; i++ {
-			if set[i] {
+			if set&(1<<i) != 0 {
 				shape = append(shape, 1)
 			} else {
 				shape = append(shape, xs[src])
@@ -157,7 +172,10 @@ func (o *squeezeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 			}
 		}
 	} else {
-		set := map[int]bool{}
+		if len(xs) > 64 {
+			return nil, o.n.Errorf("rank %d too large", len(xs))
+		}
+		var set uint64
 		for _, a := range axes {
 			ax := int(a)
 			if ax < 0 {
@@ -166,11 +184,14 @@ func (o *squeezeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 			if ax < 0 || ax >= len(xs) || xs[ax] != 1 {
 				return nil, o.n.Errorf("cannot squeeze axis %d of %v", a, xs)
 			}
-			set[ax] = true
+			set |= 1 << ax
 		}
-		shape = make(tensor.Shape, 0, len(xs))
+		shape = tensor.Shape(sbuf[:0])
+		if len(xs) > len(sbuf) {
+			shape = make(tensor.Shape, 0, len(xs))
+		}
 		for i, d := range xs {
-			if set[i] || (axes == nil && d == 1) {
+			if set&(1<<i) != 0 || (axes == nil && d == 1) {
 				continue
 			}
 			shape = append(shape, d)
@@ -190,7 +211,11 @@ func (o *transposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	x := in[0]
 	xs := x.Shape()
 	r := len(xs)
-	perm := make([]int, r)
+	var pbuf, obuf [8]int
+	perm := pbuf[:r:r]
+	if r > len(pbuf) {
+		perm = make([]int, r)
+	}
 	if o.perm == nil {
 		for i := range perm {
 			perm[i] = r - 1 - i
@@ -203,7 +228,10 @@ func (o *transposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 			perm[i] = int(p)
 		}
 	}
-	oshape := make(tensor.Shape, r)
+	oshape := tensor.Shape(obuf[:r:r])
+	if r > len(obuf) {
+		oshape = make(tensor.Shape, r)
+	}
 	for i, p := range perm {
 		oshape[i] = xs[p]
 	}
@@ -221,16 +249,24 @@ func transposeBytes(x, out *tensor.Tensor, perm []int) {
 		copy(out.Bytes(), x.Bytes())
 		return
 	}
-	xst := xs.Strides()
+	xst := x.Strides() // contiguous strides, precomputed on the tensor
 	// stride in source for each output dim
-	sst := make([]int, r)
+	var sbuf, ibuf [8]int
+	sst := sbuf[:r:r]
+	if r > len(sbuf) {
+		sst = make([]int, r)
+	}
 	for i, p := range perm {
 		sst[i] = xst[p]
 	}
 	n := out.Numel()
 	esz := x.DType().Size()
 	src, dst := x.Bytes(), out.Bytes()
-	idx := make([]int, r)
+	idx := ibuf[:r:r]
+	if r > len(ibuf) {
+		idx = make([]int, r)
+	}
+	clear(idx)
 	off := 0
 	inner := os[r-1]
 	is := sst[r-1]

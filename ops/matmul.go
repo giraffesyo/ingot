@@ -4,6 +4,7 @@ import (
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/tensor"
+	"sync"
 )
 
 // gemmOp: Y = alpha*op(A)·op(B) + beta*C, A [M×K], B [K×N], C broadcastable to [M×N].
@@ -77,7 +78,7 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	if a.DType() != tensor.F32 || b.DType() != tensor.F32 {
 		return nil, o.n.Errorf("only f32")
 	}
-	as, bs := a.Shape().Clone(), b.Shape().Clone()
+	as, bs := a.Shape(), b.Shape() // read-only below
 	if len(as) == 0 || len(bs) == 0 {
 		return nil, o.n.Errorf("scalar operands not allowed")
 	}
@@ -97,11 +98,13 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		return nil, o.n.Errorf("inner dim mismatch: %v · %v", a.Shape(), b.Shape())
 	}
 	batchA, batchB := as[:len(as)-2], bs[:len(bs)-2]
-	batch, err := broadcastShape(batchA, batchB)
+	var bbuf [8]int
+	batch, err := broadcastShapeIn(tensor.Shape(bbuf[:0]), batchA, batchB)
 	if err != nil {
 		return nil, o.n.Errorf("%v", err)
 	}
-	oshape := append(batch.Clone(), M, N)
+	var obuf [10]int
+	oshape := append(append(tensor.Shape(obuf[:0]), batch...), M, N)
 	out := ctx.NewUninit(tensor.F32, oshape...)
 	af, bf, of := a.F32(), b.F32(), out.F32()
 	nb := batch.Numel()
@@ -109,10 +112,18 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		gemm.Sgemm(M, N, K, 1, af, K, bf, N, 0, of, N)
 	} else {
 		// Per-batch matrix offsets (batch dims may broadcast).
-		sa := broadcastStrides(batchA, batch)
-		sb := broadcastStrides(batchB, batch)
-		offs := make([][2]int, nb)
-		idx := make([]int, len(batch))
+		sc := mmScratchPool.Get().(*mmScratch)
+		var sabuf, sbbuf, idxbuf [8]int
+		sa := broadcastStridesIn(sabuf[:0], batchA, batch)
+		sb := broadcastStridesIn(sbbuf[:0], batchB, batch)
+		if cap(sc.offs) < nb {
+			sc.offs = make([][2]int, nb)
+		}
+		offs := sc.offs[:nb]
+		idx := idxbuf[:len(batch)]
+		if len(batch) > len(idxbuf) {
+			idx = make([]int, len(batch))
+		}
 		for bi := 0; bi < nb; bi++ {
 			offA, offB := 0, 0
 			for d := range idx {
@@ -131,17 +142,19 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		// Small per-matrix GEMMs (attention heads: T×T·T×d) are run serially
 		// in parallel over the batch; large ones use the parallel GEMM in turn.
 		if M*N*K <= 1<<18 && nb > 1 {
-			par.For(nb, max(1, (1<<17)/max(M*N*K, 1)), func(bi, _ int) {
-				gemm.SgemmSerial(M, N, K, 1, af[offs[bi][0]:], K, bf[offs[bi][1]:], N, 0, of[bi*M*N:], N)
-			})
+			sc.af, sc.bf, sc.of, sc.M, sc.N, sc.K = af, bf, of, M, N, K
+			par.Run(nb, max(1, (1<<17)/max(M*N*K, 1)), sc)
+			sc.af, sc.bf, sc.of = nil, nil, nil
 		} else {
 			for bi := 0; bi < nb; bi++ {
 				gemm.Sgemm(M, N, K, 1, af[offs[bi][0]:], K, bf[offs[bi][1]:], N, 0, of[bi*M*N:], N)
 			}
 		}
+		mmScratchPool.Put(sc)
 	}
 	if squeezeM || squeezeN {
-		fs := batch.Clone()
+		var fbuf [10]int
+		fs := append(tensor.Shape(fbuf[:0]), batch...)
 		if !squeezeM {
 			fs = append(fs, M)
 		}
@@ -152,6 +165,20 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	}
 	return []*tensor.Tensor{out}, nil
 }
+
+// mmScratch carries batched-matmul offsets and the per-batch GEMM task
+// (pointer Task: par.Run allocates nothing).
+type mmScratch struct {
+	offs       [][2]int
+	af, bf, of []float32
+	M, N, K    int
+}
+
+func (m *mmScratch) Run(bi, _ int) {
+	gemm.SgemmSerial(m.M, m.N, m.K, 1, m.af[m.offs[bi][0]:], m.K, m.bf[m.offs[bi][1]:], m.N, 0, m.of[bi*m.M*m.N:], m.N)
+}
+
+var mmScratchPool = sync.Pool{New: func() any { return new(mmScratch) }}
 
 func init() {
 	Register("", "Gemm", 7, func(n NodeInfo) (Op, error) {

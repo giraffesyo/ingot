@@ -8,8 +8,18 @@ import (
 
 // broadcastShape computes the NumPy-style broadcast of two shapes.
 func broadcastShape(a, b tensor.Shape) (tensor.Shape, error) {
+	return broadcastShapeIn(nil, a, b)
+}
+
+// broadcastShapeIn is broadcastShape writing into buf (grown as needed) so
+// callers with a stack buffer avoid the allocation.
+func broadcastShapeIn(buf tensor.Shape, a, b tensor.Shape) (tensor.Shape, error) {
 	n := max(len(a), len(b))
-	out := make(tensor.Shape, n)
+	out := buf[:0]
+	if n > cap(buf) {
+		out = make(tensor.Shape, 0, n)
+	}
+	out = out[:n]
 	for i := 0; i < n; i++ {
 		da, db := 1, 1
 		if j := len(a) - n + i; j >= 0 {
@@ -33,7 +43,17 @@ func broadcastShape(a, b tensor.Shape) (tensor.Shape, error) {
 // broadcastStrides returns element strides for reading `shape` as if it were
 // `out` (zero stride on broadcast dims). len(out) >= len(shape).
 func broadcastStrides(shape, out tensor.Shape) []int {
-	st := make([]int, len(out))
+	return broadcastStridesIn(nil, shape, out)
+}
+
+// broadcastStridesIn is broadcastStrides writing into buf (grown as needed).
+func broadcastStridesIn(buf []int, shape, out tensor.Shape) []int {
+	st := buf[:0]
+	if len(out) > cap(buf) {
+		st = make([]int, 0, len(out))
+	}
+	st = st[:len(out)]
+	clear(st)
 	acc := 1
 	for i := len(shape) - 1; i >= 0; i-- {
 		oi := len(out) - len(shape) + i
