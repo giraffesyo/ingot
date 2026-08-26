@@ -1225,3 +1225,53 @@ constant-folding pass** (it's in the architecture sketch; now it has a
 concrete customer). And the drop-order landmine bit a second time (the
 mask const this round, gamma last round): new inputs attach to the host
 node BEFORE dropNode, always.
+
+## Constant folding — fold-const (2026-08-26)
+
+The optimizer gains the general constant-folding pass the architecture
+sketch promised: any node whose inputs are all constants is evaluated at
+load time and replaced by constant values. The fold runs the *same
+registered op the executor would run* — folded values are bit-identical
+to execution by construction, so there is no second numerics
+implementation to keep in sync. Unregistered/failing ops are left alone
+(Compile still reports them with context), and a size guard (outputs ≤
+max(1 MiB, 8× const input bytes)) refuses to bake broadcast blow-ups
+like Expand-of-a-scalar into resident memory.
+
+It runs first in the pass loop, so downstream fusions see normalized
+scalars. That unblocks the customer that motivated it:
+tiny_transformer's 1/√d was an unfolded `Pow → Reciprocal → Mul`
+constant chain that fuse-sdpa couldn't see through — now fold-const:5 +
+fuse-sdpa:1 and the model's attention runs as one fused op (35 → 22
+nodes). Bonus on the real models: rec/rec_int8 fold 15 nodes and cls 19
+(per-run shape-arithmetic chains, gone), and consts that reach convs
+through folded Reshape/Identity become pre-packable weights.
+
+The first A/B exposed a lurking regression: tiny_transformer got *73%
+slower* with its SDPA fused. Profile: 65% of CPU samples in
+usleep/cond_wait — `par.For(B*H, 1, …)` woke the whole worker pool for
+~1 µs of math per head. The fix (`headGrain`) sizes attention's
+per-(batch,head) chunks to ≥32K MACs so microscopic heads run inline on
+the caller; large heads (rec: T=40, dh=64) keep grain=1. That fix
+retroactively un-flattened last round's verdict — "SDPA flat at toy
+scale" was this overhead, not the fusion:
+
+Same-run interleaved A/B, 30-core Zen 4 server (medians of 6; Apple
+Silicon dev box shows the same shape):
+
+| model            | before    | after     | Δ       |
+|------------------|-----------|-----------|---------|
+| llmblock         | 68.1 µs   | 45.2 µs   | −33.5%  |
+| bertish          | 171.0 µs  | 115.8 µs  | −32.3%  |
+| vit              | 210.7 µs  | 150.3 µs  | −28.7%  |
+| tiny_transformer | 43.7 µs   | 41.3 µs   | −5.4%   |
+| rec_320          | 8.04 ms   | 7.72 ms   | −3.9%   |
+| det_640          | 23.99 ms  | 23.25 ms  | −3.1%   |
+
+llmblock/bertish/vit isolate the grain fix (fold-const doesn't touch
+them); tiny_transformer is fold+fuse+grain end-to-end; rec/det are
+within spread. This round also validated the runtime on a second
+architecture (Zen 4) — pure-Go cross-compile, rsync, run.
+
+Parity: zoo conformance vs ORT unchanged (tiny_transformer now via the
+fused path), OCR det/rec parity and corpus accuracy bit-identical.

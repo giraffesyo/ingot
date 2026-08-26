@@ -100,9 +100,13 @@
       blocks fuse, parity/accuracy unchanged
 - [x] generic SDPA fusion (ingot.SDPA): torch-export attention core incl.
       masked decoder blocks — 5 zoo blocks fused, llmblock −12% at toy scale
-- [ ] const-fold pass (tiny_transformer's SDPA blocks on it; architecture
-      sketch promised it); SE-path islands, fused epilogues; bf16 executor
-      wiring; larger-seq transformer zoo model to show SDPA at scale
+- [x] fold-const pass: any all-const-input node is evaluated at load with the
+      same registered op the executor runs (bit-identical), size-guarded;
+      unblocks tiny_transformer's SDPA (fold-const 5 + fuse-sdpa 1) and elides
+      15-19 per-run shape-chain nodes in rec/cls; exposed + fixed MHA/SDPA
+      per-head pool-wake overhead (headGrain: llmblock/bertish/vit −29…−34%)
+- [ ] SE-path islands, fused epilogues; bf16 executor wiring; larger-seq
+      transformer zoo model to show SDPA at scale
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
