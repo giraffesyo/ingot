@@ -1201,3 +1201,27 @@ parity and corpus accuracy are bit-for-bit unchanged. In-model gains are
 small — attention was ~10% of a T=40 model (rec_int8 MT 2.9 → 2.75 ms) —
 but the runtime now executes transformer attention as one fused pass,
 which is the load-bearing capability for the ViT/BERT/decoder targets.
+
+
+## Generic SDPA fusion — torch-export attention (2026-08-26)
+
+fuse-attention (previous round) matched the Paddle packed-QKV shape;
+fuse-sdpa matches the core every exporter shares: `MatMul → [scale] →
+[mask Add] → Softmax(last) → MatMul [→ Transpose]`, agnostic to how Q/K/V
+were produced. Torch's habit of splitting 1/√d as a Mul on *each* GEMM
+input is handled by peeling scalar Muls off either side; everything folds
+into the score GEMM's alpha. The mask (e.g. a causal triu const) and the
+row softmax run on the hot score tile, `[B,H,T,T]` never reaches memory,
+and the trailing [0,2,1,3] transpose becomes strided output writes.
+
+Fuses 5 blocks across the zoo (bertish 2, vit 2, llmblock 1 — the masked
+decoder shape). Same-run A/B at toy scale (dim 48, T ≤ 64): llmblock
+−12%, vit −2%, bertish flat — the score matrix is tiny here; the fusion's
+cache property scales quadratically with T. Conformance vs ORT unchanged.
+
+Two follow-ups surfaced: tiny_transformer's scale is an unfolded
+Pow/Reciprocal constant chain — the repo still has **no general
+constant-folding pass** (it's in the architecture sketch; now it has a
+concrete customer). And the drop-order landmine bit a second time (the
+mask const this round, gamma last round): new inputs attach to the host
+node BEFORE dropNode, always.
