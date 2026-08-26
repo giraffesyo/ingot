@@ -481,61 +481,87 @@ func SgemmPackedA(pa *PackedA, n int, b []float32, ldb int, beta float32, c []fl
 // B is streamed directly: row-major B[k×n] as k axpys into column chunks of y
 // (parallel over chunks); transposed B[n×k] as one dot product per output
 // (parallel over rows). Memory-bound either way, which is the best a GEMV can do.
+// gemvTask carries gemv's parallel state as a pointer Task (par.Run allocates
+// nothing for pointer tasks; a closure would allocate per call).
+type gemvTask struct {
+	a, b, c        []float32
+	ldb, k, xs     int
+	n, chunk       int
+	nChunks        int
+	alpha          float32
+	firstOverwrite bool
+	dot            bool // transB: one dot product per output element
+}
+
+var gemvTaskPool = sync.Pool{New: func() any { return new(gemvTask) }}
+
+func (g *gemvTask) Run(i, _ int) {
+	if g.dot {
+		row := g.b[i*g.ldb : i*g.ldb+g.k]
+		var v float32
+		if g.xs == 1 {
+			v = vek.Dot(g.a[:g.k], row)
+		} else {
+			for p := 0; p < g.k; p++ {
+				v += g.a[p*g.xs] * row[p]
+			}
+		}
+		v *= g.alpha
+		if g.firstOverwrite {
+			g.c[i] = v
+		} else {
+			g.c[i] += v
+		}
+		return
+	}
+	j0 := i * g.chunk
+	j1 := g.n
+	if g.nChunks > 1 {
+		j1 = min(j0+g.chunk, g.n)
+	}
+	y := g.c[j0:j1]
+	if g.firstOverwrite {
+		clear(y)
+	}
+	for p := 0; p < g.k; p++ {
+		xv := g.alpha * g.a[p*g.xs]
+		if xv == 0 {
+			continue
+		}
+		vek.Axpy(y, g.b[p*g.ldb+j0:p*g.ldb+j1], xv)
+	}
+}
+
 func gemv(transA, transB bool, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, firstOverwrite bool, c []float32, workers int) {
 	xs := 1
 	if transA {
 		xs = lda // x stored as a column
 	}
+	g := gemvTaskPool.Get().(*gemvTask)
+	*g = gemvTask{a: a, b: b, c: c, ldb: ldb, k: k, xs: xs, n: n,
+		alpha: alpha, firstOverwrite: firstOverwrite}
 	if transB {
 		// y[j] = alpha * dot(x, B[j,:])
-		grain := max(1, minTaskMACs/max(k, 1))
-		par.For(n, grain, func(j, _ int) {
-			row := b[j*ldb : j*ldb+k]
-			var v float32
-			if xs == 1 {
-				v = vek.Dot(a[:k], row)
-			} else {
-				for p := 0; p < k; p++ {
-					v += a[p*xs] * row[p]
-				}
-			}
-			v *= alpha
-			if firstOverwrite {
-				c[j] = v
-			} else {
-				c[j] += v
-			}
-		})
-		return
-	}
-	// y[j0:j1] = alpha * Σ_p x[p] * B[p][j0:j1]. Chunks of y stay in L1 across
-	// the k loop; enough chunks to spread B's bandwidth over the workers.
-	chunk := 2048
-	if workers > 1 {
-		chunk = min(chunk, max(256, n/(2*workers)))
-	}
-	nChunks := (n + chunk - 1) / chunk
-	if workers <= 1 {
-		nChunks = 1
-	}
-	par.For(nChunks, 1, func(ci, _ int) {
-		j0 := ci * chunk
-		j1 := n
-		if nChunks > 1 {
-			j1 = min(j0+chunk, n)
+		g.dot = true
+		par.Run(n, max(1, minTaskMACs/max(k, 1)), g)
+	} else {
+		// y[j0:j1] = alpha * Σ_p x[p] * B[p][j0:j1]. Chunks of y stay in L1
+		// across the k loop; enough chunks to spread B's bandwidth over the
+		// workers.
+		chunk := 2048
+		if workers > 1 {
+			chunk = min(chunk, max(256, n/(2*workers)))
 		}
-		y := c[j0:j1]
-		if firstOverwrite {
-			clear(y)
+		g.nChunks = (n + chunk - 1) / chunk
+		if workers <= 1 {
+			g.nChunks = 1
+			chunk = n
 		}
-		for p := 0; p < k; p++ {
-			xv := alpha * a[p*xs]
-			if xv == 0 {
-				continue
-			}
-			vek.Axpy(y, b[p*ldb+j0:p*ldb+j1], xv)
-		}
-	})
+		g.chunk = chunk
+		par.Run(g.nChunks, 1, g)
+	}
+	*g = gemvTask{}
+	gemvTaskPool.Put(g)
 }
 
 // PanelKernel exposes the micro-kernel for fused consumers (Winograd conv):

@@ -9,6 +9,7 @@ import (
 type Pool struct {
 	mu      sync.Mutex
 	buckets map[int][][]byte
+	free    []*Tensor // recycled headers (Put clears them; Get reinitialises)
 }
 
 // NewPool returns an empty pool.
@@ -32,8 +33,7 @@ func (p *Pool) Get(dt DType, shape ...int) *Tensor {
 // GetUninit is Get without zeroing the storage. Use only when the caller writes
 // every element before it is read.
 func (p *Pool) GetUninit(dt DType, shape ...int) *Tensor {
-	s := Shape(shape)
-	need := s.Numel() * dt.Size()
+	need := Shape(shape).Numel() * dt.Size()
 	cls := sizeClass(need)
 	p.mu.Lock()
 	bs := p.buckets[cls]
@@ -42,24 +42,38 @@ func (p *Pool) GetUninit(dt DType, shape ...int) *Tensor {
 		buf = bs[n-1]
 		p.buckets[cls] = bs[:n-1]
 	}
+	var t *Tensor
+	if n := len(p.free); n > 0 {
+		t = p.free[n-1]
+		p.free[n-1] = nil
+		p.free = p.free[:n-1]
+	}
 	p.mu.Unlock()
 	if buf == nil {
 		buf = make([]byte, cls)
 	}
-	return &Tensor{dtype: dt, shape: s.Clone(), strides: s.Strides(), buf: buf[:need], pool: p}
+	if t == nil {
+		t = &Tensor{}
+	}
+	*t = Tensor{dtype: dt, buf: buf[:need], pool: p}
+	t.setShape(shape)
+	return t
 }
 
-// Put returns the tensor's storage to the pool. The tensor must not be used after.
+// Put returns the tensor's storage — and its header — to the pool. The tensor
+// must not be used after (its header may back an unrelated tensor next Get).
 func (p *Pool) Put(t *Tensor) {
 	if t.pool != p || t.offset != 0 {
 		return // not ours, or a view
 	}
-	cls := sizeClass(cap(t.buf))
-	if cls != cap(t.buf) {
+	buf := t.buf
+	cls := sizeClass(cap(buf))
+	if cls != cap(buf) {
 		return // not a pooled buffer size
 	}
+	*t = Tensor{} // stale use now fails loudly (nil buf) instead of aliasing
 	p.mu.Lock()
-	p.buckets[cls] = append(p.buckets[cls], t.buf[:cap(t.buf)])
+	p.buckets[cls] = append(p.buckets[cls], buf[:cap(buf)])
+	p.free = append(p.free, t)
 	p.mu.Unlock()
-	t.buf = nil
 }

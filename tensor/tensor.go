@@ -11,22 +11,46 @@ import (
 // may be a view (non-owning) of another tensor's storage. Strides are in elements.
 type Tensor struct {
 	dtype   DType
-	shape   Shape
-	strides []int
+	shape   Shape  // aliases dims for rank <= inlineRank
+	strides []int  // aliases stds for rank <= inlineRank
 	buf     []byte // len == cap == numel*dtype.Size() for owning tensors
 	offset  int    // element offset into buf for views
 	pool    *Pool  // non-nil if buf came from a pool
+
+	dims [inlineRank]int
+	stds [inlineRank]int
+}
+
+// inlineRank is the largest rank stored inside the Tensor struct itself;
+// higher ranks (rare) fall back to heap slices.
+const inlineRank = 8
+
+// setShape installs a copy of s and contiguous row-major strides, without
+// allocating for rank <= inlineRank. The installed slices are capacity-capped
+// so an append by a caller can never scribble into the struct.
+func (t *Tensor) setShape(s []int) {
+	r := len(s)
+	if r <= inlineRank {
+		copy(t.dims[:r], s)
+		t.shape = Shape(t.dims[:r:r])
+		t.strides = t.stds[:r:r]
+	} else {
+		t.shape = append(Shape(nil), s...)
+		t.strides = make([]int, r)
+	}
+	acc := 1
+	for i := r - 1; i >= 0; i-- {
+		t.strides[i] = acc
+		acc *= t.shape[i]
+	}
 }
 
 // New allocates a zeroed tensor of the given dtype and shape.
 func New(dt DType, shape ...int) *Tensor {
-	s := Shape(shape)
-	return &Tensor{
-		dtype:   dt,
-		shape:   s.Clone(),
-		strides: s.Strides(),
-		buf:     make([]byte, s.Numel()*dt.Size()),
-	}
+	t := &Tensor{dtype: dt}
+	t.setShape(shape)
+	t.buf = make([]byte, t.shape.Numel()*dt.Size())
+	return t
 }
 
 // FromF32 wraps an existing []float32 (no copy) with the given shape.
@@ -35,7 +59,8 @@ func FromF32(data []float32, shape ...int) *Tensor {
 	if len(data) != s.Numel() {
 		panic(fmt.Sprintf("tensor: data len %d != numel %d for shape %v", len(data), s.Numel(), s))
 	}
-	t := &Tensor{dtype: F32, shape: s.Clone(), strides: s.Strides()}
+	t := &Tensor{dtype: F32}
+	t.setShape(shape)
 	if len(data) > 0 {
 		t.buf = unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4)
 	}
@@ -113,7 +138,9 @@ func (t *Tensor) Reshape(shape ...int) *Tensor {
 		panic(fmt.Sprintf("tensor: cannot reshape %v to %v", t.shape, s))
 	}
 	t.mustContiguous()
-	return &Tensor{dtype: t.dtype, shape: s.Clone(), strides: s.Strides(), buf: t.buf, offset: t.offset}
+	nt := &Tensor{dtype: t.dtype, buf: t.buf, offset: t.offset}
+	nt.setShape(shape)
+	return nt
 }
 
 // SharesBuffer reports whether t and u are views of the same storage.
@@ -204,7 +231,8 @@ func FromI64(data []int64, shape ...int) *Tensor {
 	if len(data) != s.Numel() {
 		panic(fmt.Sprintf("tensor: data len %d != numel %d for shape %v", len(data), s.Numel(), s))
 	}
-	t := &Tensor{dtype: I64, shape: s.Clone(), strides: s.Strides()}
+	t := &Tensor{dtype: I64}
+	t.setShape(shape)
 	if len(data) > 0 {
 		t.buf = unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*8)
 	}
