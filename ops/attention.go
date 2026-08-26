@@ -34,7 +34,7 @@ func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	workers := par.Workers()
 	sT := ctx.NewUninit(tensor.F32, workers, T*T)
 	sAll := sT.F32()
-	par.For(B*H, 1, func(bh, wk int) {
+	par.For(B*H, headGrain(T, T, dh), func(bh, wk int) {
 		b, h := bh/H, bh%H
 		off := (b*H + h) * plane
 		q := xf[qBase+off : qBase+off+plane]
@@ -98,7 +98,7 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	workers := par.Workers()
 	sT := ctx.NewUninit(tensor.F32, workers, T*Tk)
 	sAll := sT.F32()
-	par.For(B*H, 1, func(bh, wk int) {
+	par.For(B*H, headGrain(T, Tk, dh), func(bh, wk int) {
 		b, h := bh/H, bh%H
 		ab := af[(b*H+h)*T*dh:]
 		bb := bf[(b*H+h)*dh*Tk:]
@@ -122,6 +122,18 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		ctx.Pool.Put(sT)
 	}
 	return []*tensor.Tensor{out}, nil
+}
+
+// headGrain sizes attention's per-(batch,head) parallel chunks so one chunk
+// carries a few µs of work: microscopic heads (small T·dh) run inline on the
+// caller instead of waking the worker pool, which costs more than the math.
+func headGrain(t, tk, dh int) int {
+	const minMACs = 1 << 15 // two GEMMs per head, ~µs-scale at small sizes
+	w := 2 * t * tk * dh
+	if w >= minMACs {
+		return 1
+	}
+	return (minMACs + w - 1) / w
 }
 
 func init() {
