@@ -29,14 +29,14 @@ func (o *binaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	}
 	if o.kind != 0 {
 		if out := binaryFast(ctx, a, b, o.kind); out != nil {
-			return []*tensor.Tensor{out}, nil
+			return ctx.Out(out), nil
 		}
 	}
 	out, err := binaryF32(ctx, a, b, o.fn)
 	if err != nil {
 		return nil, o.n.Errorf("%v", err)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // binaryFast handles same-shape and scalar-broadcast cases for + - * / with
@@ -291,7 +291,7 @@ func (o *binaryOp) runI64(ctx *Ctx, a, b *tensor.Tensor) ([]*tensor.Tensor, erro
 			idx[d] = 0
 		}
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // ---- unary elementwise ----
@@ -329,7 +329,7 @@ func (o *unaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	n := len(of)
 	if n <= 2*unaryChunk {
 		o.vec(of, xf)
-		return []*tensor.Tensor{out}, nil
+		return ctx.Out(out), nil
 	}
 	chunks := (n + unaryChunk - 1) / unaryChunk
 	par.For(chunks, 1, func(c, _ int) {
@@ -337,7 +337,7 @@ func (o *unaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		hi := min(lo+unaryChunk, n)
 		o.vec(of[lo:hi], xf[lo:hi])
 	})
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func hardSigmoidVec(alpha, beta float32) func(dst, src []float32) {
@@ -438,7 +438,7 @@ func (o identityOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 	if len(in) < 1 || in[0] == nil {
 		return nil, o.n.Errorf("missing input")
 	}
-	return []*tensor.Tensor{in[0].Clone()}, nil
+	return ctx.Out(in[0].Clone()), nil
 }
 
 // clipOp: opset>=11 takes min/max as optional inputs; opset 6 as attributes.
@@ -469,5 +469,5 @@ func (o *clipOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	out := ctx.NewUninit(tensor.F32, x.Shape()...)
 	xf, of := x.F32(), out.F32()
 	binParallel(len(of), func(l, h int) { vek.Clip(of[l:h], xf[l:h], lo, hi) })
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }

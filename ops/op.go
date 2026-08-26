@@ -18,6 +18,36 @@ import (
 // Ctx is per-session execution state passed to every op.
 type Ctx struct {
 	Pool *tensor.Pool
+
+	outbuf [8]*tensor.Tensor // backs Out/OutPad — valid until the next Run on this Ctx
+}
+
+// Out returns the given tensors as an output slice backed by the context
+// (no allocation; the variadic slice does not escape). The result is valid
+// only until the next op runs on this Ctx — the executor consumes it
+// immediately.
+func (c *Ctx) Out(ts ...*tensor.Tensor) []*tensor.Tensor {
+	if len(ts) > len(c.outbuf) {
+		return append([]*tensor.Tensor(nil), ts...)
+	}
+	n := copy(c.outbuf[:], ts)
+	return c.outbuf[:n:n]
+}
+
+// OutPad is Out(t) padded with nils to n outputs (omitted optional outputs).
+func (c *Ctx) OutPad(n int, t *tensor.Tensor) []*tensor.Tensor {
+	if n < 1 {
+		n = 1
+	}
+	if n > len(c.outbuf) {
+		out := make([]*tensor.Tensor, n)
+		out[0] = t
+		return out
+	}
+	s := c.outbuf[:n:n]
+	clear(s)
+	s[0] = t
+	return s
 }
 
 // New allocates a zeroed output tensor from the pool.

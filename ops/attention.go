@@ -52,7 +52,7 @@ func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if ctx.Pool != nil {
 		ctx.Pool.Put(sT)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // sdpaOp is the generic fused scaled-dot-product-attention core produced by
@@ -121,7 +121,7 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if ctx.Pool != nil {
 		ctx.Pool.Put(sT)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // headGrain sizes attention's per-(batch,head) parallel chunks so one chunk

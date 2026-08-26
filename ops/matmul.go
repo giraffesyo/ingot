@@ -64,7 +64,7 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		beta = o.beta
 	}
 	gemm.SgemmT(o.transA, o.transB, M, N, K, o.alpha, a.F32(), a.Dim(1), b.F32(), b.Dim(1), beta, of, N)
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // matmulOp: NumPy-style matmul with batch broadcasting.
@@ -163,7 +163,7 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		}
 		out = out.Reshape(fs...)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // mmScratch carries batched-matmul offsets and the per-batch GEMM task

@@ -209,7 +209,7 @@ func (o *poolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			}
 		}
 	})
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 type globalPoolOp struct {
@@ -273,7 +273,7 @@ func (o *globalPoolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 		}
 		of[nc] = sum / float32(P)
 	})
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func init() {

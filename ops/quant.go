@@ -115,7 +115,7 @@ func (o *quantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor,
 				vek.QuantI8(out.I8()[lo:hi], xf[lo:hi], s0, z)
 			}
 		})
-		return []*tensor.Tensor{out}, nil
+		return ctx.Out(out), nil
 	}
 	// per-axis
 	xs := x.Shape()
@@ -137,7 +137,7 @@ func (o *quantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor,
 		}
 		return sc[c], z
 	})
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // quantAll divides by the scale (not multiply-by-reciprocal: the spec is
@@ -207,7 +207,7 @@ func (o *dequantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tenso
 				}
 			}
 		})
-		return []*tensor.Tensor{out}, nil
+		return ctx.Out(out), nil
 	}
 	xs := x.Shape()
 	axis, err2 := normAxis(o.axis, len(xs))
@@ -226,7 +226,7 @@ func (o *dequantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tenso
 		}
 		of[i] = float32(get(i)-z) * sc[c]
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func intGetter(x *tensor.Tensor) (func(int) int32, int, error) {
@@ -275,7 +275,7 @@ func (o *dynamicQuantizeLinearOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.
 	st.F32()[0] = scale
 	zt := ctx.NewUninit(tensor.U8)
 	zt.U8()[0] = zp
-	return []*tensor.Tensor{out, st, zt}, nil
+	return ctx.Out(out, st, zt), nil
 }
 
 // ---- integer GEMM core (shared by QLinearConv / QLinearMatMul / MatMulInteger) ----
@@ -414,7 +414,7 @@ func (o *qlinearConvOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, er
 	if ctx.Pool != nil {
 		ctx.Pool.Put(xsh)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // qconvRun carries one QLinearConv invocation's state across its paths.
@@ -935,7 +935,7 @@ func (o *qmatmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 		ctx.Pool.Put(at)
 		ctx.Pool.Put(ash)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func init() {
@@ -978,21 +978,20 @@ func (o *qlutOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			return nil, o.n.Errorf("QLut: per-channel table C=%d vs input %v", C, xs)
 		}
 		N, HW := xs[0], xs[2]*xs[3]
-		par.For(N*C, 1, func(nc, _ int) {
+		// The table lives in the const tensor: no per-plane copy, and the
+		// grain keeps microscopic planes from waking the pool.
+		par.For(N*C, max(1, unaryChunk/max(HW, 1)), func(nc, _ int) {
 			c := nc % C
-			var lut [256]uint8
-			copy(lut[:], tf[c*256:])
-			vek.QLut(yf[nc*HW:(nc+1)*HW], xf[nc*HW:(nc+1)*HW], &lut)
+			vek.QLut(yf[nc*HW:(nc+1)*HW], xf[nc*HW:(nc+1)*HW], (*[256]uint8)(tf[c*256:]))
 		})
-		return []*tensor.Tensor{y}, nil
+		return ctx.Out(y), nil
 	}
-	var lut [256]uint8
-	copy(lut[:], tf)
+	tab := (*[256]uint8)(tf)
 	chunks := max(1, (len(xf)+unaryChunk-1)/unaryChunk)
 	par.For(chunks, 1, func(c, _ int) {
 		lo := c * unaryChunk
 		hi := min(lo+unaryChunk, len(xf))
-		vek.QLut(yf[lo:hi], xf[lo:hi], &lut)
+		vek.QLut(yf[lo:hi], xf[lo:hi], tab)
 	})
-	return []*tensor.Tensor{y}, nil
+	return ctx.Out(y), nil
 }
