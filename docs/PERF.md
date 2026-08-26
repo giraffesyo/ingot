@@ -1320,3 +1320,44 @@ quant chunking closures are the biggest remaining pocket at ~900).
 
 Parity: zoo conformance vs ORT, OCR det/rec parity, corpus accuracy —
 unchanged.
+
+## Per-op allocation sweep — Ctx.Out + quant tasks (2026-08-26)
+
+Follow-up to the run-loop round, targeting what it left: the result
+slice every op returned (`[]*tensor.Tensor{out}` — one heap object per
+node per run, the single most common allocation in every profile) and
+the quantized path's closures.
+
+- **ops.Ctx.Out/OutPad**: ops return outputs through a small buffer on
+  the per-run Ctx (the executor consumes the slice before the next op
+  runs; the variadic call doesn't escape). One mechanical sweep across
+  every op.
+- **QgemmPackedS8** is now a pooled pointer task: the serial conv-chunk
+  path — thousands of calls per int8 model run — allocates nothing
+  (it used to allocate a closure and a buffer slice per call).
+- **ingot.QLut** reads its table directly out of the const tensor via a
+  slice-to-array-pointer conversion — the per-plane 256-byte table copy
+  (which escaped to the heap on every plane task) is gone, and the
+  per-channel loop got a work-sized grain.
+
+Allocations per run (cumulative with the previous round in parens):
+
+| model            | before | after | (two rounds ago) |
+|------------------|--------|-------|------------------|
+| tiny_transformer | 41     | 19    | (145)            |
+| bertish          | 154    | 79    | (444)            |
+| rec_320          | 254    | 125   | (774)            |
+| rec_int8_320     | 896    | 425   | (1832)           |
+| det_640          | 233    | 130   | (657)            |
+
+Latency A/B (30-core Zen 4, quiet window — started at load 1.1,
+spreads 1–5%, medians of 6): llmblock −2.8%, vit −2.5%,
+tiny_transformer −2.2%, bertish/rec_320/det_640 flat (−0.5…−0.7%).
+The honest read: the run-loop round already banked the big GC win;
+this sweep halves allocations again and buys a few percent more on the
+alloc-densest models.
+
+What remains is diffuse: one closure per par.For call site in the ops
+(the box is pooled; the closure itself is caller-side), the qconv chunk
+closures, and the caller-facing result map. Parity: zoo conformance vs
+ORT, OCR parity, corpus — unchanged; -race clean.
