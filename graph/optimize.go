@@ -39,6 +39,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = fuseQLUT(g, stats) || changed
 		changed = fuseLayerNorm(g, stats) || changed
 		changed = fuseAttention(g, stats) || changed
+		changed = fuseSDPA(g, stats) || changed
 	}
 	renumber(g)
 	return stats
@@ -1509,6 +1510,152 @@ func fuseAttention(g *Graph, stats map[string]int) bool {
 		out.Producer = host
 		g.Opsets[ingotDomain] = 1
 		stats["fuse-attention"]++
+		changed = true
+	}
+	g.compact(dead)
+	return changed
+}
+
+// fuseSDPA rewrites the generic attention core
+//
+//	MatMul(a, b) → [Div/Mul scalar] → [Add mask-const] → Softmax(last axis)
+//	→ MatMul(probs, v) [→ Transpose 0,2,1,3]
+//
+// (with optional scalar Muls peeled off either MatMul input — torch splits
+// the 1/√d as a factor on each side) into one ingot.SDPA node. The B input
+// is whatever tensor the graph fed the first MatMul: no claim is made about
+// how it was produced — the win is folding the scale into the GEMM, the
+// softmax running on the hot score tile, and the [B,H,T,Tk] intermediates
+// never touching memory.
+func fuseSDPA(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	for _, sm := range g.Nodes {
+		if dead[sm] || sm.OpType != "Softmax" || sm.Domain != "" {
+			continue
+		}
+		if ax := sm.Attrs.Int("axis", -1); ax != -1 && ax != 3 {
+			continue
+		}
+		scale := 1.0
+		cur := sm.Inputs[0]
+		var mask *Value
+		var mid []*Node
+		// Peel [Add mask] then [Div/Mul scalar] (either order) back to the MatMul.
+		for i := 0; i < 2; i++ {
+			p := cur.Producer
+			if p == nil || dead[p] || p.Domain != "" || g.soleConsumer(cur) == nil {
+				break
+			}
+			if p.OpType == "Add" && mask == nil && len(p.Inputs) == 2 {
+				var mv *Value
+				switch {
+				case p.Inputs[1] != nil && p.Inputs[1].Const != nil:
+					mv = p.Inputs[1]
+				case p.Inputs[0] != nil && p.Inputs[0].Const != nil:
+					mv = p.Inputs[0]
+				}
+				if mv == nil || mv.Const.DType() != tensor.F32 {
+					break
+				}
+				mask = mv
+				mid = append(mid, p)
+				if p.Inputs[0] == mv {
+					cur = p.Inputs[1]
+				} else {
+					cur = p.Inputs[0]
+				}
+				continue
+			}
+			if x, c, right, ok := binaryWithConst(p); ok && (p.OpType == "Mul" || (p.OpType == "Div" && right && c != 0)) {
+				if p.OpType == "Mul" {
+					scale *= float64(c)
+				} else {
+					scale /= float64(c)
+				}
+				mid = append(mid, p)
+				cur = x
+				continue
+			}
+			break
+		}
+		mm1 := cur.Producer
+		if mm1 == nil || dead[mm1] || mm1.OpType != "MatMul" || mm1.Domain != "" || g.soleConsumer(mm1.Outputs[0]) == nil {
+			continue
+		}
+		// Peel a scalar Mul off each MatMul input.
+		peel := func(v *Value) (*Value, *Node) {
+			p := v.Producer
+			if p == nil || dead[p] || p.OpType != "Mul" || g.soleConsumer(v) != mm1 {
+				return v, nil
+			}
+			if x, c, _, ok := binaryWithConst(p); ok {
+				scale *= float64(c)
+				return x, p
+			}
+			return v, nil
+		}
+		av, amul := peel(mm1.Inputs[0])
+		bv, bmul := peel(mm1.Inputs[1])
+		mm2 := g.soleConsumer(sm.Outputs[0])
+		if mm2 == nil || dead[mm2] || mm2.OpType != "MatMul" || mm2.Inputs[0] != sm.Outputs[0] {
+			continue
+		}
+		vv := mm2.Inputs[1]
+		out := mm2.Outputs[0]
+		strideOut := 0
+		var otr *Node
+		if t := g.soleConsumer(out); t != nil && t.OpType == "Transpose" && permIs(t, 0, 2, 1, 3) {
+			otr = t
+			out = t.Outputs[0]
+			strideOut = 1
+		}
+		drop := append(mid, sm, mm2)
+		if amul != nil {
+			drop = append(drop, amul)
+		}
+		if bmul != nil {
+			drop = append(drop, bmul)
+		}
+		if otr != nil {
+			drop = append(drop, otr)
+		}
+		host := mm1
+		ins := []*Value{av, bv, vv}
+		if mask != nil {
+			ins = append(ins, mask)
+		}
+		// Attach the new inputs BEFORE dropping the pattern nodes: a const
+		// (the mask; a peeled-Mul operand) that momentarily loses its last
+		// consumer is deleted from g.Values by dropNode and keeps a stale
+		// value id — the executor then feeds the wrong tensor entirely.
+		// (Same landmine as fuse-layernorm's gamma; see PERF.md.)
+		for _, v := range ins {
+			v.Consumers = append(v.Consumers, host)
+		}
+		oldIns := host.Inputs
+		for _, n2 := range drop {
+			dead[n2] = true
+			g.dropNode(n2)
+		}
+		for _, v := range oldIns {
+			if v != nil {
+				removeConsumer(v, host)
+			}
+		}
+		mid1 := host.Outputs[0]
+		delete(g.Values, mid1.Name)
+		g.Values[out.Name] = out
+		host.OpType, host.Domain = "SDPA", ingotDomain
+		host.Attrs = ops.Attrs{
+			"scale":      fattr(float32(scale)),
+			"stride_out": {Kind: ops.KindInt, I: int64(strideOut)},
+		}
+		host.Inputs = ins
+		host.Outputs = []*Value{out}
+		out.Producer = host
+		g.Opsets[ingotDomain] = 1
+		stats["fuse-sdpa"]++
 		changed = true
 	}
 	g.compact(dead)
