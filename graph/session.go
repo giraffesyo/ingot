@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/giraffesyo/ingot/ops"
@@ -26,6 +27,10 @@ type Session struct {
 	// refcount of each value id over the whole graph (consumer count, +1 if output)
 	uses []int
 	nval int
+	// compile-time run templates: constant values by id, output flags by id
+	constVals []*tensor.Tensor
+	isOutput  []bool
+	scratch   sync.Pool // *runScratch
 
 	// Profile enables per-node timing (see Stats). Not safe to enable while the
 	// Session is run concurrently — the timing counters are unsynchronised.
@@ -168,7 +173,27 @@ func CompileRaw(g *Graph) (*Session, error) {
 	for _, v := range g.Outputs {
 		s.uses[v.id]++
 	}
+	s.constVals = make([]*tensor.Tensor, s.nval)
+	for _, v := range g.Values {
+		if v.Const != nil {
+			s.constVals[v.id] = v.Const
+		}
+	}
+	s.isOutput = make([]bool, s.nval)
+	for _, v := range g.Outputs {
+		s.isOutput[v.id] = true
+	}
 	return s, nil
+}
+
+// runScratch is the pooled per-Run working state.
+type runScratch struct {
+	vals   []*tensor.Tensor
+	live   []int
+	pooled []bool
+	alias  []int // view id → id of the value owning the shared buffer (-1: none)
+	in     []*tensor.Tensor
+	ctx    ops.Ctx
 }
 
 // Graph returns the underlying graph.
@@ -179,14 +204,26 @@ func (s *Session) Graph() *Graph { return s.g }
 // owned by the caller (not pooled). Safe for concurrent use by multiple
 // goroutines (see the Session doc; the sole exception is Profile).
 func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tensor, error) {
-	vals := make([]*tensor.Tensor, s.nval)
-	live := make([]int, s.nval) // remaining uses
-	copy(live, s.uses)
-	pooled := make([]bool, s.nval)
-	for _, v := range s.g.Values {
-		if v.Const != nil {
-			vals[v.id] = v.Const
+	sc, _ := s.scratch.Get().(*runScratch)
+	if sc == nil {
+		sc = &runScratch{
+			vals:   make([]*tensor.Tensor, s.nval),
+			live:   make([]int, s.nval),
+			pooled: make([]bool, s.nval),
+			alias:  make([]int, s.nval),
+			in:     make([]*tensor.Tensor, 0, 8),
 		}
+	}
+	defer func() {
+		clear(sc.vals)
+		s.scratch.Put(sc)
+	}()
+	vals, live, pooled, alias := sc.vals, sc.live, sc.pooled, sc.alias
+	copy(vals, s.constVals)
+	copy(live, s.uses) // remaining uses
+	clear(pooled)
+	for i := range alias {
+		alias[i] = -1
 	}
 	for _, v := range s.g.Inputs {
 		t, ok := feeds[v.Name]
@@ -198,12 +235,11 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 		}
 		vals[v.id] = t
 	}
-	ctx := &ops.Ctx{Pool: s.pool}
-	isOutput := map[int]bool{}
-	for _, v := range s.g.Outputs {
-		isOutput[v.id] = true
-	}
-	in := make([]*tensor.Tensor, 0, 8)
+	ctx := &sc.ctx
+	ctx.Pool = s.pool
+	isOutput := s.isOutput
+	in := sc.in
+	defer func() { sc.in = in[:0] }()
 	if s.Profile && len(s.stats) != len(s.steps) {
 		s.stats = make([]time.Duration, len(s.steps))
 	}
@@ -259,16 +295,26 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 			// Release (or lets the GC take them).
 			vals[id] = t
 			pooled[id] = !isOutput[id]
-			// A view output (Reshape & friends) shares its input's buffer:
-			// that buffer must not return to the pool while the view lives,
-			// so the aliased input leaves the pool's custody for this run.
+			// A view output (Reshape & friends, or Identity's pass-through)
+			// shares its input's buffer. The buffer stays in the custody of
+			// its owning value (the root of a view chain): the view's own
+			// uses pin the root, and the root returns to the pool only when
+			// direct and view uses all drain (see the release loop).
 			for _, inID := range st.in {
-				if inID >= 0 && pooled[inID] && t.SharesBuffer(vals[inID]) {
-					pooled[inID] = false
+				if inID >= 0 && vals[inID] != nil && t.SharesBuffer(vals[inID]) {
+					root := inID
+					if r := alias[inID]; r >= 0 {
+						root = r
+					}
+					alias[id] = root
+					pooled[id] = false
+					live[root] += live[id]
+					break
 				}
 			}
 		}
-		// Release inputs whose last use was this step.
+		// Release inputs whose last use was this step. A view use also
+		// releases one pin on the buffer's owning value.
 		for _, id := range st.in {
 			if id < 0 {
 				continue
@@ -277,6 +323,13 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 			if live[id] == 0 && pooled[id] {
 				s.pool.Put(vals[id])
 				vals[id] = nil
+			}
+			if r := alias[id]; r >= 0 {
+				live[r]--
+				if live[r] == 0 && pooled[r] {
+					s.pool.Put(vals[r])
+					vals[r] = nil
+				}
 			}
 		}
 	}
