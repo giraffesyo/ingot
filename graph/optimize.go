@@ -12,6 +12,10 @@ import (
 //
 // Passes (iterated to a fixed point):
 //
+//   - fold-const:       any node whose inputs are all constants is evaluated at
+//     load time with the same registered op the executor would run (bit-identical
+//     by construction) and replaced by constant values. Sized-guarded so a
+//     broadcast blow-up is never baked into the model.
 //   - fuse-hardswish:   Add(x,3) → Clip(0,6) → Mul(x,·) → Div(·,6)  ⇒  ingot.HardSwish(x)
 //     (the opset<14 decomposition emitted by Paddle2ONNX and torch).
 //   - fuse-silu:        Mul(x, Sigmoid(x))  ⇒  ingot.SiLU(x)  (torch SiLU/Swish export).
@@ -29,6 +33,7 @@ func Optimize(g *Graph) map[string]int {
 	stats := map[string]int{}
 	for changed := true; changed; {
 		changed = false
+		changed = foldConst(g, stats) || changed
 		changed = fuseHardSwish(g, stats) || changed
 		changed = fuseSiLU(g, stats) || changed
 		changed = fuseGelu(g, stats) || changed
@@ -1660,4 +1665,102 @@ func fuseSDPA(g *Graph, stats map[string]int) bool {
 	}
 	g.compact(dead)
 	return changed
+}
+
+// foldConst evaluates nodes whose inputs are all constant and replaces their
+// outputs with constants, running the same registered op the executor would —
+// folded values are bit-identical to what execution would have produced.
+// Ops that are unregistered here, fail to build, or fail to run are left
+// alone: Compile reports them later with proper context, and folding must
+// never turn a working graph into a broken one.
+//
+// A size guard skips folds that would inflate resident memory: the folded
+// outputs must fit in max(1 MiB, 8× the const input bytes). This permits
+// scalar chains and weight-shaped transforms while refusing to bake a
+// broadcast blow-up (e.g. Expand of a scalar to an activation shape) into
+// the model.
+func foldConst(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	for _, n := range g.Nodes {
+		if len(n.Inputs) == 0 {
+			continue // Constant is folded at load; anything else 0-input is not ours to guess
+		}
+		foldable, inBytes := true, 0
+		ins := make([]*tensor.Tensor, len(n.Inputs))
+		for i, v := range n.Inputs {
+			if v == nil {
+				continue
+			}
+			if v.Const == nil {
+				foldable = false
+				break
+			}
+			ins[i] = v.Const
+			inBytes += v.Const.Numel() * v.Const.DType().Size()
+		}
+		if !foldable {
+			continue
+		}
+		ver := g.OpsetVersion(n.Domain)
+		b, err := ops.Lookup(n.Domain, n.OpType, ver)
+		if err != nil {
+			continue
+		}
+		op, err := b(ops.NodeInfo{
+			Name: n.Name, OpType: n.OpType, Domain: n.Domain, Version: ver,
+			Attrs: n.Attrs, NumIn: len(n.Inputs), NumOut: len(n.Outputs),
+		})
+		if err != nil {
+			continue
+		}
+		outs, err := op.Run(&ops.Ctx{}, ins)
+		if err != nil || len(outs) < len(n.Outputs) {
+			continue
+		}
+		outBytes := 0
+		for i, v := range n.Outputs {
+			if v == nil {
+				continue
+			}
+			if outs[i] == nil {
+				foldable = false // op declined an output we need
+				break
+			}
+			outBytes += outs[i].Numel() * outs[i].DType().Size()
+		}
+		lim := 8 * inBytes
+		if lim < 1<<20 {
+			lim = 1 << 20
+		}
+		if !foldable || outBytes > lim {
+			continue
+		}
+		for i, v := range n.Outputs {
+			if v == nil {
+				continue
+			}
+			v.Producer = nil
+			if len(v.Consumers) == 0 && !g.isOutput(v) {
+				delete(g.Values, v.Name)
+				continue
+			}
+			v.Const = outs[i]
+			v.DType = outs[i].DType()
+			v.Shape = outs[i].Shape()
+			v.HasShape = true
+		}
+		for _, v := range n.Inputs {
+			if v == nil {
+				continue
+			}
+			removeConsumer(v, n)
+			if v.Const != nil && len(v.Consumers) == 0 && !g.isOutput(v) {
+				delete(g.Values, v.Name)
+			}
+		}
+		dead[n] = true
+		stats["fold-const"]++
+	}
+	g.compact(dead)
+	return len(dead) > 0
 }
