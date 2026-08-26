@@ -238,7 +238,7 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 	if ctx.Pool != nil {
 		ctx.Pool.Put(col)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func init() {

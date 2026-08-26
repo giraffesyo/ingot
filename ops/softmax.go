@@ -57,7 +57,7 @@ func (o *softmaxOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 		par.For(outer, grain, func(i, _ int) {
 			softmaxRow(xf[i*D:(i+1)*D], of[i*D:(i+1)*D], o.log)
 		})
-		return []*tensor.Tensor{out}, nil
+		return ctx.Out(out), nil
 	}
 	// Strided axis: gather into a temp row per (outer, inner).
 	par.For(outer, 1, func(i, _ int) {
@@ -74,7 +74,7 @@ func (o *softmaxOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 			}
 		}
 	})
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func softmaxRow(x, y []float32, logsm bool) {

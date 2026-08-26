@@ -88,7 +88,7 @@ func (o *reshapeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 	if shape.Numel() != x.Numel() {
 		return nil, o.n.Errorf("cannot reshape %v to %v", xs, shape)
 	}
-	return []*tensor.Tensor{copyView(ctx, x, shape)}, nil
+	return ctx.Out(copyView(ctx, x, shape)), nil
 }
 
 // ---- Flatten ----
@@ -115,7 +115,7 @@ func (o *flattenOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 	for _, d := range xs[axis:] {
 		b *= d
 	}
-	return []*tensor.Tensor{copyView(ctx, x, tensor.Shape{a, b})}, nil
+	return ctx.Out(copyView(ctx, x, tensor.Shape{a, b})), nil
 }
 
 // ---- Squeeze / Unsqueeze ----
@@ -197,7 +197,7 @@ func (o *squeezeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 			shape = append(shape, d)
 		}
 	}
-	return []*tensor.Tensor{copyView(ctx, x, shape)}, nil
+	return ctx.Out(copyView(ctx, x, shape)), nil
 }
 
 // ---- Transpose ----
@@ -237,7 +237,7 @@ func (o *transposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	}
 	out := ctx.New(x.DType(), oshape...)
 	transposeBytes(x, out, perm)
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // transposeBytes performs a generic N-d permutation copy for any dtype.
@@ -398,7 +398,7 @@ func (o *concatOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		pos := oi*rowOut + offs[ii]
 		copy(dst[pos+lo:pos+hi], in[ii].Bytes()[oi*chunk+lo:oi*chunk+hi])
 	})
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // ---- Gather ----
@@ -461,7 +461,7 @@ func (o *gatherOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 			pos += chunk
 		}
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // ---- Shape ----
@@ -492,7 +492,7 @@ func (o *shapeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	for i := range of {
 		of[i] = int64(xs[int(s)+i])
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // ---- Constant ----
@@ -503,7 +503,7 @@ type constantOp struct {
 }
 
 func (o *constantOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
-	return []*tensor.Tensor{o.t}, nil
+	return ctx.Out(o.t), nil
 }
 
 func buildConstant(n NodeInfo) (Op, error) {
@@ -607,7 +607,7 @@ func (o *sliceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	out := ctx.New(x.DType(), cnt...)
 	if out.Numel() == 0 {
-		return []*tensor.Tensor{out}, nil
+		return ctx.Out(out), nil
 	}
 	esz := x.DType().Size()
 	xst := xs.Strides()
@@ -635,7 +635,7 @@ func (o *sliceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 		off = advance(idx, cnt, strides, r-2, off)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func asI64(t *tensor.Tensor) []int64 {
@@ -686,7 +686,7 @@ func (o *castOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if err != nil {
 		return nil, o.n.Errorf("%v", err)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func castTo(ctx *Ctx, x *tensor.Tensor, to tensor.DType) (*tensor.Tensor, error) {
@@ -771,7 +771,7 @@ func (o *expandOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	if err != nil {
 		return nil, o.n.Errorf("%v", err)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // broadcastTo materialises x broadcast to shape os (any dtype).
@@ -823,7 +823,7 @@ func (o *constantOfShapeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor
 	for i := 0; i < out.Numel(); i++ {
 		copy(dst[i*esz:(i+1)*esz], v)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // ---- Where ----
@@ -869,7 +869,7 @@ func (o *whereOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			copy(ds[i*esz:(i+1)*esz], bs[i*esz:(i+1)*esz])
 		}
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // ---- comparison / logical ----
@@ -902,7 +902,7 @@ func (o *compareOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 	for i := range d {
 		d[i] = o.fn(float64(x[i]), float64(y[i]))
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 type notOp struct{ n NodeInfo }
@@ -914,7 +914,7 @@ func (o *notOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	for i := range d {
 		d[i] = !s[i]
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // ---- Range ----
@@ -935,7 +935,7 @@ func (o *rangeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		for i := range of {
 			of[i] = a + int64(i)*c
 		}
-		return []*tensor.Tensor{out}, nil
+		return ctx.Out(out), nil
 	case tensor.F32:
 		a, b, c := s.F32()[0], l.F32()[0], d.F32()[0]
 		n := max(0, int(ceilDiv32(b-a, c)))
@@ -944,7 +944,7 @@ func (o *rangeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		for i := range of {
 			of[i] = a + float32(i)*c
 		}
-		return []*tensor.Tensor{out}, nil
+		return ctx.Out(out), nil
 	}
 	return nil, o.n.Errorf("unsupported dtype %s", s.DType())
 }
@@ -1054,7 +1054,7 @@ func (o *tileOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			idx[d] = 0
 		}
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func init() {

@@ -158,7 +158,7 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	default:
 		return nil, o.n.Errorf("unsupported mode %q (only nearest, linear)", o.mode)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func nearestIdx(mode string, c float64) int {

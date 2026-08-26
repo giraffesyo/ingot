@@ -98,12 +98,8 @@ func (o *layerNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 			}
 		}
 	})
-	outs := []*tensor.Tensor{out}
-	// Optional Mean / InvStdDev outputs are rarely consumed; provide if asked.
-	for k := 1; k < o.n.NumOut; k++ {
-		outs = append(outs, nil)
-	}
-	return outs, nil
+	// Optional Mean / InvStdDev outputs are rarely consumed; nil unless asked.
+	return ctx.OutPad(o.n.NumOut, out), nil
 }
 
 // batchNormOp (inference): per-channel (axis 1) affine.
@@ -144,11 +140,7 @@ func (o *batchNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 			dst[i] = v*a + bb
 		}
 	})
-	outs := []*tensor.Tensor{out}
-	for k := 1; k < o.n.NumOut; k++ {
-		outs = append(outs, nil)
-	}
-	return outs, nil
+	return ctx.OutPad(o.n.NumOut, out), nil
 }
 
 // instanceNormOp: per (n, c) normalisation over spatial dims.
@@ -191,7 +183,7 @@ func (o *instanceNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, e
 			dst[i] = v*a + bb
 		}
 	})
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func init() {

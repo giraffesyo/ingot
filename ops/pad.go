@@ -103,7 +103,7 @@ func (o *padOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 		of[oi] = xf[si]
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func reflectIdx(i, n int) int {
@@ -126,14 +126,14 @@ type dropoutOp struct{ n NodeInfo }
 
 func (o *dropoutOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	x := in[0]
-	outs := []*tensor.Tensor{x.Clone()}
+	outs := ctx.OutPad(max(o.n.NumOut, 1), x.Clone())
 	if o.n.NumOut > 1 {
 		mask := ctx.New(tensor.Bool, x.Shape()...)
 		mb := mask.Bool()
 		for i := range mb {
 			mb[i] = true
 		}
-		outs = append(outs, mask)
+		outs[1] = mask
 	}
 	return outs, nil
 }

@@ -263,39 +263,58 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 	np := (n + qNR - 1) / qNR
 	need := kg * qNR * qKG
 	serial := !parallel || np == 1 || m*n*k < 4*minTaskMACs
-	var bufs []*qwork
-	if serial {
-		bufs = []*qwork{getQwork(need)}
-	} else {
-		bufs = make([]*qwork, par.Workers())
+	t := qgemmTaskPool.Get().(*qgemmTask)
+	if !serial && par.Workers() > len(t.bufs) {
+		serial = true // more workers than per-worker buffer slots (>64): stay serial
 	}
-	task := func(jp, wk int) {
-		wb := bufs[wk]
-		if wb == nil {
-			wb = getQwork(need)
-			bufs[wk] = wb
-		}
-		bp := wb.bp
-		j0 := jp * qNR
-		cols := min(qNR, n-j0)
-		qpackBPanel(bp, b, ldb, k, kg, j0, cols)
-		for ip := 0; ip < mp; ip++ {
-			i0 := ip * qMR
-			rows := min(qMR, m-i0)
-			qkernelS8(int64(kg), &pa.data[ip*kg*qMR*qKG], &bp[0], &wb.ct[0])
-			qscatterTile(wb.ct[:], c[i0*ldc+j0:], ldc, rows, cols)
-		}
-	}
+	t.pa, t.b, t.c = pa, b, c
+	t.ldb, t.ldc, t.n, t.k, t.kg, t.mp, t.need = ldb, ldc, n, k, kg, mp, need
+	nw := 1
 	if serial {
 		for jp := 0; jp < np; jp++ {
-			task(jp, 0)
+			t.Run(jp, 0)
 		}
 	} else {
-		par.For(np, max(1, (4*macroTaskMACs)/max(qNR*m*k, 1)), task)
+		nw = par.Workers()
+		par.Run(np, max(1, (4*macroTaskMACs)/max(qNR*m*k, 1)), t)
 	}
-	for _, w := range bufs {
-		if w != nil {
+	for wk := 0; wk < nw; wk++ {
+		if w := t.bufs[wk]; w != nil {
 			putQwork(w)
+			t.bufs[wk] = nil
 		}
+	}
+	t.pa, t.b, t.c = nil, nil, nil
+	qgemmTaskPool.Put(t)
+}
+
+// qgemmTask is QgemmPackedS8's per-call state as a pooled pointer Task —
+// the serial conv-chunk path (thousands of calls per model run) allocates
+// nothing.
+type qgemmTask struct {
+	pa                           *QPackedA
+	b                            []int8
+	c                            []int32
+	ldb, ldc, n, k, kg, mp, need int
+	bufs                         [64]*qwork // per-worker; par worker ids are < par.Workers()
+}
+
+var qgemmTaskPool = sync.Pool{New: func() any { return new(qgemmTask) }}
+
+func (t *qgemmTask) Run(jp, wk int) {
+	wb := t.bufs[wk]
+	if wb == nil {
+		wb = getQwork(t.need)
+		t.bufs[wk] = wb
+	}
+	bp := wb.bp
+	j0 := jp * qNR
+	cols := min(qNR, t.n-j0)
+	qpackBPanel(bp, t.b, t.ldb, t.k, t.kg, j0, cols)
+	for ip := 0; ip < t.mp; ip++ {
+		i0 := ip * qMR
+		rows := min(qMR, t.pa.m-i0)
+		qkernelS8(int64(t.kg), &t.pa.data[ip*t.kg*qMR*qKG], &bp[0], &wb.ct[0])
+		qscatterTile(wb.ct[:], t.c[i0*t.ldc+j0:], t.ldc, rows, cols)
 	}
 }

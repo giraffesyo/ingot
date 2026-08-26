@@ -160,7 +160,7 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	default:
 		o.im2colConv(ctx, xf, wf, bias, of, N, C, G, Cg, Mg, M, K, H, W, KH, KW, OH, OW, pads)
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 // Tile sizing for the chunked conv paths. Each task runs a serial GEMM over a

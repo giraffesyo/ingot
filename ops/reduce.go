@@ -32,7 +32,7 @@ func (o *reduceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	red := make([]bool, r)
 	if len(axes) == 0 {
 		if o.noopEmpty && o.attrAxes == nil {
-			return []*tensor.Tensor{x.Clone()}, nil
+			return ctx.Out(x.Clone()), nil
 		}
 		for i := range red {
 			red[i] = true
@@ -145,7 +145,7 @@ func (o *reduceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 			of[i] = float32(math.Sqrt(float64(of[i])))
 		}
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func accum(kind string, acc, v float32) float32 {
@@ -260,7 +260,7 @@ func (o *argOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			of[a*inner+b] = int64(best)
 		}
 	}
-	return []*tensor.Tensor{out}, nil
+	return ctx.Out(out), nil
 }
 
 func init() {
