@@ -109,7 +109,12 @@
       transformer zoo model to show SDPA at scale
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
-- [ ] in-place ops; static memory planner; per-op overhead (~13 µs/node MT)
+- [x] allocation-free run loop: inline tensor shapes + pooled headers, pooled
+      session scratch, buffer custody for views (Reshape & friends now
+      zero-copy), pooled par tasks — toy transformers −9…−16%, GC STW 54→19%
+      of samples; allocs/run: bertish 444→154, rec 774→254
+- [ ] in-place ops; static memory planner; remaining per-op allocs (result
+      slice + closure per op; rec_int8 quant chunking closures ~900/run)
 - [x] SME probes + Sgemm (kernels/sme, pure Go WORD-encoded): FMOPA peak 2.17
       TFLOPS/core; pre-packed Sgemm 700 GFLOPS 1T (7.4× NEON); signal-mask
       guard (ZA dies on signal delivery — GC-storm regression test); dispatch

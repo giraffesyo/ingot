@@ -1275,3 +1275,48 @@ architecture (Zen 4) — pure-Go cross-compile, rsync, run.
 
 Parity: zoo conformance vs ORT unchanged (tiny_transformer now via the
 fused path), OCR det/rec parity and corpus accuracy bit-identical.
+
+## Allocation-free run loop (2026-08-26)
+
+The headGrain fix left a profile dominated by `runtime.kevent` under
+`gcStart` — GC stop-the-world, fed by ~440 heap objects per bertish
+run: tensor headers, shape/stride slices, view copies, per-run session
+state, parallel-region closures. Four layers of fixes:
+
+- **tensor**: shape and strides live inside the Tensor struct (rank ≤ 8
+  inline); the pool recycles headers through a freelist, and Put clears
+  the header so stale use fails loudly instead of aliasing.
+- **par/gemm**: par.For's Task box is pooled; gemv's closures became a
+  pooled pointer task.
+- **graph**: Session.Run's working state comes from a sync.Pool, the
+  const-value template and output flags are hoisted to compile time, and
+  view outputs get real buffer custody — the view's uses pin the owning
+  value's buffer (alias roots, chains collapse), which returns to the
+  pool when direct and view uses all drain. `-race` clean.
+- **ops**: Reshape/Flatten/Squeeze/Unsqueeze are now zero-copy views
+  (custody makes that safe); squeeze swaps per-run maps for a bitmask;
+  transpose/matmul build scratch on the stack or in pooled tasks.
+
+Same-run interleaved A/B on the Apple Silicon dev box (3 rounds,
+spreads < 3%; per-run allocations in parens):
+
+| model            | before   | after    | Δ       | allocs/run  |
+|------------------|----------|----------|---------|-------------|
+| tiny_transformer | 18.6 µs  | 15.6 µs  | −16.1%  | 145 → 41    |
+| bertish          | 63.7 µs  | 55.2 µs  | −13.4%  | 444 → 154   |
+| llmblock         | 23.9 µs  | 21.1 µs  | −11.7%  | 198 → 61    |
+| vit              | 92.7 µs  | 84.1 µs  | −9.3%   | 466 → 163   |
+| rec_320          | 2.89 ms  | 2.70 ms  | −6.6%   | 774 → 254   |
+| rec_int8_320     | 2.83 ms  | 2.72 ms  | −4.0%   | 1832 → 896  |
+| det_640          | flat     |          |         | 657 → 233   |
+
+GC start-the-world fell from 54% to 19% of CPU samples on the toy
+transformers. Combined with the same day's headGrain round, bertish is
+171 → 116 → 100 µs-class on Zen 4 and llmblock −40%+ end-to-end.
+What remains per run is one result slice and one closure per op plus
+the caller-facing result map — a per-op task-struct sweep can take the
+toy models near zero if a future profile says it matters (rec_int8's
+quant chunking closures are the biggest remaining pocket at ~900).
+
+Parity: zoo conformance vs ORT, OCR det/rec parity, corpus accuracy —
+unchanged.
