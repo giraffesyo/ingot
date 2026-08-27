@@ -1541,3 +1541,20 @@ Corollary recorded on the roadmap: NCHWc's expected win is per-conv
 repacking elimination and channel-vectorized depthwise — a different
 mechanism than DRAM avoidance — and any future fusion work should
 first measure whether the tensor being "saved" ever leaves the LLC.
+
+## AVX-512 micro-kernel, finally earned (2026-08-28)
+
+The AVX-512 6×16 f32 micro-kernel has existed — correctness-tested,
+behind OCR_GEMM_KERNEL=avx512 — since the first amd64 round, parked
+because the only AVX-512 CPU then measurable was Zen 4 (double-pumped
+256-bit units, throughput parity). The fleet now has true 512-bit
+datapaths, and on Zen 5 the kernel wins: **GEMM +12–15%** (sq1024
+756 → 868 GFLOPS, conv shapes 440 → 506), **gptish −13%** end-to-end
+(10.2 → 8.9 ms), mobilenet_v2 −7%, resnetish −7%.
+
+Auto-selection is an init-time probe, not a CPU-family allowlist:
+pickMicroKernel times both kernels on a cache-hot tile (~150 µs, best
+of 3) and takes AVX-512 only on a decisive >5% win. The relative
+measurement is load-immune and inherently prices in double-pumping and
+frequency licensing — Zen 5 picks avx512 6/6 runs even at load 130;
+Zen 4 keeps avx2 4/4. CI's Ice Lake now runs the probe on every push.
