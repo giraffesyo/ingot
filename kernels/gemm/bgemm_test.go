@@ -154,3 +154,53 @@ func fmtInt(v int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestBgemmWeightsVsRef: the weights-side entry (pre-packed bf16 B, per-call
+// packed A) vs a float64 oracle over bf16-quantized inputs.
+func TestBgemmWeightsVsRef(t *testing.T) {
+	if !HasBF16() {
+		t.Skip("no bf16 kernel")
+	}
+	r := rand.New(rand.NewPCG(31, 32))
+	for _, sh := range []struct {
+		m, n, k int
+		transB  bool
+	}{
+		{8, 12, 4, false}, {16, 24, 32, false}, {7, 11, 5, false},
+		{256, 512, 512, false}, {33, 50, 129, true}, {1, 12, 64, true},
+		{64, 13, 100, true}, {9, 100, 33, false},
+	} {
+		x := make([]float32, sh.m*sh.k)
+		w := make([]float32, sh.k*sh.n)
+		for i := range x {
+			x[i] = BF16ToF32(F32ToBF16(r.Float32()*2 - 1))
+		}
+		for i := range w {
+			w[i] = BF16ToF32(F32ToBF16(r.Float32()*2 - 1))
+		}
+		ldw := sh.n
+		if sh.transB {
+			ldw = sh.k
+		}
+		pb := BPackB(sh.transB, sh.k, sh.n, w, ldw)
+		y := make([]float32, sh.m*sh.n)
+		BgemmWeights(sh.m, x, sh.k, pb, y, sh.n, sh.m*sh.n > 500)
+		tol := 1e-6 * math.Sqrt(float64(sh.k))
+		for i := 0; i < sh.m; i++ {
+			for j := 0; j < sh.n; j++ {
+				var ref float64
+				for p := 0; p < sh.k; p++ {
+					wv := w[p*sh.n+j]
+					if sh.transB {
+						wv = w[j*sh.k+p]
+					}
+					ref += float64(x[i*sh.k+p]) * float64(wv)
+				}
+				got := float64(y[i*sh.n+j])
+				if d := math.Abs(got - ref); d > tol*math.Max(1, math.Abs(ref)) {
+					t.Fatalf("%v: y[%d,%d]=%g want %g", sh, i, j, got, ref)
+				}
+			}
+		}
+	}
+}

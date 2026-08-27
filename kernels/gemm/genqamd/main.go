@@ -119,5 +119,46 @@ func main() {
 	w("\tRET")
 	w("")
 
+	// bf16 rows-kernel: A is row-major bf16 via 8 row pointers (no A packing
+	// at all — the caller just converts rows); B pair-major as above.
+	w("// func bkernelBF16Rows(kg int64, rows *[8]*uint16, bp *uint16, ct *float32)")
+	w("TEXT ·bkernelBF16Rows(SB), NOSPLIT, $0-32")
+	w("\tMOVQ kg+0(FP), DX")
+	w("\tMOVQ rows+8(FP), AX")
+	w("\tMOVQ bp+16(FP), BX")
+	w("\tMOVQ ct+24(FP), CX")
+	rowRegs := []string{"R8", "R9", "R11", "R12", "R13", "R14", "R15", "DI"}
+	for r, reg := range rowRegs {
+		w("\tMOVQ %d(AX), %s", r*8, reg)
+	}
+	w("\tMOVL $0x0FFF, R10")
+	w("\tKMOVW R10, K1")
+	for r := 0; r < 8; r++ {
+		w("\tVPXORD Z%d, Z%d, Z%d", r, r, r)
+	}
+	w("bf16rows_loop:")
+	w("\tTESTQ DX, DX")
+	w("\tJE bf16rows_done")
+	for p := 0; p < 2; p++ {
+		w("\tVMOVDQU32 %d(BX), Z8 // B pair block %d", p*48, p)
+		for r, reg := range rowRegs {
+			w("\tVPBROADCASTD %d(%s), Z9", p*4, reg)
+			w("\tBYTE $0x62; BYTE $0xD2; BYTE $0x36; BYTE $0x48; BYTE $0x52; BYTE $0x%02X // VDPBF16PS Z8, Z9, Z%d", 0xC0|r<<3, r)
+		}
+	}
+	for _, reg := range rowRegs {
+		w("\tADDQ $8, %s", reg)
+	}
+	w("\tADDQ $96, BX")
+	w("\tDECQ DX")
+	w("\tJMP bf16rows_loop")
+	w("bf16rows_done:")
+	for r := 0; r < 8; r++ {
+		w("\tVMOVDQU32 Z%d, K1, %d(CX)", r, r*48)
+	}
+	w("\tVZEROUPPER")
+	w("\tRET")
+	w("")
+
 	fmt.Print(b.String())
 }
