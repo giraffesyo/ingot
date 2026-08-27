@@ -26,6 +26,8 @@ import (
 //     Clip,LeakyRelu}  ⇒  activation runs in the conv epilogue (ingot_act attrs).
 //   - fold-post-affine: Conv(act) → {Mul,Add,Sub,Div by scalar const}  ⇒  post
 //     scale/shift in the conv epilogue.
+//   - fuse-se:          GlobalAveragePool → 1x1 Conv → 1x1 Conv → Mul  ⇒
+//     ingot.SE (the squeeze-excite island runs inline).
 //
 // Every rewrite keeps the consumer's output Value (so graph outputs and names
 // survive) and only fires when intermediate values have a single consumer.
@@ -40,6 +42,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = foldConvAffine(g, stats) || changed
 		changed = fuseConvAct(g, stats) || changed
 		changed = foldPostAffine(g, stats) || changed
+		changed = fuseSE(g, stats) || changed
 		changed = foldQDQAffine(g, stats) || changed
 		changed = fuseQLUT(g, stats) || changed
 		changed = fuseLayerNorm(g, stats) || changed
@@ -1798,4 +1801,158 @@ func foldConst(g *Graph, stats map[string]int) bool {
 	}
 	g.compact(dead)
 	return len(dead) > 0
+}
+
+// fuseSE fuses the squeeze-excite island — GlobalAveragePool → 1x1 Conv
+// (+act) → 1x1 Conv (+act) → Mul back onto the pooled input — into one
+// ingot.SE node. The island is four dispatches and three tiny intermediates
+// for ~2C·Cr FLOPs of real work; fused it is two parallel regions around an
+// inline FC chain.
+func fuseSE(g *Graph, stats map[string]int) bool {
+	conv1x1 := func(n *Node) bool {
+		if n.OpType != "Conv" || n.Domain != "" || int(n.Attrs.Int("group", 1)) != 1 {
+			return false
+		}
+		if n.Attrs.String("auto_pad", "NOTSET") != "NOTSET" {
+			return false
+		}
+		for _, a := range n.Attrs.Ints("pads", nil) {
+			if a != 0 {
+				return false
+			}
+		}
+		for _, a := range n.Attrs.Ints("strides", nil) {
+			if a != 1 {
+				return false
+			}
+		}
+		for _, a := range n.Attrs.Ints("dilations", nil) {
+			if a != 1 {
+				return false
+			}
+		}
+		if len(n.Inputs) < 2 || n.Inputs[1] == nil || n.Inputs[1].Const == nil || n.Inputs[1].Const.DType() != tensor.F32 {
+			return false
+		}
+		ws := n.Inputs[1].Const.Shape()
+		if len(ws) != 4 || ws[2] != 1 || ws[3] != 1 {
+			return false
+		}
+		if len(n.Inputs) > 2 && n.Inputs[2] != nil && n.Inputs[2].Const == nil {
+			return false // dynamic bias
+		}
+		return true
+	}
+	// isGAP: GlobalAveragePool, or its ReduceMean(axes=[2,3], keepdims=1)
+	// spelling (efficientnet-style exports). Axes may be an attr or a const
+	// input (opset 18).
+	isGAP := func(n *Node) bool {
+		if n.Domain != "" {
+			return false
+		}
+		if n.OpType == "GlobalAveragePool" {
+			return true
+		}
+		if n.OpType != "ReduceMean" || n.Attrs.Int("keepdims", 1) != 1 {
+			return false
+		}
+		axes := n.Attrs.Ints("axes", nil)
+		if axes == nil && len(n.Inputs) > 1 && n.Inputs[1] != nil && n.Inputs[1].Const != nil && n.Inputs[1].Const.DType() == tensor.I64 {
+			axes = n.Inputs[1].Const.I64()
+		}
+		if len(axes) != 2 {
+			return false
+		}
+		a0, a1 := axes[0], axes[1]
+		if a0 < 0 {
+			a0 += 4 // NCHW context: the op validates rank 4 at runtime
+		}
+		if a1 < 0 {
+			a1 += 4
+		}
+		return (a0 == 2 && a1 == 3) || (a0 == 3 && a1 == 2)
+	}
+	dead := map[*Node]bool{}
+	changed := false
+	for _, gap := range g.Nodes {
+		if dead[gap] || !isGAP(gap) {
+			continue
+		}
+		x := gap.Inputs[0]
+		c1 := g.soleConsumer(gap.Outputs[0])
+		if c1 == nil || dead[c1] || !conv1x1(c1) {
+			continue
+		}
+		c2 := g.soleConsumer(c1.Outputs[0])
+		if c2 == nil || dead[c2] || !conv1x1(c2) {
+			continue
+		}
+		w1s := c1.Inputs[1].Const.Shape()
+		w2s := c2.Inputs[1].Const.Shape()
+		if w2s[1] != w1s[0] || w2s[0] != w1s[1] {
+			continue // not a squeeze-expand pair back to C channels
+		}
+		mul := g.soleConsumer(c2.Outputs[0])
+		if mul == nil || dead[mul] || mul.OpType != "Mul" || mul.Domain != "" {
+			continue
+		}
+		if !((mul.Inputs[0] == x && mul.Inputs[1] == c2.Outputs[0]) ||
+			(mul.Inputs[1] == x && mul.Inputs[0] == c2.Outputs[0])) {
+			continue
+		}
+		var b1, b2 *Value
+		if len(c1.Inputs) > 2 {
+			b1 = c1.Inputs[2]
+		}
+		if len(c2.Inputs) > 2 {
+			b2 = c2.Inputs[2]
+		}
+		attrs := ops.Attrs{}
+		copyEpi := func(src *Node, prefix string) {
+			for _, name := range []string{"act", "act_alpha", "act_beta", "post_scale", "post_shift"} {
+				if a, ok := src.Attrs["ingot_"+name]; ok {
+					attrs[prefix+name] = a
+				}
+			}
+		}
+		copyEpi(c1, "se1_")
+		copyEpi(c2, "se2_")
+		out := mul.Outputs[0]
+		// Attach surviving inputs to the host BEFORE dropping the pattern
+		// nodes (drop-order landmine: a momentarily consumer-less const is
+		// deleted and keeps a stale value id).
+		host := gap
+		ins := []*Value{x, c1.Inputs[1], b1, c2.Inputs[1], b2}
+		for _, v := range ins[1:] {
+			if v != nil {
+				v.Consumers = append(v.Consumers, host)
+			}
+		}
+		for _, n2 := range []*Node{c1, c2, mul} {
+			dead[n2] = true
+			g.dropNode(n2)
+		}
+		// A ReduceMean host may carry an axes const input: detach it.
+		for _, v := range host.Inputs[1:] {
+			if v != nil {
+				removeConsumer(v, host)
+				if v.Const != nil && len(v.Consumers) == 0 && !g.isOutput(v) {
+					delete(g.Values, v.Name)
+				}
+			}
+		}
+		mid := gap.Outputs[0]
+		delete(g.Values, mid.Name)
+		g.Values[out.Name] = out
+		host.OpType, host.Domain = "SE", ingotDomain
+		host.Attrs = attrs
+		host.Inputs = ins
+		host.Outputs = []*Value{out}
+		out.Producer = host
+		g.Opsets[ingotDomain] = 1
+		stats["fuse-se"]++
+		changed = true
+	}
+	g.compact(dead)
+	return changed
 }
