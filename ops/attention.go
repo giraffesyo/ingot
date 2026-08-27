@@ -69,9 +69,10 @@ func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 // probs·V ([B,H,T,dh]). With strideOut the result is written directly in
 // [B,T,H,dh] order (folding the usual trailing transpose).
 type sdpaOp struct {
-	n         NodeInfo
-	scale     float32
-	strideOut bool
+	n                NodeInfo
+	scale            float32
+	strideOut        bool
+	aLay, bLay, vLay int // input layouts, see fuse-sdpa (0 = as-declared)
 }
 
 func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
@@ -84,10 +85,36 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if a.DType() != tensor.F32 || len(as) != 4 || len(bs) != 4 || len(vs) != 4 {
 		return nil, o.n.Errorf("SDPA: want 4-D f32, got %v %v %v", as, bs, vs)
 	}
-	B, H, T, dh := as[0], as[1], as[2], as[3]
-	Tk := bs[3]
-	if bs[0] != B || bs[1] != H || bs[2] != dh || vs[0] != B || vs[1] != H || vs[2] != Tk || vs[3] != dh {
-		return nil, o.n.Errorf("SDPA: shape mismatch A%v B%v V%v", as, bs, vs)
+	var B, H, T, dh int
+	if o.aLay == 1 { // A stored [B,T,H,dh]
+		B, T, H, dh = as[0], as[1], as[2], as[3]
+	} else { // [B,H,T,dh]
+		B, H, T, dh = as[0], as[1], as[2], as[3]
+	}
+	var Tk int
+	switch o.bLay {
+	case 1: // [B,Tk,H,dh]
+		Tk = bs[1]
+		if bs[0] != B || bs[2] != H || bs[3] != dh {
+			return nil, o.n.Errorf("SDPA: B layout 1 mismatch A%v B%v", as, bs)
+		}
+	case 2: // [B,H,Tk,dh]
+		Tk = bs[2]
+		if bs[0] != B || bs[1] != H || bs[3] != dh {
+			return nil, o.n.Errorf("SDPA: B layout 2 mismatch A%v B%v", as, bs)
+		}
+	default: // [B,H,dh,Tk]
+		Tk = bs[3]
+		if bs[0] != B || bs[1] != H || bs[2] != dh {
+			return nil, o.n.Errorf("SDPA: shape mismatch A%v B%v", as, bs)
+		}
+	}
+	if o.vLay == 1 { // [B,Tk,H,dh]
+		if vs[0] != B || vs[1] != Tk || vs[2] != H || vs[3] != dh {
+			return nil, o.n.Errorf("SDPA: V layout 1 mismatch V%v", vs)
+		}
+	} else if vs[0] != B || vs[1] != H || vs[2] != Tk || vs[3] != dh {
+		return nil, o.n.Errorf("SDPA: shape mismatch V%v", vs)
 	}
 	if len(in) > 3 && in[3] != nil {
 		m := in[3]
@@ -116,11 +143,27 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		b, h := bh/H, bh%H
 		t0 := rc * rows
 		tc := min(rows, T-t0)
-		ab := af[(b*H+h)*T*dh+t0*dh:]
-		bb := bf[(b*H+h)*dh*Tk:]
-		vb := vf[(b*H+h)*Tk*dh:]
+		ab, alda := af[((b*H+h)*T+t0)*dh:], dh
+		if o.aLay == 1 {
+			ab, alda = af[((b*T+t0)*H+h)*dh:], H*dh
+		}
+		var bb []float32
+		var bldb int
+		bT := false
+		switch o.bLay {
+		case 1:
+			bb, bldb, bT = bf[(b*Tk*H+h)*dh:], H*dh, true
+		case 2:
+			bb, bldb, bT = bf[(b*H+h)*Tk*dh:], dh, true
+		default:
+			bb, bldb = bf[(b*H+h)*dh*Tk:], Tk
+		}
+		vb, vldb := vf[(b*H+h)*Tk*dh:], dh
+		if o.vLay == 1 {
+			vb, vldb = vf[(b*Tk*H+h)*dh:], H*dh
+		}
 		s := sAll[wk*rows*Tk:]
-		gemmT(false, false, tc, Tk, dh, o.scale, ab, dh, bb, Tk, 0, s, Tk)
+		gemmT(false, bT, tc, Tk, dh, o.scale, ab, alda, bb, bldb, 0, s, Tk)
 		for t := 0; t < tc; t++ {
 			row := s[t*Tk : (t+1)*Tk]
 			if mask != nil {
@@ -129,9 +172,9 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			softmaxRow(row, row, false)
 		}
 		if o.strideOut {
-			gemmT(false, false, tc, dh, Tk, 1, s, Tk, vb, dh, 0, of[((b*T+t0)*H+h)*dh:], H*dh)
+			gemmT(false, false, tc, dh, Tk, 1, s, Tk, vb, vldb, 0, of[((b*T+t0)*H+h)*dh:], H*dh)
 		} else {
-			gemmT(false, false, tc, dh, Tk, 1, s, Tk, vb, dh, 0, of[((b*H+h)*T+t0)*dh:], dh)
+			gemmT(false, false, tc, dh, Tk, 1, s, Tk, vb, vldb, 0, of[((b*H+h)*T+t0)*dh:], dh)
 		}
 	})
 	if ctx.Pool != nil {
@@ -171,6 +214,7 @@ func init() {
 		return &mhaOp{n: n, scale: n.Attrs.Float("scale", 1)}, nil
 	})
 	Register("ingot", "SDPA", 1, func(n NodeInfo) (Op, error) {
-		return &sdpaOp{n: n, scale: n.Attrs.Float("scale", 1), strideOut: n.Attrs.Int("stride_out", 0) != 0}, nil
+		return &sdpaOp{n: n, scale: n.Attrs.Float("scale", 1), strideOut: n.Attrs.Int("stride_out", 0) != 0,
+			aLay: int(n.Attrs.Int("a_layout", 0)), bLay: int(n.Attrs.Int("b_layout", 0)), vLay: int(n.Attrs.Int("v_layout", 0))}, nil
 	})
 }

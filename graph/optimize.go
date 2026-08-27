@@ -1532,6 +1532,17 @@ func fuseAttention(g *Graph, stats map[string]int) bool {
 // how it was produced — the win is folding the scale into the GEMM, the
 // softmax running on the hot score tile, and the [B,H,T,Tk] intermediates
 // never touching memory.
+// transProducer returns v's producer when it is a sole-consumed Transpose
+// with exactly this perm (a peelable head-split permute), else nil.
+func transProducer(g *Graph, v *Value, dead map[*Node]bool, perm ...int64) *Node {
+	p := v.Producer
+	if p == nil || dead[p] || p.OpType != "Transpose" || p.Domain != "" ||
+		p.Inputs[0] == nil || g.soleConsumer(v) == nil || !permIs(p, perm...) {
+		return nil
+	}
+	return p
+}
+
 func fuseSDPA(g *Graph, stats map[string]int) bool {
 	dead := map[*Node]bool{}
 	changed := false
@@ -1607,6 +1618,28 @@ func fuseSDPA(g *Graph, stats map[string]int) bool {
 			continue
 		}
 		vv := mm2.Inputs[1]
+		drop := append(mid, sm, mm2)
+		// Peel the head-split transposes off A, B and V: the op reads these
+		// layouts strided, so the permute copies vanish. Layout codes:
+		// 0 = as-declared ([B,H,T,dh] / [B,H,dh,Tk] / [B,H,Tk,dh]),
+		// 1 = [B,T,H,dh] (peeled [0,2,1,3]),
+		// 2 = B only: [B,H,Tk,dh] (peeled [0,1,3,2] — legacy-export Kᵀ).
+		aLay, bLay, vLay := 0, 0, 0
+		if t := transProducer(g, av, dead, 0, 2, 1, 3); t != nil {
+			drop = append(drop, t)
+			av, aLay = t.Inputs[0], 1
+		}
+		if t := transProducer(g, bv, dead, 0, 2, 3, 1); t != nil {
+			drop = append(drop, t)
+			bv, bLay = t.Inputs[0], 1
+		} else if t := transProducer(g, bv, dead, 0, 1, 3, 2); t != nil {
+			drop = append(drop, t)
+			bv, bLay = t.Inputs[0], 2
+		}
+		if t := transProducer(g, vv, dead, 0, 2, 1, 3); t != nil {
+			drop = append(drop, t)
+			vv, vLay = t.Inputs[0], 1
+		}
 		out := mm2.Outputs[0]
 		strideOut := 0
 		var otr *Node
@@ -1615,7 +1648,6 @@ func fuseSDPA(g *Graph, stats map[string]int) bool {
 			out = t.Outputs[0]
 			strideOut = 1
 		}
-		drop := append(mid, sm, mm2)
 		if amul != nil {
 			drop = append(drop, amul)
 		}
@@ -1655,6 +1687,9 @@ func fuseSDPA(g *Graph, stats map[string]int) bool {
 		host.Attrs = ops.Attrs{
 			"scale":      fattr(float32(scale)),
 			"stride_out": {Kind: ops.KindInt, I: int64(strideOut)},
+			"a_layout":   {Kind: ops.KindInt, I: int64(aLay)},
+			"b_layout":   {Kind: ops.KindInt, I: int64(bLay)},
+			"v_layout":   {Kind: ops.KindInt, I: int64(vLay)},
 		}
 		host.Inputs = ins
 		host.Outputs = []*Value{out}
