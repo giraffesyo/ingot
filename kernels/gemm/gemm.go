@@ -12,6 +12,7 @@ import (
 // par.Task for the three parallel phases (pack B, pack A, macro-kernel) so a
 // call allocates nothing in steady state.
 type gemmCtx struct {
+	pb    *PackedB    // pre-packed B for the small-M sweep (nil: pack per panel)
 	a     []float32   // packed A block: MC*KC (MR-padded)
 	b     []float32   // packed B panel: KC*NC (NR-padded)
 	tiles [][]float32 // per-worker MR*NR edge tiles
@@ -313,7 +314,9 @@ func (g *gemmCtx) smallMTask(t, w int) {
 	for kb := 0; kb < nkb; kb++ {
 		p0 := kb * KC
 		kc := min(KC, g.kc-p0)
-		if g.transB {
+		if g.pb != nil {
+			bp = g.pb.data[(kb*g.pb.np+jp)*KC*NR:]
+		} else if g.transB {
 			packBPanelT(kc, nr, g.bsrc[jp*NR*g.ldb+p0:], g.ldb, bp)
 		} else {
 			packBPanel(kc, nr, g.bsrc[p0*g.ldb+jp*NR:], g.ldb, bp)
@@ -589,4 +592,70 @@ func PackAPanels(m, k int, a []float32, lda int) []float32 {
 		packAPanel(k, min(MR, m-ip*MR), a[ip*MR*lda:], lda, out[ip*KC*MR:])
 	}
 	return out
+}
+
+// PackedB is B[k×n] pre-packed into the NR-wide panel layout, for operands
+// reused across many calls (Linear/MatMul weights). Build once with PackB and
+// multiply with SgemmPackedB: the per-call pack of B — a full pass over the
+// weights on every Run — is paid once at first use. Layout: [kBlock][nPanel]
+// [KC*NR], matching the small-M sweep's loop order.
+type PackedB struct {
+	k, n, np int
+	data     []float32
+}
+
+// Rows and Cols return the logical dimensions of the packed matrix.
+func (p *PackedB) Rows() int { return p.k }
+func (p *PackedB) Cols() int { return p.n }
+
+// PackB packs B[k×n] (row stride ldb; transB: stored [n×k]) into panels.
+func PackB(transB bool, k, n int, b []float32, ldb int) *PackedB {
+	nkb := (k + KC - 1) / KC
+	np := (n + NR - 1) / NR
+	p := &PackedB{k: k, n: n, np: np, data: make([]float32, nkb*np*KC*NR)}
+	for kb := 0; kb < nkb; kb++ {
+		p0 := kb * KC
+		kc := min(KC, k-p0)
+		for jp := 0; jp < np; jp++ {
+			nr := min(NR, n-jp*NR)
+			dst := p.data[(kb*np+jp)*KC*NR:]
+			if transB {
+				packBPanelT(kc, nr, b[jp*NR*ldb+p0:], ldb, dst)
+			} else {
+				packBPanel(kc, nr, b[p0*ldb+jp*NR:], ldb, dst)
+			}
+		}
+	}
+	return p
+}
+
+// SgemmPackedB computes C = alpha*A·B + beta*C against a pre-packed B,
+// blocked over M so each block takes the small-M sweep with the packed
+// panels (no per-call B pack).
+func SgemmPackedB(m int, alpha float32, a []float32, lda int, pb *PackedB, beta float32, c []float32, ldc int) {
+	k, n := pb.k, pb.n
+	if m == 0 || n == 0 {
+		return
+	}
+	if k == 0 || alpha == 0 {
+		scaleC(m, n, beta, c, ldc)
+		return
+	}
+	if beta != 0 && beta != 1 {
+		scaleC(m, n, beta, c, ldc)
+	}
+	firstOverwrite := beta == 0
+	workers := par.Workers()
+	if w := int(int64(m) * int64(n) * int64(k) / minTaskMACs); w < workers {
+		workers = max(w, 1)
+	}
+	g := getCtx()
+	defer putCtx(g)
+	g.alpha, g.lda, g.ldb, g.ldc = alpha, lda, 0, ldc
+	g.transA, g.transB = false, false
+	g.pb = pb
+	defer func() { g.pb = nil }()
+	for i0 := 0; i0 < m; i0 += MC {
+		g.smallM(min(MC, m-i0), n, k, a[i0*lda:], nil, c[i0*ldc:], firstOverwrite, workers)
+	}
 }
