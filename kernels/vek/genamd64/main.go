@@ -285,6 +285,20 @@ func main() {
 	})
 
 	g.axpy()
+	g.quantConsts()
+	g.requant("requantu8", true)
+	g.requant("requanti8", false)
+	g.quant("quantu8", true)
+	g.quant("quanti8", false)
+	g.dequant("dequantu8", true)
+	g.dequant("dequanti8", false)
+	g.shift()
+	g.widen()
+	g.deint16()
+	g.qlut()
+	for _, k := range [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}} {
+		g.qdw(k[0], k[1])
+	}
 	for _, k := range dwShapes {
 		g.dwconv(k[0], k[1])
 	}
@@ -399,6 +413,362 @@ func (g *gen) dot() {
 	for i := 0; i < 4; i++ {
 		g.w("\tVMOVUPS Y%d, %d(DI)", i, i*32)
 	}
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// quantConsts emits the 32-byte constants used by the quant kernels.
+func (g *gen) quantConsts() {
+	c32 := func(sym string, bytes []byte) {
+		for i := 0; i < 32; i += 8 {
+			var v uint64
+			for j := 7; j >= 0; j-- {
+				v = v<<8 | uint64(bytes[i+j])
+			}
+			g.w("DATA %s<>+%d(SB)/8, $0x%016x", sym, i, v)
+		}
+		g.w("GLOBL %s<>(SB), RODATA|NOPTR, $32", sym)
+	}
+	rep := func(b byte) []byte {
+		out := make([]byte, 32)
+		for i := range out {
+			out[i] = b
+		}
+		return out
+	}
+	c32("q_x80", rep(0x80))
+	c32("q_x0f", rep(0x0f))
+	// per-128-lane even/odd i16 gather: bytes [0 1 4 5 8 9 12 13 | 2 3 6 7 10 11 14 15]
+	lane := []byte{0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15}
+	c32("q_deint", append(append([]byte{}, lane...), lane...))
+}
+
+// requant: dst = sat(round_even(f32(src+corr)*mult + off)) for u8 / i8.
+func (g *gen) requant(name string, unsigned bool) {
+	g.w("// func %s_asm(dst []%s, src []int32, n int, mult, off float32, corr int32)", name, map[bool]string{true: "uint8", false: "int8"}[unsigned])
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-68", name)
+	g.w("\tMOVQ dst_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ n+48(FP), CX")
+	g.w("\tVBROADCASTSS mult+56(FP), Y11")
+	g.w("\tVBROADCASTSS off+60(FP), Y12")
+	g.w("\tMOVL corr+64(FP), AX")
+	g.w("\tMOVL AX, X13")
+	g.w("\tVPBROADCASTD X13, Y13")
+	if unsigned {
+		g.w("\tVXORPS Y14, Y14, Y14            // lo clamp 0")
+		g.w("\tMOVL $0x437f0000, AX            // 255.0")
+	} else {
+		g.w("\tMOVL $0xc3000000, AX            // -128.0")
+		g.w("\tMOVL AX, X14")
+		g.w("\tVBROADCASTSS X14, Y14")
+		g.w("\tMOVL $0x42fe0000, AX            // 127.0")
+	}
+	g.w("\tMOVL AX, X15")
+	g.w("\tVBROADCASTSS X15, Y15")
+	g.w("loop:")
+	g.w("\tCMPQ CX, $16")
+	g.w("\tJL done")
+	g.w("\tVMOVDQU (SI), Y0")
+	g.w("\tVMOVDQU 32(SI), Y1")
+	g.w("\tVPADDD Y13, Y0, Y0")
+	g.w("\tVPADDD Y13, Y1, Y1")
+	g.w("\tVCVTDQ2PS Y0, Y0")
+	g.w("\tVCVTDQ2PS Y1, Y1")
+	g.w("\tVMULPS Y11, Y0, Y0")
+	g.w("\tVMULPS Y11, Y1, Y1")
+	g.w("\tVADDPS Y12, Y0, Y0")
+	g.w("\tVADDPS Y12, Y1, Y1")
+	g.w("\tVMAXPS Y14, Y0, Y0")
+	g.w("\tVMAXPS Y14, Y1, Y1")
+	g.w("\tVMINPS Y15, Y0, Y0")
+	g.w("\tVMINPS Y15, Y1, Y1")
+	g.w("\tVCVTPS2DQ Y0, Y0                // round-to-nearest-even (MXCSR default)")
+	g.w("\tVCVTPS2DQ Y1, Y1")
+	g.w("\tVPACKSSDW Y1, Y0, Y0")
+	g.w("\tVPERMQ $0xd8, Y0, Y0")
+	g.w("\tVEXTRACTI128 $1, Y0, X1")
+	if unsigned {
+		g.w("\tVPACKUSWB X1, X0, X0")
+	} else {
+		g.w("\tVPACKSSWB X1, X0, X0")
+	}
+	g.w("\tVMOVDQU X0, (DI)")
+	g.w("\tADDQ $64, SI")
+	g.w("\tADDQ $16, DI")
+	g.w("\tSUBQ $16, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// quant: dst = sat(round_even(src/scale + zp)) for u8 / i8, src f32.
+func (g *gen) quant(name string, unsigned bool) {
+	g.w("// func %s_asm(dst []%s, src []float32, n int, scale, zp float32)", name, map[bool]string{true: "uint8", false: "int8"}[unsigned])
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-64", name)
+	g.w("\tMOVQ dst_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ n+48(FP), CX")
+	g.w("\tVBROADCASTSS scale+56(FP), Y11")
+	g.w("\tVBROADCASTSS zp+60(FP), Y12")
+	if unsigned {
+		g.w("\tVXORPS Y14, Y14, Y14")
+		g.w("\tMOVL $0x437f0000, AX            // 255.0")
+	} else {
+		g.w("\tMOVL $0xc3000000, AX            // -128.0")
+		g.w("\tMOVL AX, X14")
+		g.w("\tVBROADCASTSS X14, Y14")
+		g.w("\tMOVL $0x42fe0000, AX            // 127.0")
+	}
+	g.w("\tMOVL AX, X15")
+	g.w("\tVBROADCASTSS X15, Y15")
+	g.w("loop:")
+	g.w("\tCMPQ CX, $16")
+	g.w("\tJL done")
+	g.w("\tVMOVUPS (SI), Y0")
+	g.w("\tVMOVUPS 32(SI), Y1")
+	g.w("\tVDIVPS Y11, Y0, Y0")
+	g.w("\tVDIVPS Y11, Y1, Y1")
+	g.w("\tVADDPS Y12, Y0, Y0")
+	g.w("\tVADDPS Y12, Y1, Y1")
+	g.w("\tVMAXPS Y14, Y0, Y0")
+	g.w("\tVMAXPS Y14, Y1, Y1")
+	g.w("\tVMINPS Y15, Y0, Y0")
+	g.w("\tVMINPS Y15, Y1, Y1")
+	g.w("\tVCVTPS2DQ Y0, Y0")
+	g.w("\tVCVTPS2DQ Y1, Y1")
+	g.w("\tVPACKSSDW Y1, Y0, Y0")
+	g.w("\tVPERMQ $0xd8, Y0, Y0")
+	g.w("\tVEXTRACTI128 $1, Y0, X1")
+	if unsigned {
+		g.w("\tVPACKUSWB X1, X0, X0")
+	} else {
+		g.w("\tVPACKSSWB X1, X0, X0")
+	}
+	g.w("\tVMOVDQU X0, (DI)")
+	g.w("\tADDQ $64, SI")
+	g.w("\tADDQ $16, DI")
+	g.w("\tSUBQ $16, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// dequant: dst = f32(src - zp) * scale for u8 / i8 sources.
+func (g *gen) dequant(name string, unsigned bool) {
+	g.w("// func %s_asm(dst []float32, src []%s, n int, scale float32, zp int32)", name, map[bool]string{true: "uint8", false: "int8"}[unsigned])
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-64", name)
+	g.w("\tMOVQ dst_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ n+48(FP), CX")
+	g.w("\tVBROADCASTSS scale+56(FP), Y11")
+	g.w("\tMOVL zp+60(FP), AX")
+	g.w("\tMOVL AX, X12")
+	g.w("\tVPBROADCASTD X12, Y12")
+	g.w("loop:")
+	g.w("\tCMPQ CX, $16")
+	g.w("\tJL done")
+	if unsigned {
+		g.w("\tVPMOVZXBD (SI), Y0")
+		g.w("\tVPMOVZXBD 8(SI), Y1")
+	} else {
+		g.w("\tVPMOVSXBD (SI), Y0")
+		g.w("\tVPMOVSXBD 8(SI), Y1")
+	}
+	g.w("\tVPSUBD Y12, Y0, Y0")
+	g.w("\tVPSUBD Y12, Y1, Y1")
+	g.w("\tVCVTDQ2PS Y0, Y0")
+	g.w("\tVCVTDQ2PS Y1, Y1")
+	g.w("\tVMULPS Y11, Y0, Y0")
+	g.w("\tVMULPS Y11, Y1, Y1")
+	g.w("\tVMOVUPS Y0, (DI)")
+	g.w("\tVMOVUPS Y1, 32(DI)")
+	g.w("\tADDQ $16, SI")
+	g.w("\tADDQ $64, DI")
+	g.w("\tSUBQ $16, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// shiftu8s8: dst = src ^ 0x80 (u8 -> s8 shift), 64-byte blocks.
+func (g *gen) shift() {
+	g.w("// func shiftu8s8_asm(dst []int8, src []uint8, n int)")
+	g.w("TEXT ·shiftu8s8_asm(SB), NOSPLIT, $0-56")
+	g.w("\tMOVQ dst_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ n+48(FP), CX")
+	g.w("\tVMOVDQU q_x80<>(SB), Y15")
+	g.w("loop:")
+	g.w("\tCMPQ CX, $64")
+	g.w("\tJL done")
+	g.w("\tVPXOR (SI), Y15, Y0")
+	g.w("\tVPXOR 32(SI), Y15, Y1")
+	g.w("\tVMOVDQU Y0, (DI)")
+	g.w("\tVMOVDQU Y1, 32(DI)")
+	g.w("\tADDQ $64, SI")
+	g.w("\tADDQ $64, DI")
+	g.w("\tSUBQ $64, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// widens8: dst(i16) = src(s8), 16 per iteration.
+func (g *gen) widen() {
+	g.w("// func widens8_asm(dst []int16, src []int8, n int)")
+	g.w("TEXT ·widens8_asm(SB), NOSPLIT, $0-56")
+	g.w("\tMOVQ dst_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ n+48(FP), CX")
+	g.w("loop:")
+	g.w("\tCMPQ CX, $16")
+	g.w("\tJL done")
+	g.w("\tVPMOVSXBW (SI), Y0")
+	g.w("\tVMOVDQU Y0, (DI)")
+	g.w("\tADDQ $16, SI")
+	g.w("\tADDQ $32, DI")
+	g.w("\tSUBQ $16, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// deint16: ev[i]=src[2i], od[i]=src[2i+1], 8 pairs per iteration.
+func (g *gen) deint16() {
+	g.w("// func deint16_asm(ev, od []int16, src []int16, n int)")
+	g.w("TEXT ·deint16_asm(SB), NOSPLIT, $0-80")
+	g.w("\tMOVQ ev_base+0(FP), DI")
+	g.w("\tMOVQ od_base+24(FP), BX")
+	g.w("\tMOVQ src_base+48(FP), SI")
+	g.w("\tMOVQ n+72(FP), CX")
+	g.w("\tVMOVDQU q_deint<>(SB), Y15")
+	g.w("loop:")
+	g.w("\tCMPQ CX, $8")
+	g.w("\tJL done")
+	g.w("\tVMOVDQU (SI), Y0                // 8 (ev,od) pairs")
+	g.w("\tVPSHUFB Y15, Y0, Y0             // per lane: ev0-3 | od0-3")
+	g.w("\tVPERMQ $0xd8, Y0, Y0            // ev0-7 | od0-7")
+	g.w("\tVEXTRACTI128 $1, Y0, X1")
+	g.w("\tVMOVDQU X0, (DI)")
+	g.w("\tVMOVDQU X1, (BX)")
+	g.w("\tADDQ $32, SI")
+	g.w("\tADDQ $16, DI")
+	g.w("\tADDQ $16, BX")
+	g.w("\tSUBQ $8, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// qlut: 256-entry byte LUT via the AVX2 nibble trick — 16 VPSHUFB rounds,
+// one per 16-entry table chunk, selected by comparing high nibbles.
+func (g *gen) qlut() {
+	g.w("// func qlut_asm(dst *uint8, src *uint8, n int64, tab *uint8)")
+	g.w("TEXT ·qlut_asm(SB), NOSPLIT, $0-32")
+	g.w("\tMOVQ dst+0(FP), DI")
+	g.w("\tMOVQ src+8(FP), SI")
+	g.w("\tMOVQ n+16(FP), CX")
+	g.w("\tMOVQ tab+24(FP), DX")
+	g.w("\tVMOVDQU q_x0f<>(SB), Y14")
+	g.w("loop:")
+	g.w("\tCMPQ CX, $32")
+	g.w("\tJL done")
+	g.w("\tVMOVDQU (SI), Y0")
+	g.w("\tVPAND Y14, Y0, Y1               // lo nibbles")
+	g.w("\tVPSRLW $4, Y0, Y2")
+	g.w("\tVPAND Y14, Y2, Y2               // hi nibbles")
+	g.w("\tVPXOR Y3, Y3, Y3                // acc")
+	g.w("\tVPXOR Y4, Y4, Y4                // chunk index j (bytes)")
+	g.w("\tVPCMPEQB Y5, Y5, Y5             // all-ones (-1 bytes)")
+	g.w("\tMOVQ DX, AX")
+	g.w("\tMOVQ $16, R8")
+	g.w("chunk:")
+	g.w("\tVBROADCASTI128 (AX), Y6         // table chunk j")
+	g.w("\tVPCMPEQB Y4, Y2, Y7             // hi == j?")
+	g.w("\tVPSHUFB Y1, Y6, Y6              // chunk[lo]")
+	g.w("\tVPAND Y7, Y6, Y6")
+	g.w("\tVPOR Y6, Y3, Y3")
+	g.w("\tVPSUBB Y5, Y4, Y4               // j++")
+	g.w("\tADDQ $16, AX")
+	g.w("\tDECQ R8")
+	g.w("\tJNZ chunk")
+	g.w("\tVMOVDQU Y3, (DI)")
+	g.w("\tADDQ $32, SI")
+	g.w("\tADDQ $32, DI")
+	g.w("\tSUBQ $32, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// qdw emits a stride-1 KHxKW int8-depthwise row kernel:
+// acc[c] += sum_{kh,kw} wp[kh*KW+kw] * src[kh*W + c + kw]  (s16 in, s32 acc).
+// Weights preload into YMM registers when they fit (taps <= 9); larger
+// kernels broadcast each tap from memory inside the loop.
+func (g *gen) qdw(KH, KW int) {
+	name := fmt.Sprintf("qdw%dx%ds1", KH, KW)
+	taps := KH * KW
+	preload := taps <= 9
+	g.w("// func %s_asm(acc []int32, src, wp []int16, ncols, W int)", name)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-88", name)
+	g.w("\tMOVQ acc_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ wp_base+48(FP), BX")
+	g.w("\tMOVQ ncols+72(FP), CX")
+	g.w("\tMOVQ W+80(FP), AX")
+	rows := []string{"SI", "R9", "R10", "R11", "R12"}
+	for kh := 1; kh < KH; kh++ {
+		g.w("\tLEAQ (%s)(AX*2), %s", rows[kh-1], rows[kh])
+	}
+	if preload {
+		for t := 0; t < taps; t++ {
+			r := 15 - t
+			g.w("\tVPBROADCASTW %d(BX), X%d", 2*t, r)
+			g.w("\tVPMOVSXWD X%d, Y%d", r, r)
+		}
+	}
+	g.w("loop:")
+	g.w("\tCMPQ CX, $8")
+	g.w("\tJL done")
+	g.w("\tVMOVDQU (DI), Y0")
+	for kh := 0; kh < KH; kh++ {
+		for kw := 0; kw < KW; kw++ {
+			t := kh*KW + kw
+			g.w("\tVPMOVSXWD %d(%s), Y1", 2*kw, rows[kh])
+			if preload {
+				g.w("\tVPMULLD Y%d, Y1, Y1", 15-t)
+			} else {
+				g.w("\tVPBROADCASTW %d(BX), X2", 2*t)
+				g.w("\tVPMOVSXWD X2, Y2")
+				g.w("\tVPMULLD Y2, Y1, Y1")
+			}
+			g.w("\tVPADDD Y1, Y0, Y0")
+		}
+	}
+	g.w("\tVMOVDQU Y0, (DI)")
+	for kh := 0; kh < KH; kh++ {
+		g.w("\tADDQ $16, %s", rows[kh])
+	}
+	g.w("\tADDQ $32, DI")
+	g.w("\tSUBQ $8, CX")
+	g.w("\tJMP loop")
+	g.w("done:")
 	g.w("\tVZEROUPPER")
 	g.w("\tRET")
 	g.w("")
