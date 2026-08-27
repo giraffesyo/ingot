@@ -258,3 +258,37 @@ func BenchmarkSgemmPackedA(b *testing.B) {
 		})
 	}
 }
+
+func TestSgemmPackedB(t *testing.T) {
+	rng := rand.New(rand.NewPCG(21, 22))
+	for _, tc := range []struct {
+		m, n, k     int
+		transB      bool
+		alpha, beta float32
+	}{
+		{1, 1, 1, false, 1, 0},
+		{7, 13, 5, false, 1, 0},
+		{256, 512, 512, false, 1, 0},
+		{300, 512, 1376, false, 1, 0}, // spans two MC blocks, three KC blocks
+		{17, 40, 700, true, 0.5, 1},
+		{64, 12, 512, true, 2, 0},
+		{33, 100, 33, false, 1, 1},
+	} {
+		a := randMat(rng, tc.m*tc.k)
+		b := randMat(rng, tc.k*tc.n)
+		want := randMat(rng, tc.m*tc.n)
+		got := append([]float32(nil), want...)
+		ldb := tc.n
+		if tc.transB {
+			ldb = tc.k
+		}
+		SgemmT(false, tc.transB, tc.m, tc.n, tc.k, tc.alpha, a, tc.k, b, ldb, tc.beta, want, tc.n)
+		pb := PackB(tc.transB, tc.k, tc.n, b, ldb)
+		SgemmPackedB(tc.m, tc.alpha, a, tc.k, pb, tc.beta, got, tc.n)
+		for i := range want {
+			if diff := want[i] - got[i]; diff > 1e-4 || diff < -1e-4 {
+				t.Fatalf("m=%d n=%d k=%d transB=%v: C[%d] = %g, want %g", tc.m, tc.n, tc.k, tc.transB, i, got[i], want[i])
+			}
+		}
+	}
+}
