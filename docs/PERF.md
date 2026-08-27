@@ -1483,3 +1483,35 @@ Zen 5 pod, before → after: **rec_int8 12.19 → 5.85 ms (−52%)**,
 (−54%)**. f32 and arm64 unchanged; the x86 int8-vs-f32 gap falls from
 2.8× to 1.4×. Property tests pin every kernel to the scalar reference;
 conformance and OCR parity green on both architectures.
+
+## The x86 CNN scaling ceiling — three negatives and a map (2026-08-27)
+
+CNNs on the Zen 5 pod plateau at 8–16 workers and regress at 32
+(resnetish 191 µs @8 → 358 µs @32; mobilenet_v2 flat 4.4→4.9 ms while
+ONNX Runtime-16T does 1.47 ms). Three pool-level hypotheses, each
+implemented, A/B'd on dedicated cores, and rejected:
+
+1. **PAUSE in the spin loop** (SMT-sibling relief): regressed 10–20% —
+   the hint call cut job-pickup polling frequency ~10×, and fast pickup
+   is the pool's load-bearing property.
+2. **Two-phase spin** (tight then paused): a wash at best. During
+   regions all workers compute; the spin happens in gaps where SMT
+   siblings are idle anyway.
+3. **Region-entry gate** (only `tasks` low-id workers may claim a small
+   region, sparing the 31-way atomic stampede): regressed 7–15% — the
+   stampede is first-come-first-served, and whichever spinners are
+   hottest fill the region fastest; gating waits on specific workers
+   that may be parked.
+
+What the round did establish: a parallel-region round-trip costs
+3–6 µs at 32 workers (scaling with task count: 12 ns for 1 task,
+~3 µs for 8, ~10 µs for 128 — measured by kernels-level microbench),
+per-op time inflates ~uniformly ~2× from 8→32 workers on small models,
+and per-op profiles show the remaining gap vs ORT is **memory traffic,
+not threading**: mv2's useful compute (~1.7 ms of samples) roughly
+equals ORT's whole runtime. ORT keeps activations in blocked NCHWc
+layout across the entire network and fuses conv blocks; we repack
+per conv. The fix is architectural — persistent blocked layout /
+fused depthwise+pointwise blocks — now a designed roadmap item, not a
+pool tweak. Practical note recorded: on many-core x86, capping
+GOMAXPROCS at 8–16 is currently the best setting for CNN inference.
