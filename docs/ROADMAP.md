@@ -105,8 +105,12 @@
       unblocks tiny_transformer's SDPA (fold-const 5 + fuse-sdpa 1) and elides
       15-19 per-run shape-chain nodes in rec/cls; exposed + fixed MHA/SDPA
       per-head pool-wake overhead (headGrain: llmblock/bertish/vit −29…−34%)
-- [ ] SE-path islands, fused epilogues; bf16 executor wiring; larger-seq
-      transformer zoo model to show SDPA at scale
+- [x] gptish zoo model (4 decoder blocks, d=512 T=256, dynamo-export opset 18;
+      Trilu op + fold-const mask): fused SDPA had a B·H-parallelism cliff at
+      scale (+55%!) — flash-style row tiling fixed it (opt 10.0 vs raw 10.8 ms,
+      ≈1.8× ORT CPU end-to-end)
+- [ ] SE-path islands, fused epilogues; bf16 executor wiring (gptish is the
+      workload); f32 GEMM efficiency at transformer shapes vs MLAS
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [x] allocation-free run loop: inline tensor shapes + pooled headers, pooled

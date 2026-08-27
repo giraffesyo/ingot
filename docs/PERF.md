@@ -1361,3 +1361,32 @@ What remains is diffuse: one closure per par.For call site in the ops
 (the box is pooled; the closure itself is caller-side), the qconv chunk
 closures, and the caller-facing result map. Parity: zoo conformance vs
 ORT, OCR parity, corpus — unchanged; -race clean.
+
+## gptish — SDPA at realistic scale, and the row-tiling fix (2026-08-26)
+
+The zoo gains **gptish**: 4 decoder blocks at real dimensions (d=512,
+H=8, T=256, SwiGLU) exported with torch's dynamo exporter at opset 18 —
+which also brought new-exporter patterns: the causal mask is built at
+runtime by Trilu (now a registered op), and fold-const collapses the
+all-const Trilu into the const mask fuse-sdpa wants. Conformance vs
+ORT: max abs err 1.2e-06; the optimizer takes 167 → 139 nodes
+(fold-const 4, fuse-sdpa 4, fuse-silu 4).
+
+The model immediately earned its keep: fused SDPA was **+55% slower**
+than the unfused graph at T=256. Parallelising over B·H heads caps
+utilisation at 8 tasks on an 18-worker box while raw batched MatMuls
+fan out full-width — a cliff the toy zoo (tiny heads) could never show.
+The fix is flash-style row tiling: each head splits into query-row
+tiles (score tile cache-resident, serial per-tile GEMMs) until every
+worker has ~2 tasks, but only while the per-tile GEMM stays ≥ ~2M MACs
+(each tile re-packs K, which doesn't amortise on small heads). Untiled
+heads keep the parallel GEMM entry, so rec's T=40 path is unchanged
+(A/B: noise).
+
+gptish, same-run A/B (Apple Silicon, ambient load matched):
+optimized 16.8 → **10.0 ms** vs raw 10.8 ms — the fused core is ~2×
+the unfused path (attention is ~9% of the model's MACs). ONNX Runtime
+CPU on the same box, same inputs: 5.6 ms → ingot ≈ **1.8× ORT** on a
+realistic decoder, inside the ≤2× charter — the remaining gap is plain
+f32 GEMM efficiency at [256,512]×[512,512..1376] shapes, which is the
+bf16/GEMM-tuning round's problem.
