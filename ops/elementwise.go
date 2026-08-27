@@ -27,8 +27,14 @@ func (o *binaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	if a.DType() != tensor.F32 || b.DType() != tensor.F32 {
 		return nil, o.n.Errorf("unsupported dtypes %s, %s", a.DType(), b.DType())
 	}
-	if o.kind != 0 {
+	switch o.kind {
+	case '+', '-', '*', '/':
 		if out := binaryFast(ctx, a, b, o.kind); out != nil {
+			return ctx.Out(out), nil
+		}
+	}
+	if o.kind == 'p' {
+		if out := powFast(ctx, a, b); out != nil {
 			return ctx.Out(out), nil
 		}
 	}
@@ -355,6 +361,58 @@ func geluTanh(x float32) float32 {
 	return 0.5 * x * (1 + float32(math.Tanh(c*float64(x+0.044715*x*x*x))))
 }
 
+// powFast vectorises Pow for the exponents models actually use (RMSNorm's
+// x^2, sqrt, reciprocals). Returns nil when the exponent is not a scalar
+// const it knows.
+func powFast(ctx *Ctx, a, b *tensor.Tensor) *tensor.Tensor {
+	if b.Numel() != 1 {
+		return nil
+	}
+	y := b.F32()[0]
+	af := a.F32()
+	out := ctx.NewUninit(tensor.F32, a.Shape()...)
+	of := out.F32()
+	n := len(af)
+	chunks := max(1, (n+unaryChunk-1)/unaryChunk)
+	grain := 1
+	if n <= 2*unaryChunk {
+		grain = chunks
+	}
+	switch y {
+	case 2:
+		par.For(chunks, grain, func(c, _ int) {
+			lo, hi := c*unaryChunk, min((c+1)*unaryChunk, n)
+			vek.Mul(of[lo:hi], af[lo:hi], af[lo:hi])
+		})
+	case 3:
+		par.For(chunks, grain, func(c, _ int) {
+			lo, hi := c*unaryChunk, min((c+1)*unaryChunk, n)
+			vek.Mul(of[lo:hi], af[lo:hi], af[lo:hi])
+			vek.Mul(of[lo:hi], of[lo:hi], af[lo:hi])
+		})
+	case 1:
+		copy(of, af)
+	case 0.5:
+		par.For(chunks, grain, func(c, _ int) {
+			for i := c * unaryChunk; i < min((c+1)*unaryChunk, n); i++ {
+				of[i] = float32(math.Sqrt(float64(af[i])))
+			}
+		})
+	case -1:
+		par.For(chunks, grain, func(c, _ int) {
+			for i := c * unaryChunk; i < min((c+1)*unaryChunk, n); i++ {
+				of[i] = 1 / af[i]
+			}
+		})
+	default:
+		if ctx.Pool != nil {
+			ctx.Pool.Put(out)
+		}
+		return nil
+	}
+	return out
+}
+
 func init() {
 	bin := func(name string, kind byte, fn func(x, y float32) float32) {
 		Register("", name, 7, func(n NodeInfo) (Op, error) { return &binaryOp{n: n, fn: fn, kind: kind}, nil })
@@ -363,7 +421,7 @@ func init() {
 	bin("Sub", '-', func(x, y float32) float32 { return x - y })
 	bin("Mul", '*', func(x, y float32) float32 { return x * y })
 	bin("Div", '/', func(x, y float32) float32 { return x / y })
-	bin("Pow", 0, func(x, y float32) float32 {
+	bin("Pow", 'p', func(x, y float32) float32 {
 		switch y {
 		case 2:
 			return x * x
