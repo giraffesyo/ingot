@@ -127,7 +127,9 @@
       Pool micro-tuning also exhausted (3 negatives, PERF 2026-08-27)
 - [ ] SE-path islands, fused epilogues; bf16 executor wiring (decode-shaped
       benchmark needed first; pod has AVX512-BF16); sigmoid subnormal cousin;
-      remaining f32 GEMM efficiency vs MLAS at transformer shapes
+      remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
+      µkernel now auto-selected via init probe: Zen 5 +12-15% GEMM, gptish −13%;
+      next lever would be a wider tile, which changes NR/packing)
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [x] allocation-free run loop: inline tensor shapes + pooled headers, pooled
