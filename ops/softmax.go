@@ -87,9 +87,27 @@ func softmaxRow(x, y []float32, logsm bool) {
 	// y = exp(x - m) with the SIMD exp; sum with independent accumulators.
 	vek.AddScalar(y, x, -m)
 	vek.Exp(y, y)
+	// vek.Exp saturates at the smallest normal instead of flushing to zero;
+	// masked positions (x = -inf) then feed near-zero normals into the
+	// probability GEMM, whose products underflow to subnormals — a massive
+	// per-FMA penalty on x86 (Apple Silicon handles subnormals at speed,
+	// which is why only amd64 saw it). Flush to a true zero in the sum pass.
+	const tiny = 1e-30
 	var s0, s1, s2, s3 float32
 	i := 0
 	for ; i+4 <= len(y); i += 4 {
+		if y[i] < tiny {
+			y[i] = 0
+		}
+		if y[i+1] < tiny {
+			y[i+1] = 0
+		}
+		if y[i+2] < tiny {
+			y[i+2] = 0
+		}
+		if y[i+3] < tiny {
+			y[i+3] = 0
+		}
 		s0 += y[i]
 		s1 += y[i+1]
 		s2 += y[i+2]
@@ -97,6 +115,9 @@ func softmaxRow(x, y []float32, logsm bool) {
 	}
 	sum := (s0 + s1) + (s2 + s3)
 	for ; i < len(y); i++ {
+		if y[i] < tiny {
+			y[i] = 0
+		}
 		sum += y[i]
 	}
 	if logsm {
