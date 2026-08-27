@@ -1457,3 +1457,29 @@ inputs: ONNX Runtime does gptish in 36.5 ms → **ingot = 1.34× ORT**
 on a realistic decoder (llmblock 1.13×, bertish 1.09×). Apple Silicon
 is unchanged. Follow-up noted: sigmoid of large-negative inputs can
 emit subnormals into downstream Muls on x86; not yet seen in a profile.
+
+## x86 int8 epilogues — AVX2 vek quant kernels (2026-08-27)
+
+The dedicated Zen 5 bench pod (CoreWeave, 32 pinned cores) exposed what
+the shared boxes couldn't hold still long enough to show: int8 models
+ran 2–2.8× *slower* than f32 on x86 while the VNNI GEMM did 3.1 TOPS in
+isolation. Every int8 epilogue — Requant, Quant/Dequant, ShiftU8S8,
+Widen/Deinterleave, QLut, the depthwise row kernels — was NEON asm with
+a scalar Go fallback on amd64 (`qdwTail` alone was 32.7% of rec_int8).
+
+genamd64 now emits the full AVX2 set: requant/quant as
+cvt–round–clamp–pack chains (VCVTPS2DQ's round-even + saturating
+packs), the u8→s8 shift as VPXOR 0x80, deinterleave as per-lane
+VPSHUFB+VPERMQ, the 256-entry QLut as the 16-round VPSHUFB nibble
+select, and all six depthwise shapes with weights preloaded into YMM.
+Bonus fix for both architectures: the depthwise dispatch's func-variable
+indirection defeated `//go:noescape` and heap-allocated the tail
+scratch on every row — concrete per-shape calls put it back on the
+stack (det_int8 had quietly grown 30k allocs/run through that hole
+during bring-up).
+
+Zen 5 pod, before → after: **rec_int8 12.19 → 5.85 ms (−52%)**,
+**det_int8 29.33 → 17.78 ms (−39%)**, **mv3_small_int8 8.10 → 3.75 ms
+(−54%)**. f32 and arm64 unchanged; the x86 int8-vs-f32 gap falls from
+2.8× to 1.4×. Property tests pin every kernel to the scalar reference;
+conformance and OCR parity green on both architectures.

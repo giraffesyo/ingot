@@ -117,9 +117,13 @@
       probabilities fed subnormals into the AV GEMM on x86 (~100 cyc/FMA;
       Apple runs subnormals at speed, dev box blind) — gptish 3.1× on AVX2
       Xeon, now 1.34× ORT same box (llmblock 1.13×, bertish 1.09×)
+- [x] x86 int8 epilogues (AVX2 vek: requant/quant/shift/deint/QLut/depthwise
+      rows; noescape fix both arches): Zen 5 pod rec_int8 −52%, det_int8 −39%,
+      mv3_int8 −54% — x86 int8-vs-f32 gap 2.8× → 1.4×
 - [ ] SE-path islands, fused epilogues; bf16 executor wiring (decode-shaped
-      benchmark needed first); sigmoid subnormal cousin; remaining f32 GEMM
-      efficiency vs MLAS at transformer shapes
+      benchmark needed first; pod has AVX512-BF16); sigmoid subnormal cousin;
+      x86 CNN scaling past 8 workers (mv2 flat 8→32 cores, ORT-16T 3× faster);
+      remaining f32 GEMM efficiency vs MLAS at transformer shapes
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [x] allocation-free run loop: inline tensor shapes + pooled headers, pooled
