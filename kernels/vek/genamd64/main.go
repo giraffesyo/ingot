@@ -37,6 +37,13 @@ func (g *gen) header() {
 		g.w("DATA %s<>+0(SB)/4, $%v", c.sym, c.val)
 		g.w("GLOBL %s<>(SB), RODATA|NOPTR, $4", c.sym)
 	}
+	// min positive normal f32, 8-wide: the sigmoid kernels flush subnormal
+	// outputs to zero (sigmoid(x<-87) is subnormal; on x86 a subnormal operand
+	// in a downstream multiply costs ~100 cycles — same ambush as softmax).
+	for i := 0; i < 32; i += 4 {
+		g.w("DATA c_minnorm8<>+%d(SB)/4, $0x00800000", i)
+	}
+	g.w("GLOBL c_minnorm8<>(SB), RODATA|NOPTR, $32")
 	// 8-wide (32-byte) constants used as m256 operands by the erf/gelu kernels
 	// (no YMM registers are free while the exp constants are resident).
 	for _, c := range erfConsts {
@@ -274,6 +281,8 @@ func main() {
 		expBody(g)
 		g.w("\tVADDPS Y15, Y0, Y0         // 1+e^-x")
 		g.w("\tVDIVPS Y0, Y15, Y0         // sigmoid")
+		g.w("\tVCMPPS $0x1d, c_minnorm8<>(SB), Y0, Y1 // >= FLT_MIN?")
+		g.w("\tVANDPS Y1, Y0, Y0          // flush subnormal sigmoid to 0")
 		g.w("\tVMULPS (SI), Y0, Y0        // * x (reload from source)")
 	})
 	g.unary("sigmoid", 56, expPrep, func(g *gen) {
@@ -282,6 +291,8 @@ func main() {
 		expBody(g)
 		g.w("\tVADDPS Y15, Y0, Y0         // 1+e^-x")
 		g.w("\tVDIVPS Y0, Y15, Y0         // 1/(1+e^-x)")
+		g.w("\tVCMPPS $0x1d, c_minnorm8<>(SB), Y0, Y1 // >= FLT_MIN?")
+		g.w("\tVANDPS Y1, Y0, Y0          // flush subnormal sigmoid to 0")
 	})
 
 	g.axpy()
