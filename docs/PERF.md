@@ -1390,3 +1390,44 @@ CPU on the same box, same inputs: 5.6 ms → ingot ≈ **1.8× ORT** on a
 realistic decoder, inside the ≤2× charter — the remaining gap is plain
 f32 GEMM efficiency at [256,512]×[512,512..1376] shapes, which is the
 bf16/GEMM-tuning round's problem.
+
+## Transformer round 2 — Pow, absorbed transposes, pre-packed weights (2026-08-27)
+
+Three fixes from gptish's per-op profile (MatMul 60%, Pow 14.8%(!),
+SDPA 12.4%, Transpose 6.4%):
+
+- **Pow**: RMSNorm's x² was running scalar `math.Pow`-family code with a
+  function-pointer call per element. powFast vectorises the exponents
+  models actually use (2, 3, 1, 0.5, −1): gptish's nine Pow nodes went
+  1689 → 82 µs (20×).
+- **Absorbed head-split transposes**: fuse-sdpa now peels the
+  [0,2,1,3] permutes off Q and V, and the [0,2,3,1] / [0,1,3,2] permute
+  off K, and the op reads those layouts strided (lda/ldb = H·dh — the
+  GEMMs never needed the copies). gptish: 12 Transpose nodes → 0;
+  llmblock: 3 → 0. Combined with stride_out, attention now runs from
+  projection output to projection input with zero data movement.
+- **Pre-packed weights (gemm.PackedB)**: MatMul/Gemm were re-packing
+  their constant weight matrices into panel layout on every call — 28
+  packs per gptish run; conv weights had been pre-packed since phase 4
+  but Linear weights were not. PackB packs once on first Run (cached on
+  the op; a B that ever changes storage marks the op dynamic and the
+  cache stays off), SgemmPackedB sweeps the packed panels.
+
+Round A/B (8-core AVX2 Xeon server — the quietest box available;
+per-model interleaved pairs, medians of the consistent rounds):
+
+| model    | before   | after    | Δ      |
+|----------|----------|----------|--------|
+| gptish   | 235 ms   | 160 ms   | −25%   |
+| llmblock | 123 µs   | 101 µs   | −21%   |
+| bertish  | 230 µs   | 208 µs   | −10%   |
+
+vit, rec, det: within noise (untouched paths). During the box's one
+quiet window, gptish optimized-vs-raw was 157.6 ms (0.2% spread) vs
+172 raw. Same-run Apple Silicon spot checks agree in direction. This
+was also the first round benchmarked across three machines — Apple
+Silicon (NEON), Zen 4 (AVX-512), and an AVX2-only Xeon — the last
+being a kernel config the dev box can't exercise.
+
+Parity: zoo conformance vs ORT (incl. gptish), OCR parity, corpus —
+unchanged; -race clean.
