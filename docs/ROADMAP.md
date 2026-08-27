@@ -109,8 +109,12 @@
       Trilu op + fold-const mask): fused SDPA had a B·H-parallelism cliff at
       scale (+55%!) — flash-style row tiling fixed it (opt 10.0 vs raw 10.8 ms,
       ≈1.8× ORT CPU end-to-end)
+- [x] transformer round 2: powFast (RMSNorm x² was scalar math.Pow — 20×),
+      SDPA absorbs head-split transposes (gptish 12→0 Transpose nodes,
+      attention = zero data movement), gemm.PackedB pre-packs Linear/MatMul
+      const weights (28 packs/run gone) — gptish −25%, llmblock −21%
 - [ ] SE-path islands, fused epilogues; bf16 executor wiring (gptish is the
-      workload); f32 GEMM efficiency at transformer shapes vs MLAS
+      workload); remaining f32 GEMM efficiency vs MLAS at transformer shapes
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [x] allocation-free run loop: inline tensor shapes + pooled headers, pooled
