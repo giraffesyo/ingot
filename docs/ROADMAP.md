@@ -125,8 +125,10 @@
       avoidance: fused dw+pw was built and measured 2-3× SLOWER both arches
       (intermediates are LLC-resident at batch-1; PERF 2026-08-28) — killed.
       Pool micro-tuning also exhausted (3 negatives, PERF 2026-08-27)
-- [ ] SE-path islands, fused epilogues; bf16 executor wiring (decode-shaped
-      benchmark needed first; pod has AVX512-BF16); sigmoid subnormal cousin;
+- [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
+      mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
+- [ ] bf16 executor wiring (decode-shaped benchmark needed first; pod has
+      AVX512-BF16);
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
       µkernel now auto-selected via init probe: Zen 5 +12-15% GEMM, gptish −13%;
       next lever would be a wider tile, which changes NR/packing)

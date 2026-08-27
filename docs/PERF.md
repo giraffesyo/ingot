@@ -1558,3 +1558,24 @@ of 3) and takes AVX-512 only on a decisive >5% win. The relative
 measurement is load-immune and inherently prices in double-pumping and
 frequency licensing — Zen 5 picks avx512 6/6 runs even at load 130;
 Zen 4 keeps avx2 4/4. CI's Ice Lake now runs the probe on every push.
+
+## SE islands fused + the sigmoid flush (2026-08-28)
+
+Two queue items landed:
+
+- **vek sigmoid subnormal flush**: sigmoid of any strongly negative
+  input lands at ~4.3e-39 — a subnormal that poisons downstream
+  multiplies on x86, the softmax ambush's cousin. The amd64
+  sigmoid/silu kernels mask outputs below FLT_MIN to zero (one
+  VCMPPS+VANDPS per vector; silu flushes before its multiply). arm64
+  untouched (Apple runs subnormals at speed). Preventive — no current
+  model produces such activations; the next one won't ambush us.
+
+- **fuse-se (ingot.SE)**: the squeeze-excite island — GAP → 1×1 Conv
+  (+act) → 1×1 Conv (+act) → Mul — was four dispatches and three tiny
+  intermediates for ~2·C·Cr FLOPs of work. Fused: one op, two parallel
+  regions around an inline FC chain. Matches both the
+  GlobalAveragePool spelling and efficientnet's ReduceMean(axes=[-1,-2]
+  as a const input) spelling. Coverage: det 10, mv3_small 9,
+  efficientnet_b0 16, rec 2. Zen 5 pod A/B: **efficientnet −9%,
+  mv3_small −8%**, rec −2%, det within noise. All parity unchanged.
