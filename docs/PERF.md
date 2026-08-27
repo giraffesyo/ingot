@@ -1515,3 +1515,29 @@ per conv. The fix is architectural — persistent blocked layout /
 fused depthwise+pointwise blocks — now a designed roadmap item, not a
 pool tweak. Practical note recorded: on many-core x86, capping
 GOMAXPROCS at 8–16 is currently the best setting for CNN inference.
+
+## Fused depthwise→pointwise: a clean kill (2026-08-28)
+
+The roadmap's fused dw+pw block was built end-to-end — a fuse-dwpw pass
+(13 pairs in mobilenet_v2, 9 each in det and rec) and an ingot.DwPw op
+that keeps the depthwise intermediate in per-task row strips consumed
+immediately by the pointwise GEMM. It was correct (reference-tested
+across shapes, pads, kernels, epilogues; zoo conformance and OCR parity
+green, batch-bit-exactness preserved) and **2–3× slower than the
+unfused pair on both architectures** across two implementations (padded
+row-kernel strips, then zero-copy span/Axpy strips).
+
+The premise was wrong, and the numbers say why: at inference batch-1
+sizes, the intermediates the fusion avoids writing (≤5 MB for
+mv2-class layers) are **already LLC-resident** — Zen 5 has 32 MB L3,
+Apple Silicon a large shared L2 + SLC — so there is no DRAM round trip
+to save. What the fusion costs is real, though: the depthwise stage
+serializes all C channels inside each strip task (the unfused op
+parallelizes over C), and strip-halo padding or K² span passes add
+traffic the unfused planes pay once. Fusing for locality only pays
+when the intermediate actually misses cache; none of ours do.
+
+Corollary recorded on the roadmap: NCHWc's expected win is per-conv
+repacking elimination and channel-vectorized depthwise — a different
+mechanism than DRAM avoidance — and any future fusion work should
+first measure whether the tensor being "saved" ever leaves the LLC.
