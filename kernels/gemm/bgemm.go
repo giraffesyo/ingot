@@ -38,6 +38,10 @@ type BPackedA struct {
 // HasBFMMLA reports whether the bf16 kernel is available on this CPU.
 func HasBFMMLA() bool { return hasBFMMLA }
 
+// HasBF16 reports whether any bf16 GEMM kernel is available (arm64 BFMMLA or
+// amd64 VDPBF16PS).
+func HasBF16() bool { return hasBFMMLA || hasBF16DP }
+
 // BPackA converts and packs A (row-major m×k f32, leading dim lda).
 func BPackA(m, k int, a []float32, lda int) *BPackedA {
 	kg := (k + bKG - 1) / bKG
@@ -66,8 +70,10 @@ var bworkPool = sync.Pool{New: func() any { return &bwork{} }}
 
 func getBwork(need int) *bwork {
 	w := bworkPool.Get().(*bwork)
-	if cap(w.bp) < need {
-		w.bp = make([]uint16, need)
+	// +8: the amd64 kernel's 64-byte loads read 16 bytes past each 48-byte
+	// pair block; the slack keeps the final load in-bounds.
+	if cap(w.bp) < need+8 {
+		w.bp = make([]uint16, need+8)
 	}
 	w.bp = w.bp[:need]
 	return w
@@ -109,15 +115,31 @@ func BgemmPacked(pa *BPackedA, n int, b []float32, ldb int, c []float32, ldc int
 		if cols < qNR || k%bKG != 0 {
 			clear(bp)
 		}
-		for g := 0; g < kg; g++ {
-			q0 := g * bKG
-			ko := min(bKG, k-q0)
-			dst := bp[g*qNR*bKG:]
-			for o := 0; o < ko; o++ {
-				src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
-				d := dst[o:]
-				for j, v := range src {
-					d[j*bKG] = F32ToBF16(v)
+		if bPairB {
+			// Pair-major for the VDPBF16PS kernel: [g][2p][12j][2] bf16.
+			for g := 0; g < kg; g++ {
+				q0 := g * bKG
+				ko := min(bKG, k-q0)
+				dst := bp[g*qNR*bKG:]
+				for o := 0; o < ko; o++ {
+					src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
+					d := dst[(o/2)*2*qNR+o%2:]
+					for j, v := range src {
+						d[j*2] = F32ToBF16(v)
+					}
+				}
+			}
+		} else {
+			for g := 0; g < kg; g++ {
+				q0 := g * bKG
+				ko := min(bKG, k-q0)
+				dst := bp[g*qNR*bKG:]
+				for o := 0; o < ko; o++ {
+					src := b[(q0+o)*ldb+j0 : (q0+o)*ldb+j0+cols]
+					d := dst[o:]
+					for j, v := range src {
+						d[j*bKG] = F32ToBF16(v)
+					}
 				}
 			}
 		}
@@ -145,6 +167,12 @@ func BgemmPacked(pa *BPackedA, n int, b []float32, ldb int, c []float32, ldc int
 // bscatterTile writes the 2×2-block f32 tile row-major (same layout as the
 // int8 kernels' i32 tiles; the NEON qscatter works on either, 4-byte lanes).
 func bscatterTile(ct []float32, c []float32, ldc, rows, cols int) {
+	if bctRowMajor {
+		for r := 0; r < rows; r++ {
+			copy(c[r*ldc:r*ldc+cols], ct[r*qNR:r*qNR+cols])
+		}
+		return
+	}
 	if hasQpackAsm && rows == qMR && cols == qNR {
 		qscatter(f32AsI32(&ct[0]), f32AsI32(&c[0]), int64(ldc))
 		return

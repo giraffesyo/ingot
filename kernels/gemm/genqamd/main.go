@@ -80,5 +80,44 @@ func main() {
 		w("\tRET")
 		w("")
 	}
+	// bf16 kernel: identical skeleton with VDPBF16PS (BYTE-encoded — the Go
+	// assembler has no AVX512-BF16 mnemonics) and f32 accumulators. A pair
+	// (2×bf16) sits in each dword, so the "quad" blocks become pair blocks
+	// with the same byte geometry.
+	w("// func bkernelBF16DP(kg int64, ap *uint16, bp *uint16, ct *float32)")
+	w("// A [g][8r][4×bf16=8B], B pair-major [g][2p][12j][2×bf16=4B] (+slack), C row-major 8x12 f32.")
+	w("TEXT ·bkernelBF16DP(SB), NOSPLIT, $0-32")
+	w("\tMOVQ kg+0(FP), DX")
+	w("\tMOVQ ap+8(FP), AX")
+	w("\tMOVQ bp+16(FP), BX")
+	w("\tMOVQ ct+24(FP), CX")
+	w("\tMOVL $0x0FFF, R8")
+	w("\tKMOVW R8, K1")
+	for r := 0; r < 8; r++ {
+		w("\tVPXORD Z%d, Z%d, Z%d", r, r, r)
+	}
+	w("bf16dp_loop:")
+	w("\tTESTQ DX, DX")
+	w("\tJE bf16dp_done")
+	for p := 0; p < 2; p++ {
+		w("\tVMOVDQU32 %d(BX), Z8 // B pair block %d (48B + slack)", p*48, p)
+		for r := 0; r < 8; r++ {
+			w("\tVPBROADCASTD %d(AX), Z9", r*8+p*4)
+			// VDPBF16PS Zr, Z9, Z8  (EVEX.512.F3.0F38.W0 52 /r)
+			w("\tBYTE $0x62; BYTE $0xD2; BYTE $0x36; BYTE $0x48; BYTE $0x52; BYTE $0x%02X // VDPBF16PS Z8, Z9, Z%d", 0xC0|r<<3, r)
+		}
+	}
+	w("\tADDQ $64, AX")
+	w("\tADDQ $96, BX")
+	w("\tDECQ DX")
+	w("\tJMP bf16dp_loop")
+	w("bf16dp_done:")
+	for r := 0; r < 8; r++ {
+		w("\tVMOVDQU32 Z%d, K1, %d(CX)", r, r*48)
+	}
+	w("\tVZEROUPPER")
+	w("\tRET")
+	w("")
+
 	fmt.Print(b.String())
 }
