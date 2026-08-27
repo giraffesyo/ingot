@@ -4,6 +4,7 @@ import (
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/tensor"
+	"os"
 	"sync"
 )
 
@@ -74,6 +75,14 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	return ctx.Out(out), nil
 }
 
+// bf16Weights: opt-in bf16 storage+compute for constant MatMul/Gemm weights
+// (INGOT_BF16=1), taken only where the bf16 kernel is a measured speedup
+// (gemm.BF16Fast: the amd64 VDPBF16PS kernel — 2.6x f32 at transformer
+// shapes; Apple's BFMMLA is quarter-rate and never opted in). Accuracy drops
+// to bf16 (~3 decimal digits); the flag is for serving, never for
+// conformance runs.
+var bf16Weights = os.Getenv("INGOT_BF16") == "1" && gemm.BF16Fast()
+
 // bCache caches a pre-packed B for ops whose second operand is the same
 // tensor every run (constant weights). A B that ever changes storage marks
 // the op dynamic and the cache stays off — packing per call would be a
@@ -83,6 +92,7 @@ type bCache struct {
 	src *float32
 	ln  int
 	pb  *gemm.PackedB
+	bf  *gemm.BPackedB
 	dyn bool
 }
 
@@ -101,11 +111,28 @@ func (c *bCache) get(transB bool, k, n int, b []float32, ldb int) *gemm.PackedB 
 		return c.pb
 	}
 	if c.src != nil { // storage changed: not a constant
-		c.dyn, c.pb, c.src = true, nil, nil
+		c.dyn, c.pb, c.bf, c.src = true, nil, nil, nil
 		return nil
 	}
 	c.pb, c.src, c.ln = gemm.PackB(transB, k, n, b, ldb), &b[0], len(b)
+	if bf16Weights {
+		c.bf = gemm.BPackB(transB, k, n, b, ldb)
+	}
 	return c.pb
+}
+
+// getBF16 returns the bf16 pack for b when the opt-in path is on and b is the
+// cached constant (get must have been called for this b first).
+func (c *bCache) getBF16(b []float32) *gemm.BPackedB {
+	if !bf16Weights || len(b) == 0 {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dyn || c.src != &b[0] || c.ln != len(b) {
+		return nil
+	}
+	return c.bf
 }
 
 // matmulOp: NumPy-style matmul with batch broadcasting.
@@ -154,7 +181,11 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	nb := batch.Numel()
 	if nb == 1 {
 		if pb := o.bCache.get(false, K, N, bf, N); pb != nil {
-			gemm.SgemmPackedB(M, 1, af, K, pb, 0, of, N)
+			if bp16 := o.bCache.getBF16(bf); bp16 != nil {
+				gemm.BgemmWeights(M, af, K, bp16, of, N, true)
+			} else {
+				gemm.SgemmPackedB(M, 1, af, K, pb, 0, of, N)
+			}
 		} else {
 			gemm.Sgemm(M, N, K, 1, af, K, bf, N, 0, of, N)
 		}
