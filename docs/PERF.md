@@ -1597,3 +1597,22 @@ shapes are conversion-bound (conv_m64 469, det_m24 172 GFLOPS): the
 win is transformer-shaped. Next: executor wiring — opt-in bf16 weights
 for MatMul/Gemm (weights pack once as bf16; activations convert per
 panel), with gptish as the accuracy + latency workload.
+
+## bf16 weights wired — INGOT_BF16=1 (2026-08-28)
+
+The executor wiring for the amd64 bf16 kernel, with two instructive
+failures on the way to the win. v0: scalar F32ToBF16 per element made
+bf16 40% *slower* than f32 (3.7M conversions per gptish run). v1:
+SIMD conversion (VCVTNE2PS2BF16, BYTE-encoded) fixed the converting
+but the panel-layout scatter still ate the gain — flat. v2:
+`bkernelBF16Rows` eliminates A packing entirely — the kernel reads A
+through 8 row pointers into a row-major bf16 image of x (one SIMD
+conversion pass per call; edge tiles point at a zero row). Weights
+pre-pack once (BPackB, pair-major, cached beside the f32 pack).
+
+Zen 5 pod: **gptish 8.75 → 8.04 ms (−8%)**, ≈1.27× ORT-16T. Accuracy
+is honest bf16: max abs err 7.2e-3 on gptish outputs vs the f32
+references — the flag is a serving knob, never used in conformance,
+and only engages on CPUs where bf16 is a measured win (VDPBF16PS
+parts; Apple's quarter-rate BFMMLA never opts in). arm64 keeps its
+packed-A path for tests.

@@ -129,8 +129,9 @@
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32
       ALU; Bgemm sq512 1484 GFLOPS = 2.6× f32 Sgemm — bf16 verdict flips on x86
-- [ ] bf16 executor wiring: opt-in bf16 weights for MatMul/Gemm (transB pack of
-      activations reads contiguous rows — cheap); gptish accuracy + latency;
+- [x] bf16 weights wired (INGOT_BF16=1, MatMul): rows-kernel v2 (no A pack) —
+      gptish −8% on Zen 5, ≈1.27× ORT; accuracy 7e-3 documented, serving-only
+- [ ] bf16: Gemm op wiring (bertish/vit); decode-shaped benchmark;
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
       µkernel now auto-selected via init probe: Zen 5 +12-15% GEMM, gptish −13%;
       next lever would be a wider tile, which changes NR/packing)
