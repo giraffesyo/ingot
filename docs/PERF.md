@@ -1431,3 +1431,29 @@ being a kernel config the dev box can't exercise.
 
 Parity: zoo conformance vs ORT (incl. gptish), OCR parity, corpus —
 unchanged; -race clean.
+
+## The subnormal ambush — 3.1× gptish on x86 (2026-08-27)
+
+Chasing the bf16 question turned into the best find of the arc. On the
+AVX2 Xeon, gptish spent 71% of its time in SDPA — 113.6 ms where
+isolated benchmarks of the exact strided GEMMs said 7. The kernel was
+*busy* the whole time (84% of CPU samples in microKernelAVX2), just
+slow. The cause: `vek.Exp` saturates at the smallest normal float
+instead of flushing to zero. A causal mask makes half the score matrix
+−inf; exp turns those into 1.2e-38; and the probability GEMM's
+products underflow to **subnormals** — a ~100-cycle-per-FMA penalty on
+x86. Apple Silicon executes subnormals at full speed, so the dev box
+could never see it. This is why a multi-architecture bench fleet earns
+its keep.
+
+softmaxRow now flushes probabilities below 1e-30 to true zero inside
+its existing sum pass — numerically a no-op (those are the masked
+positions plus terms invisible in an f32 sum; conformance identical).
+
+AVX2 Xeon, back-to-back: gptish optimized **153.6 → 49.0 ms (3.1×)**,
+SDPA 113.6 → 7.1 ms (16×); the raw graph improved too (166 → 60 ms —
+the unfused Softmax→MatMul had the same poison). Same box, same
+inputs: ONNX Runtime does gptish in 36.5 ms → **ingot = 1.34× ORT**
+on a realistic decoder (llmblock 1.13×, bertish 1.09×). Apple Silicon
+is unchanged. Follow-up noted: sigmoid of large-negative inputs can
+emit subnormals into downstream Muls on x86; not yet seen in a profile.
