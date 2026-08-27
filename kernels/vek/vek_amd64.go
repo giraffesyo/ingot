@@ -272,7 +272,7 @@ func Sigmoid(dst, src []float32) {
 	m := n &^ 7
 	sigmoid_asm(dst, src, m)
 	for i := m; i < n; i++ {
-		dst[i] = 1 / (1 + expScalar(-src[i]))
+		dst[i] = flushSub(1 / (1 + expScalar(-src[i])))
 	}
 }
 
@@ -328,7 +328,7 @@ func SiLU(dst, src []float32) {
 	silu_asm(dst, src, m)
 	for i := m; i < n; i++ {
 		x := src[i]
-		dst[i] = x / (1 + expScalar(-x))
+		dst[i] = x * flushSub(1/(1+expScalar(-x)))
 	}
 }
 
@@ -370,4 +370,14 @@ func DotBF16(a []float32, b []uint16) float32 {
 		s += a[i] * math.Float32frombits(uint32(b[i])<<16)
 	}
 	return s
+}
+
+// flushSub flushes a subnormal sigmoid output to zero, matching the SIMD
+// kernels (a subnormal operand in a downstream multiply is ~100 cycles on
+// x86 — the softmax ambush's cousin).
+func flushSub(v float32) float32 {
+	if v < 1.17549435e-38 {
+		return 0
+	}
+	return v
 }

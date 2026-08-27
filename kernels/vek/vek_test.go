@@ -132,14 +132,30 @@ func TestVek(t *testing.T) {
 			want[i] = expScalar(wide[i])
 		}
 		eqRel(t, "Exp", out, want, 4e-7)
+		// Sigmoid/SiLU may flush subnormal sigmoid outputs to zero (amd64
+		// does — a subnormal operand in a downstream multiply is ~100
+		// cycles on x86); mirror the flush in the reference.
+		flush := func(v float32) float32 {
+			if v < 1.17549435e-38 {
+				return 0
+			}
+			return v
+		}
 		Sigmoid(out, wide)
 		for i := range want {
 			want[i] = 1 / (1 + expScalar(-wide[i]))
+			if out[i] == 0 {
+				want[i] = flush(want[i])
+			}
 		}
 		eqRel(t, "Sigmoid", out, want, 4e-7)
 		SiLU(out, wide)
 		for i := range want {
-			want[i] = wide[i] / (1 + expScalar(-wide[i]))
+			sg := 1 / (1 + expScalar(-wide[i]))
+			if sgf := flush(sg); sgf == 0 && out[i] == 0 {
+				sg = 0
+			}
+			want[i] = wide[i] * sg
 		}
 		eqRel(t, "SiLU", out, want, 4e-7)
 

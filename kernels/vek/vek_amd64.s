@@ -32,6 +32,15 @@ DATA c_p4<>+0(SB)/4, $0.16666665459
 GLOBL c_p4<>(SB), RODATA|NOPTR, $4
 DATA c_p5<>+0(SB)/4, $0.50000001201
 GLOBL c_p5<>(SB), RODATA|NOPTR, $4
+DATA c_minnorm8<>+0(SB)/4, $0x00800000
+DATA c_minnorm8<>+4(SB)/4, $0x00800000
+DATA c_minnorm8<>+8(SB)/4, $0x00800000
+DATA c_minnorm8<>+12(SB)/4, $0x00800000
+DATA c_minnorm8<>+16(SB)/4, $0x00800000
+DATA c_minnorm8<>+20(SB)/4, $0x00800000
+DATA c_minnorm8<>+24(SB)/4, $0x00800000
+DATA c_minnorm8<>+28(SB)/4, $0x00800000
+GLOBL c_minnorm8<>(SB), RODATA|NOPTR, $32
 DATA c_erfp8<>+0(SB)/4, $0.3275911
 DATA c_erfp8<>+4(SB)/4, $0.3275911
 DATA c_erfp8<>+8(SB)/4, $0.3275911
@@ -507,6 +516,8 @@ loop:
 	VPADDD Y1, Y0, Y0          // * 2^n
 	VADDPS Y15, Y0, Y0         // 1+e^-x
 	VDIVPS Y0, Y15, Y0         // sigmoid
+	VCMPPS $0x1d, c_minnorm8<>(SB), Y0, Y1 // >= FLT_MIN?
+	VANDPS Y1, Y0, Y0          // flush subnormal sigmoid to 0
 	VMULPS (SI), Y0, Y0        // * x (reload from source)
 	VMOVUPS Y0, (DI)
 	ADDQ $32, SI
@@ -564,6 +575,8 @@ loop:
 	VPADDD Y1, Y0, Y0          // * 2^n
 	VADDPS Y15, Y0, Y0         // 1+e^-x
 	VDIVPS Y0, Y15, Y0         // 1/(1+e^-x)
+	VCMPPS $0x1d, c_minnorm8<>(SB), Y0, Y1 // >= FLT_MIN?
+	VANDPS Y1, Y0, Y0          // flush subnormal sigmoid to 0
 	VMOVUPS Y0, (DI)
 	ADDQ $32, SI
 	ADDQ $32, DI
