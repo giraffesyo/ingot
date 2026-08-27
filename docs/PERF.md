@@ -1579,3 +1579,21 @@ Two queue items landed:
   as a const input) spelling. Coverage: det 10, mv3_small 9,
   efficientnet_b0 16, rec 2. Zen 5 pod A/B: **efficientnet −9%,
   mv3_small −8%**, rec −2%, det within noise. All parity unchanged.
+
+## bf16 on x86: the verdict flips (2026-08-28)
+
+On Apple Silicon the bf16 arc ended "storage-only" — BFMMLA runs at
+quarter rate. The Zen 5 pod has AVX512-BF16, and a register-pressure
+peak probe measured **VDPBF16PS at 1.45× the f32 FMA rate** (386.7 vs
+266.5 GFLOPS/core). That earned the kernel: `bkernelBF16DP`, the VNNI
+skeleton with BYTE-encoded VDPBF16PS and f32 accumulators — a bf16
+pair per dword gives byte-identical geometry to the VNNI quads, so the
+A pack layout is unchanged and B goes pair-major behind the same
+per-arch flag pattern the int8 tiers use.
+
+Zen 5, 32 cores: **Bgemm sq512 1484 GFLOPS vs f32 Sgemm 572 — 2.6×**
+(pre-packed A and halved B bandwidth compound the ALU gain). Skinny
+shapes are conversion-bound (conv_m64 469, det_m24 172 GFLOPS): the
+win is transformer-shaped. Next: executor wiring — opt-in bf16 weights
+for MatMul/Gemm (weights pack once as bf16; activations convert per
+panel), with gptish as the accuracy + latency workload.
