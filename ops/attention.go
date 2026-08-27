@@ -32,22 +32,30 @@ func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	plane := T * dh
 	qBase, kBase, vBase := 0, B*H*plane, 2*B*H*plane
 	workers := par.Workers()
-	sT := ctx.NewUninit(tensor.F32, workers, T*T)
+	rows, nRow := attnRows(B, H, T, T, dh, workers)
+	gemmT := gemm.SgemmTSerial
+	if nRow == 1 {
+		gemmT = gemm.SgemmT // untiled: let big per-head GEMMs fan out
+	}
+	sT := ctx.NewUninit(tensor.F32, workers, rows*T)
 	sAll := sT.F32()
-	par.For(B*H, headGrain(T, T, dh), func(bh, wk int) {
+	par.For(B*H*nRow, attnGrain(rows, T, dh), func(task, wk int) {
+		bh, rc := task/nRow, task%nRow
 		b, h := bh/H, bh%H
+		t0 := rc * rows
+		tc := min(rows, T-t0)
 		off := (b*H + h) * plane
-		q := xf[qBase+off : qBase+off+plane]
+		q := xf[qBase+off+t0*dh:]
 		k := xf[kBase+off : kBase+off+plane]
 		v := xf[vBase+off : vBase+off+plane]
-		s := sAll[wk*T*T : (wk+1)*T*T]
+		s := sAll[wk*rows*T:]
 		// scores = scale · Q·Kᵀ (K stays row-major: the transposed-B GEMM).
-		gemm.SgemmT(false, true, T, T, dh, o.scale, q, dh, k, dh, 0, s, T)
-		for t := 0; t < T; t++ {
+		gemmT(false, true, tc, T, dh, o.scale, q, dh, k, dh, 0, s, T)
+		for t := 0; t < tc; t++ {
 			softmaxRow(s[t*T:(t+1)*T], s[t*T:(t+1)*T], false)
 		}
-		// out[b, :, h, :] = probs·V, written straight into [B,T,H,dh] via ldc.
-		gemm.SgemmT(false, false, T, dh, T, 1, s, T, v, dh, 0, of[(b*T*H+h)*dh:], H*dh)
+		// out[b, t0:, h, :] = probs·V, written straight into [B,T,H,dh] via ldc.
+		gemmT(false, false, tc, dh, T, 1, s, T, v, dh, 0, of[((b*T+t0)*H+h)*dh:], H*dh)
 	})
 	if ctx.Pool != nil {
 		ctx.Pool.Put(sT)
@@ -96,26 +104,34 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	af, bf, vf, of := a.F32(), bm.F32(), v.F32(), out.F32()
 	workers := par.Workers()
-	sT := ctx.NewUninit(tensor.F32, workers, T*Tk)
+	rows, nRow := attnRows(B, H, T, Tk, dh, workers)
+	gemmT := gemm.SgemmTSerial
+	if nRow == 1 {
+		gemmT = gemm.SgemmT // untiled: let big per-head GEMMs fan out
+	}
+	sT := ctx.NewUninit(tensor.F32, workers, rows*Tk)
 	sAll := sT.F32()
-	par.For(B*H, headGrain(T, Tk, dh), func(bh, wk int) {
+	par.For(B*H*nRow, attnGrain(rows, Tk, dh), func(task, wk int) {
+		bh, rc := task/nRow, task%nRow
 		b, h := bh/H, bh%H
-		ab := af[(b*H+h)*T*dh:]
+		t0 := rc * rows
+		tc := min(rows, T-t0)
+		ab := af[(b*H+h)*T*dh+t0*dh:]
 		bb := bf[(b*H+h)*dh*Tk:]
 		vb := vf[(b*H+h)*Tk*dh:]
-		s := sAll[wk*T*Tk : (wk+1)*T*Tk]
-		gemm.SgemmT(false, false, T, Tk, dh, o.scale, ab, dh, bb, Tk, 0, s, Tk)
-		for t := 0; t < T; t++ {
+		s := sAll[wk*rows*Tk:]
+		gemmT(false, false, tc, Tk, dh, o.scale, ab, dh, bb, Tk, 0, s, Tk)
+		for t := 0; t < tc; t++ {
 			row := s[t*Tk : (t+1)*Tk]
 			if mask != nil {
-				vek.Add(row, row, mask[t*Tk:(t+1)*Tk])
+				vek.Add(row, row, mask[(t0+t)*Tk:(t0+t+1)*Tk])
 			}
 			softmaxRow(row, row, false)
 		}
 		if o.strideOut {
-			gemm.SgemmT(false, false, T, dh, Tk, 1, s, Tk, vb, dh, 0, of[(b*T*H+h)*dh:], H*dh)
+			gemmT(false, false, tc, dh, Tk, 1, s, Tk, vb, dh, 0, of[((b*T+t0)*H+h)*dh:], H*dh)
 		} else {
-			gemm.SgemmT(false, false, T, dh, Tk, 1, s, Tk, vb, dh, 0, of[(b*H+h)*T*dh:], dh)
+			gemmT(false, false, tc, dh, Tk, 1, s, Tk, vb, dh, 0, of[((b*H+h)*T+t0)*dh:], dh)
 		}
 	})
 	if ctx.Pool != nil {
@@ -124,12 +140,26 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	return ctx.Out(out), nil
 }
 
-// headGrain sizes attention's per-(batch,head) parallel chunks so one chunk
-// carries a few µs of work: microscopic heads (small T·dh) run inline on the
-// caller instead of waking the worker pool, which costs more than the math.
-func headGrain(t, tk, dh int) int {
-	const minMACs = 1 << 15 // two GEMMs per head, ~µs-scale at small sizes
-	w := 2 * t * tk * dh
+// attnRows picks the query-row tile for attention's parallel tasks. Small
+// shapes keep one tile per head (rows = T); large T is split so B·H·nRow
+// gives every worker at least ~2 tiles (flash-style row tiling: the score
+// tile stays cache-resident, and utilization no longer caps at B·H workers).
+func attnRows(b, h, t, tk, dh, workers int) (rows, nRow int) {
+	rows = t
+	// Split a head into row tiles only when the per-tile GEMM stays big
+	// enough to amortise re-packing K each tile (~2M MACs before halving).
+	for b*h*((t+rows-1)/rows) < 2*workers && rows > 32 && rows*tk*dh >= 1<<21 {
+		rows = (rows + 1) / 2
+	}
+	return rows, (t + rows - 1) / rows
+}
+
+// attnGrain sizes attention's parallel chunks so one chunk carries a few µs
+// of work: microscopic tiles run inline on the caller instead of waking the
+// worker pool, which costs more than the math.
+func attnGrain(rows, tk, dh int) int {
+	const minMACs = 1 << 15 // two GEMMs per tile, ~µs-scale at small sizes
+	w := 2 * rows * tk * dh
 	if w >= minMACs {
 		return 1
 	}

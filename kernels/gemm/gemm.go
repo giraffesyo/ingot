@@ -123,6 +123,11 @@ func SgemmSerial(m, n, k int, alpha float32, a []float32, lda int, b []float32, 
 	sgemmT(false, false, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc, 1)
 }
 
+// SgemmTSerial is SgemmT restricted to the calling goroutine.
+func SgemmTSerial(transA, transB bool, m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, beta float32, c []float32, ldc int) {
+	sgemmT(transA, transB, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc, 1)
+}
+
 func sgemmT(transA, transB bool, m, n, k int, alpha float32, a []float32, lda int, b []float32, ldb int, beta float32, c []float32, ldc int, workers int) {
 	if m == 0 || n == 0 {
 		return
