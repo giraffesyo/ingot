@@ -12,6 +12,7 @@ type gemmOp struct {
 	n              NodeInfo
 	alpha, beta    float32
 	transA, transB bool
+	bCache
 }
 
 func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
@@ -63,12 +64,55 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 		beta = o.beta
 	}
+	if !o.transA {
+		if pb := o.bCache.get(o.transB, K, N, b.F32(), b.Dim(1)); pb != nil {
+			gemm.SgemmPackedB(M, o.alpha, a.F32(), a.Dim(1), pb, beta, of, N)
+			return ctx.Out(out), nil
+		}
+	}
 	gemm.SgemmT(o.transA, o.transB, M, N, K, o.alpha, a.F32(), a.Dim(1), b.F32(), b.Dim(1), beta, of, N)
 	return ctx.Out(out), nil
 }
 
+// bCache caches a pre-packed B for ops whose second operand is the same
+// tensor every run (constant weights). A B that ever changes storage marks
+// the op dynamic and the cache stays off — packing per call would be a
+// pessimisation, and correctness never depends on the cache.
+type bCache struct {
+	mu  sync.Mutex
+	src *float32
+	ln  int
+	pb  *gemm.PackedB
+	dyn bool
+}
+
+// get returns the packed form of b (packing on first use), or nil for
+// operands that have proven dynamic.
+func (c *bCache) get(transB bool, k, n int, b []float32, ldb int) *gemm.PackedB {
+	if len(b) == 0 {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dyn {
+		return nil
+	}
+	if c.src == &b[0] && c.ln == len(b) {
+		return c.pb
+	}
+	if c.src != nil { // storage changed: not a constant
+		c.dyn, c.pb, c.src = true, nil, nil
+		return nil
+	}
+	c.pb, c.src, c.ln = gemm.PackB(transB, k, n, b, ldb), &b[0], len(b)
+	return c.pb
+}
+
 // matmulOp: NumPy-style matmul with batch broadcasting.
-type matmulOp struct{ n NodeInfo }
+type matmulOp struct {
+	n NodeInfo
+	bCache
+}
 
 func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if len(in) != 2 || in[0] == nil || in[1] == nil {
@@ -109,7 +153,11 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	af, bf, of := a.F32(), b.F32(), out.F32()
 	nb := batch.Numel()
 	if nb == 1 {
-		gemm.Sgemm(M, N, K, 1, af, K, bf, N, 0, of, N)
+		if pb := o.bCache.get(false, K, N, bf, N); pb != nil {
+			gemm.SgemmPackedB(M, 1, af, K, pb, 0, of, N)
+		} else {
+			gemm.Sgemm(M, N, K, 1, af, K, bf, N, 0, of, N)
+		}
 	} else {
 		// Per-batch matrix offsets (batch dims may broadcast).
 		sc := mmScratchPool.Get().(*mmScratch)
@@ -190,5 +238,5 @@ func init() {
 			transB: n.Attrs.Int("transB", 0) != 0,
 		}, nil
 	})
-	Register("", "MatMul", 1, func(n NodeInfo) (Op, error) { return &matmulOp{n}, nil })
+	Register("", "MatMul", 1, func(n NodeInfo) (Op, error) { return &matmulOp{n: n}, nil })
 }
