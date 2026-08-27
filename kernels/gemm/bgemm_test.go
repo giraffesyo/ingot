@@ -10,8 +10,8 @@ import (
 // bf16-quantized inputs. bf16 products are exact in f32, so the only error
 // is f32 summation: rel tol 1e-6·√k.
 func TestBgemmVsRef(t *testing.T) {
-	if !HasBFMMLA() {
-		t.Skip("no BFMMLA")
+	if !HasBF16() {
+		t.Skip("no bf16 kernel")
 	}
 	r := rand.New(rand.NewPCG(21, 22))
 	for _, sh := range []struct{ m, n, k int }{
@@ -48,8 +48,8 @@ func TestBgemmVsRef(t *testing.T) {
 }
 
 func BenchmarkBgemm(b *testing.B) {
-	if !HasBFMMLA() {
-		b.Skip("no BFMMLA")
+	if !HasBF16() {
+		b.Skip("no bf16 kernel")
 	}
 	r := rand.New(rand.NewPCG(23, 24))
 	for _, sh := range []struct {

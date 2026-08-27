@@ -10,3 +10,9 @@ var hasBFMMLA = func() bool {
 	v, err := unix.SysctlUint32("hw.optional.arm.FEAT_BF16")
 	return err == nil && v != 0
 }()
+
+const (
+	hasBF16DP   = false
+	bPairB      = false
+	bctRowMajor = false
+)
