@@ -134,12 +134,26 @@ class LLMBlock(nn.Module):
         x = x + self.w3(F.silu(self.w1(g)) * self.w2(g))
         return x
 
+# --- GPT-ish: a realistic-scale decoder stack (the SDPA-at-scale and
+# bf16-storage benchmark target). dim 512, 8 heads, T=256: each block's
+# [1,8,256,256] score tensor is 2 MB — fuse-sdpa keeps it in cache.
+class GPTish(nn.Module):
+    def __init__(self, dim=512, heads=8, depth=4, hidden=1376):
+        super().__init__()
+        self.blocks = nn.ModuleList([LLMBlock(dim, heads, hidden) for _ in range(depth)])
+        self.norm = RMSNorm(dim)
+    def forward(self, x):
+        for b in self.blocks:
+            x = b(x)
+        return self.norm(x)
+
 MODELS = {
     "resnetish": lambda: export("resnetish", ResNetish(), [torch.randn(1, 3, 64, 64)], ["x"]),
     "vit": lambda: export("vit", ViT(), [torch.randn(1, 3, 32, 32)], ["x"]),
     "bertish": lambda: export("bertish", Bertish(), [torch.randint(0, 100, (1, 16))], ["ids"]),
     "segnet": lambda: export("segnet", SegNet(), [torch.randn(1, 3, 32, 32)], ["x"]),
     "llmblock": lambda: export("llmblock", LLMBlock(), [torch.randn(1, 12, 48)], ["x"]),
+    "gptish": lambda: export("gptish", GPTish(), [torch.randn(1, 256, 512)], ["x"]),
     "mobilenet_v2": lambda: _mv2(),
     "efficientnet_b0": lambda: _effnet(),
 }

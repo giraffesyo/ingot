@@ -1103,6 +1103,9 @@ func init() {
 		return &castOp{n: n, to: to}, nil
 	})
 	Register("", "Expand", 8, func(n NodeInfo) (Op, error) { return &expandOp{n}, nil })
+	Register("", "Trilu", 14, func(n NodeInfo) (Op, error) {
+		return &triluOp{n: n, upper: n.Attrs.Int("upper", 1) == 1}, nil
+	})
 	Register("", "ConstantOfShape", 9, func(n NodeInfo) (Op, error) {
 		v := n.Attrs.Tensor("value")
 		if v == nil {
@@ -1131,4 +1134,57 @@ func init() {
 		return &splitOp{n: n, axis: int(n.Attrs.Int("axis", 0)), attrSplit: n.Attrs.Ints("split", nil)}, nil
 	})
 	Register("", "Tile", 6, func(n NodeInfo) (Op, error) { return &tileOp{n}, nil })
+}
+
+// ---- Trilu ----
+
+// triluOp keeps the upper (or lower) triangle of the last two dims and zeroes
+// the rest. k (optional input 1) shifts the boundary diagonal.
+type triluOp struct {
+	n     NodeInfo
+	upper bool
+}
+
+func (o *triluOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	if len(in) < 1 || in[0] == nil {
+		return nil, o.n.Errorf("missing input")
+	}
+	x := in[0]
+	xs := x.Shape()
+	if len(xs) < 2 {
+		return nil, o.n.Errorf("Trilu needs rank >= 2, got %v", xs)
+	}
+	k := 0
+	if len(in) > 1 && in[1] != nil {
+		kv := asI64(in[1])
+		if len(kv) != 1 {
+			return nil, o.n.Errorf("k must be a scalar")
+		}
+		k = int(kv[0])
+	}
+	R, C := xs[len(xs)-2], xs[len(xs)-1]
+	batch := x.Numel() / max(R*C, 1)
+	esz := x.DType().Size()
+	out := ctx.NewUninit(x.DType(), xs...)
+	src, dst := x.Bytes(), out.Bytes()
+	copy(dst, src)
+	rb := C * esz
+	for b := 0; b < batch; b++ {
+		base := b * R * rb
+		for i := 0; i < R; i++ {
+			row := dst[base+i*rb : base+(i+1)*rb]
+			if o.upper {
+				// keep j >= i+k: zero cols [0, i+k)
+				if z := min(max(i+k, 0), C); z > 0 {
+					clear(row[:z*esz])
+				}
+			} else {
+				// keep j <= i+k: zero cols [i+k+1, C)
+				if z := min(max(i+k+1, 0), C); z < C {
+					clear(row[z*esz:])
+				}
+			}
+		}
+	}
+	return ctx.Out(out), nil
 }
