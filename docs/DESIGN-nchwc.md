@@ -53,10 +53,14 @@ a blocked direct-conv kernel, not a row-major GEMM reinterpretation.
    statically-known spatial ≤ 224² (large planes measured +39% worse —
    the pipeline GEMM wins there; dynamic-shape models stay put).
    Growing through Adds turned mv2 from 16 chains / 32 conversions into
-   ONE region / 2 conversions (all 10 skip Adds blocked); effnet 16 chains → 7
-   regions, 33→47 blocked convs (SE islands still split it).
-   Follow-ups: blocked SE (would merge effnet's regions), per-shape
-   assignment for dynamic models, mv3's 5×5-heavy chains (~neutral).
+   ONE region / 2 conversions (all 10 skip Adds blocked). SE joins too:
+   the fused SE op detects nChw8c input at runtime (vek.SumBlk8 pooling,
+   vek.MulBlk8 scaling; the FC chain sees channels in natural order in
+   both layouts), so effnet and mv3-small each collapse to ONE region as
+   well (effnet 48 convs + 16 SE + 9 Adds; mv3 needed shape-annotated
+   exports — zoo.py now runs onnx shape_inference, some exporter paths
+   emit no value_info and the seed gate needs static spatial).
+   Follow-ups: per-shape assignment for dynamic models.
 4. The win must be re-proven per step against the pipeline it replaces;
    the fused dw+pw kill and this prototype both show intuition
    mispredicts on cached-activation workloads.

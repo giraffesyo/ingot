@@ -59,11 +59,19 @@ func (o *seOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if x.DType() != tensor.F32 {
 		return nil, o.n.Errorf("SE: want f32, got %s", x.DType())
 	}
+	// The op accepts NCHW or nChw8c ([N,C/8,H,W,8]) activations: the layout
+	// pass may place SE inside a blocked region. Pooling and scaling are
+	// per-channel either way (lane-patterned in the blocked case); the FC
+	// chain sees channels in natural order in both layouts.
 	xs := x.Shape()
-	if len(xs) != 4 {
-		return nil, o.n.Errorf("SE: want NCHW, got %v", xs)
+	blocked := len(xs) == 5 && xs[4] == blkC
+	if len(xs) != 4 && !blocked {
+		return nil, o.n.Errorf("SE: want NCHW or blocked, got %v", xs)
 	}
 	N, C, H, W := xs[0], xs[1], xs[2], xs[3]
+	if blocked {
+		C *= blkC
+	}
 	Cr := w1t.Shape()[0]
 	if w1t.Numel() != Cr*C || w2t.Numel() != C*Cr || w2t.Shape()[0] != C {
 		return nil, o.n.Errorf("SE: weight shapes %v/%v vs C=%d", w1t.Shape(), w2t.Shape(), C)
@@ -85,22 +93,34 @@ func (o *seOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	z1 := scr.F32()[N*C:]
 
 	inv := 1 / float32(P)
-	par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
-		row := xf[nc*P : (nc+1)*P]
-		var s0, s1, s2, s3 float32
-		i := 0
-		for ; i+4 <= len(row); i += 4 {
-			s0 += row[i]
-			s1 += row[i+1]
-			s2 += row[i+2]
-			s3 += row[i+3]
-		}
-		sum := (s0 + s1) + (s2 + s3)
-		for ; i < len(row); i++ {
-			sum += row[i]
-		}
-		sm[nc] = sum * inv
-	})
+	if blocked {
+		// sm[n*C+cb*8+l] is channel cb*8+l — natural order, so the FC chain
+		// below is layout-blind.
+		par.For(N*C/blkC, max(1, unaryChunk/max(P*blkC, 1)), func(ncb, _ int) {
+			s8 := sm[ncb*blkC : ncb*blkC+blkC]
+			vek.SumBlk8(s8, xf[ncb*P*blkC:(ncb+1)*P*blkC])
+			for l := range s8 {
+				s8[l] *= inv
+			}
+		})
+	} else {
+		par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
+			row := xf[nc*P : (nc+1)*P]
+			var s0, s1, s2, s3 float32
+			i := 0
+			for ; i+4 <= len(row); i += 4 {
+				s0 += row[i]
+				s1 += row[i+1]
+				s2 += row[i+2]
+				s3 += row[i+3]
+			}
+			sum := (s0 + s1) + (s2 + s3)
+			for ; i < len(row); i++ {
+				sum += row[i]
+			}
+			sm[nc] = sum * inv
+		})
+	}
 	for n := 0; n < N; n++ {
 		s := sm[n*C : (n+1)*C]
 		for r := 0; r < Cr; r++ {
@@ -122,9 +142,15 @@ func (o *seOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 		o.epi2.apply(s)
 	}
-	par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
-		vek.MulScalar(of[nc*P:(nc+1)*P], xf[nc*P:(nc+1)*P], sm[nc])
-	})
+	if blocked {
+		par.For(N*C/blkC, max(1, unaryChunk/max(P*blkC, 1)), func(ncb, _ int) {
+			vek.MulBlk8(of[ncb*P*blkC:(ncb+1)*P*blkC], xf[ncb*P*blkC:(ncb+1)*P*blkC], sm[ncb*blkC:ncb*blkC+blkC])
+		})
+	} else {
+		par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
+			vek.MulScalar(of[nc*P:(nc+1)*P], xf[nc*P:(nc+1)*P], sm[nc])
+		})
+	}
 	if ctx.Pool != nil {
 		ctx.Pool.Put(scr)
 	}

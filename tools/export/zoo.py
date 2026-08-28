@@ -23,6 +23,9 @@ def export(name, model, inputs, input_names, opset=17, dynamic_shapes=None):
         print(f"{name}: EXPORT FAILED: {e}")
         return
     m = onnx.load(path); onnx.checker.check_model(m)
+    # Annotate value shapes: the runtime's layout passes gate on static spatial
+    # sizes and some exporter paths omit value_info entirely (mv3 did).
+    m = onnx.shape_inference.infer_shapes(m); onnx.save(m, path)
     sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
     feeds = {n: x.numpy() for n, x in zip(input_names, inputs)}
     outs = sess.run(None, feeds)

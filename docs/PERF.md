@@ -1802,3 +1802,32 @@ clean controls). Apple M-series (loaded box, directional): mv2 −12%,
 effnet −4%. Conformance and optimizer A/B identical. Next lever from
 here: a blocked SE form, which would merge efficientnet's 7 regions
 into ~1 and drop 12 more conversion pairs.
+
+## Blocked SE: squeeze-excite joins nChw8c regions (2026-08-28)
+
+SE was the last island splitting blocked regions: effnet paid a
+FromBlk8/ToBlk8 pair around each of its 16 SE ops. The fused SE op now
+detects nChw8c input at runtime — pooling via new vek.SumBlk8 (per-lane
+plane sums, four accumulators) and scaling via new vek.MulBlk8 (8-lane
+pattern multiply, both NEON + AVX2, ~16-24 Gelem/s on M-series) — and
+the FC chain is layout-blind because blocked channel order is natural
+order. The layout pass lets SE join a region whenever its activation
+input is blocked; only Inputs[0] is a data edge.
+
+mv3-small exposed a second gap: torchvision's mv3 export carries no
+value_info at all, so the seed gate (static spatial) never fired and the
+model got no regions. zoo.py now runs onnx shape_inference on every
+export (the existing mv3.onnx was annotated in place — numerics and
+refs unchanged). With shapes + SE joining, efficientnet_b0 and
+mv3-small each collapse to ONE region like mv2.
+
+Zen 5 pod, idle, interleaved medians of 6 (A = Add-regions commit):
+**efficientnet_b0 4.65 → 3.74 ms (−19.6%)**, **mv3_small 1.83 → 1.60
+(−12.8%** on the annotated model; −19% vs the shipped no-region 1.97**)**,
+mv2 −1.5% (no SE — control). Apple M-series (loaded): effnet −11.3%,
+mv3 −14.7% — the SE merge pays on both arches, unlike the conv kernels.
+ORT 1.29 same pod for reference (volatile run-to-run): 16T effnet ~9.1,
+mv2 ~1.45-1.51, mv3 ~1.2-1.9; 32T thrashes (effnet 10.8-18, mv2
+3.0-5.9). ingot effnet 3.74 is now ~2.4× faster than ORT's best config;
+mv2 2.48 trails ORT-16T ~1.7× (was 3× at the start of the CNN arc);
+mv3 1.60 ≈ parity. Conformance and optimizer A/B identical.

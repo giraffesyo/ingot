@@ -128,6 +128,11 @@
       permutation both sides); pass grows regions through Adds and fan-out
       instead of linear chains — mv2 16 chains/32 conversions → 1 region/2,
       Zen 5 mv2 −18% (2.53 ms, 1.6× ORT-32T), effnet −6%
+- [x] blocked SE: fused SE runs on nChw8c natively (vek.SumBlk8/MulBlk8;
+      FC chain is layout-blind) and joins regions; zoo exports now carry
+      inferred shapes (mv3 had no value_info → no seeds). effnet −19.6%
+      (3.74 ms, ~2.4× faster than ORT's best), mv3_small −19% vs shipped;
+      wins on Apple too (effnet −11%, mv3 −15%)
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32

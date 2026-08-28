@@ -313,6 +313,8 @@ func main() {
 		g.dwblkgen(ks[0], ks[1])
 	}
 	g.pwblk()
+	g.mulblk8()
+	g.sumblk8()
 	for _, k := range [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}} {
 		g.qdw(k[0], k[1])
 	}
@@ -966,6 +968,83 @@ func (g *gen) pwblk() {
 		g.w("\tVMOVUPS Y%d, %d(DI)", 2*p, p*32)
 		g.w("\tVMOVUPS Y%d, %d(SI)", 2*p+1, p*32)
 	}
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// mulblk8: dst = src * s with the 8-lane channel pattern s repeated across an
+// nChw8c plane (per-channel scale, e.g. squeeze-excite). n a multiple of 8;
+// the pattern is exactly one YMM.
+func (g *gen) mulblk8() {
+	g.w("// func mulblk8_asm(dst, src []float32, n int, s []float32)")
+	g.w("TEXT ·mulblk8_asm(SB), NOSPLIT, $0-80")
+	g.w("\tMOVQ dst_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ n+48(FP), CX")
+	g.w("\tMOVQ s_base+56(FP), BX")
+	g.w("\tVMOVUPS (BX), Y13")
+	g.w("loop32:")
+	g.w("\tCMPQ CX, $32")
+	g.w("\tJL loop8")
+	for i := 0; i < 4; i++ {
+		g.w("\tVMULPS %d(SI), Y13, Y%d", i*32, i)
+	}
+	for i := 0; i < 4; i++ {
+		g.w("\tVMOVUPS Y%d, %d(DI)", i, i*32)
+	}
+	g.w("\tADDQ $128, SI")
+	g.w("\tADDQ $128, DI")
+	g.w("\tSUBQ $32, CX")
+	g.w("\tJMP loop32")
+	g.w("loop8:")
+	g.w("\tCMPQ CX, $8")
+	g.w("\tJL done")
+	g.w("\tVMULPS (SI), Y13, Y0")
+	g.w("\tVMOVUPS Y0, (DI)")
+	g.w("\tADDQ $32, SI")
+	g.w("\tADDQ $32, DI")
+	g.w("\tSUBQ $8, CX")
+	g.w("\tJMP loop8")
+	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// sumblk8: dst[0:8] = per-lane sums of the 8-lane pattern across an nChw8c
+// plane (channel plane sums, e.g. squeeze-excite pooling). n a multiple of 8;
+// dst is overwritten. Four accumulators break the add dependency chain.
+func (g *gen) sumblk8() {
+	g.w("// func sumblk8_asm(dst, src []float32, n int)")
+	g.w("TEXT ·sumblk8_asm(SB), NOSPLIT, $0-56")
+	g.w("\tMOVQ dst_base+0(FP), DI")
+	g.w("\tMOVQ src_base+24(FP), SI")
+	g.w("\tMOVQ n+48(FP), CX")
+	for i := 0; i < 4; i++ {
+		g.w("\tVXORPS Y%d, Y%d, Y%d", i, i, i)
+	}
+	g.w("loop32:")
+	g.w("\tCMPQ CX, $32")
+	g.w("\tJL loop8")
+	for i := 0; i < 4; i++ {
+		g.w("\tVADDPS %d(SI), Y%d, Y%d", i*32, i, i)
+	}
+	g.w("\tADDQ $128, SI")
+	g.w("\tSUBQ $32, CX")
+	g.w("\tJMP loop32")
+	g.w("loop8:")
+	g.w("\tCMPQ CX, $8")
+	g.w("\tJL done")
+	g.w("\tVADDPS (SI), Y0, Y0")
+	g.w("\tADDQ $32, SI")
+	g.w("\tSUBQ $8, CX")
+	g.w("\tJMP loop8")
+	g.w("done:")
+	g.w("\tVADDPS Y1, Y0, Y0")
+	g.w("\tVADDPS Y3, Y2, Y2")
+	g.w("\tVADDPS Y2, Y0, Y0")
+	g.w("\tVMOVUPS Y0, (DI)")
 	g.w("\tVZEROUPPER")
 	g.w("\tRET")
 	g.w("")
