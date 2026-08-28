@@ -77,38 +77,42 @@ func TestSDPACacheIncremental(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := &DecodeState{MaxT: maxT, Slots: map[string]*DecodeSlot{
-		"attn0": {K: make([]float32, H*maxT*dh), V: make([]float32, H*maxT*dh)},
-	}}
-	ctx := &Ctx{Decode: st}
-	check := func(outs []*tensor.Tensor, t0, tc int) {
-		of := outs[0].F32()
-		for h := 0; h < H; h++ {
-			for i := 0; i < tc; i++ {
-				for p := 0; p < dh; p++ {
-					got := of[(h*tc+i)*dh+p]
-					ref := want[(h*total+t0+i)*dh+p]
-					if d := math.Abs(float64(got - ref)); d > 2e-5 {
-						t.Fatalf("pos %d h %d p %d: got %g want %g", t0+i, h, p, got, ref)
+	for _, bf16 := range []bool{false, true} {
+		st := &DecodeState{MaxT: maxT, BF16: bf16, Slots: map[string]*DecodeSlot{}}
+		tol := 2e-5
+		if bf16 {
+			tol = 2e-2 // bf16 K/V quantization
+		}
+		ctx := &Ctx{Decode: st}
+		check := func(outs []*tensor.Tensor, t0, tc int) {
+			of := outs[0].F32()
+			for h := 0; h < H; h++ {
+				for i := 0; i < tc; i++ {
+					for p := 0; p < dh; p++ {
+						got := of[(h*tc+i)*dh+p]
+						ref := want[(h*total+t0+i)*dh+p]
+						if d := math.Abs(float64(got - ref)); d > tol {
+							t.Fatalf("bf16=%v pos %d h %d p %d: got %g want %g", bf16, t0+i, h, p, got, ref)
+						}
 					}
 				}
 			}
 		}
-	}
-	// Prefill.
-	outs, err := inst.Run(ctx, []*tensor.Tensor{slice(q, 0, prefill), slice(k, 0, prefill), slice(v, 0, prefill)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	check(outs, 0, prefill)
-	st.Pos = prefill
-	// Single-token steps.
-	for s0 := prefill; s0 < total; s0++ {
-		outs, err := inst.Run(ctx, []*tensor.Tensor{slice(q, s0, 1), slice(k, s0, 1), slice(v, s0, 1)})
+		// Prefill.
+		outs, err := inst.Run(ctx, []*tensor.Tensor{slice(q, 0, prefill), slice(k, 0, prefill), slice(v, 0, prefill)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		check(outs, s0, 1)
-		st.Pos++
+		check(outs, 0, prefill)
+		st.Pos = prefill
+		// Single-token steps.
+		for s0 := prefill; s0 < total; s0++ {
+			outs, err := inst.Run(ctx, []*tensor.Tensor{slice(q, s0, 1), slice(k, s0, 1), slice(v, s0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(outs, s0, 1)
+			st.Pos++
+		}
 	}
 }

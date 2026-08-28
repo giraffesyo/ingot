@@ -958,6 +958,63 @@ done:
 	VZEROUPPER
 	RET
 
+// func dotbf16_asm(a []float32, b []uint16, n int) float32
+TEXT ·dotbf16_asm(SB), NOSPLIT, $0-60
+	MOVQ a_base+0(FP), DI
+	MOVQ b_base+24(FP), SI
+	MOVQ n+48(FP), CX
+	VXORPS Y0, Y0, Y0
+	VXORPS Y1, Y1, Y1
+loop:
+	CMPQ CX, $16
+	JL done
+	VPMOVZXWD (SI), Y2
+	VPMOVZXWD 16(SI), Y3
+	VPSLLD $16, Y2, Y2
+	VPSLLD $16, Y3, Y3
+	VFMADD231PS (DI), Y2, Y0
+	VFMADD231PS 32(DI), Y3, Y1
+	ADDQ $32, SI
+	ADDQ $64, DI
+	SUBQ $16, CX
+	JMP loop
+done:
+	VADDPS Y1, Y0, Y0
+	VEXTRACTF128 $1, Y0, X1
+	VADDPS X1, X0, X0
+	VHADDPS X0, X0, X0
+	VHADDPS X0, X0, X0
+	VMOVSS X0, ret+56(FP)
+	VZEROUPPER
+	RET
+
+// func axpybf16_asm(dst []float32, src []uint16, n int, a float32)
+TEXT ·axpybf16_asm(SB), NOSPLIT, $0-60
+	MOVQ dst_base+0(FP), DI
+	MOVQ src_base+24(FP), SI
+	MOVQ n+48(FP), CX
+	VBROADCASTSS a+56(FP), Y13
+loop:
+	CMPQ CX, $16
+	JL done
+	VPMOVZXWD (SI), Y2
+	VPMOVZXWD 16(SI), Y3
+	VPSLLD $16, Y2, Y2
+	VPSLLD $16, Y3, Y3
+	VMOVUPS (DI), Y0
+	VMOVUPS 32(DI), Y1
+	VFMADD231PS Y13, Y2, Y0
+	VFMADD231PS Y13, Y3, Y1
+	VMOVUPS Y0, (DI)
+	VMOVUPS Y1, 32(DI)
+	ADDQ $32, SI
+	ADDQ $64, DI
+	SUBQ $16, CX
+	JMP loop
+done:
+	VZEROUPPER
+	RET
+
 // func qdw3x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
 TEXT ·qdw3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVQ acc_base+0(FP), DI

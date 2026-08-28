@@ -363,13 +363,36 @@ func Zip2(dst, a, b []float32, c float32) {
 	}
 }
 
+//go:noescape
+func dotbf16_asm(a []float32, b []uint16, n int) float32
+
+//go:noescape
+func axpybf16_asm(dst []float32, src []uint16, n int, a float32)
+
 // DotBF16 computes Σ a[i]·widen(b[i]) for bf16 weights b (bits<<16).
 func DotBF16(a []float32, b []uint16) float32 {
+	n := min(len(a), len(b))
+	m := n &^ 15
 	var s float32
-	for i := 0; i < min(len(a), len(b)); i++ {
+	if m > 0 {
+		s = dotbf16_asm(a, b, m)
+	}
+	for i := m; i < n; i++ {
 		s += a[i] * math.Float32frombits(uint32(b[i])<<16)
 	}
 	return s
+}
+
+// AxpyBF16 computes dst += a·widen(src) for bf16 src.
+func AxpyBF16(dst []float32, src []uint16, a float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 15
+	if m > 0 {
+		axpybf16_asm(dst, src, m, a)
+	}
+	for i := m; i < n; i++ {
+		dst[i] += a * math.Float32frombits(uint32(src[i])<<16)
+	}
 }
 
 // flushSub flushes a subnormal sigmoid output to zero, matching the SIMD

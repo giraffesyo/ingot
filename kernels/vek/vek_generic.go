@@ -187,3 +187,10 @@ func DotBF16(a []float32, b []uint16) float32 {
 	}
 	return s
 }
+
+// AxpyBF16 computes dst += a·widen(src) for bf16 src.
+func AxpyBF16(dst []float32, src []uint16, a float32) {
+	for i := 0; i < min(len(dst), len(src)); i++ {
+		dst[i] += a * math.Float32frombits(uint32(src[i])<<16)
+	}
+}

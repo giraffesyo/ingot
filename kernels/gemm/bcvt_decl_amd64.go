@@ -5,8 +5,8 @@ package gemm
 //go:noescape
 func bcvt32(dst *uint16, src *float32, n int64)
 
-// bf16Row converts src to bf16 into dst (hardware RNE when available).
-func bf16Row(dst []uint16, src []float32) {
+// BF16Row converts src to bf16 into dst (hardware RNE when available).
+func BF16Row(dst []uint16, src []float32) {
 	n := min(len(dst), len(src))
 	m := n &^ 31
 	if hasBF16DP && m > 0 {
