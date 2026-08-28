@@ -1727,3 +1727,16 @@ blocked pointwise kernel — a kernel program comparable in scope to the
 int8 arc. docs/DESIGN-nchwc.md is the map; the transformer/decode
 program was prioritized because its measured wins per unit of work
 were larger.
+
+## NCHWc step 1: the blocked depthwise kernel (2026-08-28)
+
+The kernel program the design doc called for begins. `vek.DwBlk8S1`
+computes a 3×3 stride-1 depthwise row in [.][8]-blocked layout with all
+nine tap-weight vectors resident in registers — one pass, 9 loads +
+9 FMAs + 1 store per output column (AVX2, and NEON via the WORD
+generator). Isolated A/B on the mv2 mid-block shape, per-call padding
+included on both sides: **Zen 5 44.2 → 6.6 µs (6.7×), Apple
+18.4 → 8.1 µs (2.3×)**. The recomposed prototype measured 0.80–0.97× —
+the win required a real kernel, and now it exists. Next: the blocked
+pointwise kernel, then the layout pass that lets models live in this
+layout end to end.

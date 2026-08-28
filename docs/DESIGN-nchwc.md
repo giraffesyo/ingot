@@ -1,6 +1,6 @@
 # Design: NCHWc blocked-layout CNN execution
 
-Status: prototyped, parked with data (2026-08-28).
+Status: kernel program started (2026-08-28) — step 1 (blocked depthwise) shipped.
 
 ## Motivation
 
@@ -34,9 +34,10 @@ a blocked direct-conv kernel, not a row-major GEMM reinterpretation.
 
 ## What a real implementation requires
 
-1. Dedicated NCHWc depthwise kernels (per-arch SIMD: 16-lane channel
-   vectors, taps in registers, stride-1/2 variants) — the analog of
-   oneDNN's `dw_conv` jit.
+1. ~~Dedicated NCHWc depthwise kernels~~ **DONE (vek.DwBlk8S1, 3×3 s1,
+   AVX2 + NEON)**: isolated A/B on the mv2 mid-block shape — Zen 5
+   44.2 → 6.6 µs (6.7×), Apple 18.4 → 8.1 µs (2.3×), padding included
+   on both sides. Stride-2 and 5×5 variants remain.
 2. A blocked pointwise/1×1 kernel consuming [C/16][HW][16] with
    pre-packed weights (close to the existing GEMM micro-kernel but with
    the blocked operand order).
