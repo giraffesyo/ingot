@@ -49,6 +49,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = fuseAttention(g, stats) || changed
 		changed = fuseSDPA(g, stats) || changed
 	}
+	assignBlockedLayout(g, stats)
 	renumber(g)
 	return stats
 }
@@ -2131,4 +2132,185 @@ func dce(g *Graph, stats map[string]int) {
 		}
 		g.compact(dead)
 	}
+}
+
+// blkEligible classifies a Conv node for nChw8c execution: 1 = depthwise
+// (group==C, K in {3,5}, S in {1,2}), 2 = pointwise (1x1 s1 p0), 0 = no.
+func blkEligible(n *Node) int {
+	if n.OpType != "Conv" || n.Domain != "" {
+		return 0
+	}
+	if n.Attrs.String("auto_pad", "NOTSET") != "NOTSET" {
+		return 0
+	}
+	for _, d := range n.Attrs.Ints("dilations", nil) {
+		if d != 1 {
+			return 0
+		}
+	}
+	if len(n.Inputs) < 2 || n.Inputs[1] == nil || n.Inputs[1].Const == nil || n.Inputs[1].Const.DType() != tensor.F32 {
+		return 0
+	}
+	if len(n.Inputs) > 2 && n.Inputs[2] != nil && n.Inputs[2].Const == nil {
+		return 0
+	}
+	ws := n.Inputs[1].Const.Shape()
+	if len(ws) != 4 {
+		return 0
+	}
+	group := int(n.Attrs.Int("group", 1))
+	strides := n.Attrs.Ints("strides", []int64{1, 1})
+	if len(strides) != 2 || strides[0] != strides[1] {
+		return 0
+	}
+	S := int(strides[0])
+	if group > 1 {
+		// depthwise: [C,1,K,K], group == C, C%8 == 0
+		C, K := ws[0], ws[2]
+		if ws[1] != 1 || ws[3] != K || group != C || C%8 != 0 {
+			return 0
+		}
+		if (K != 3 && K != 5) || (S != 1 && S != 2) {
+			return 0
+		}
+		if len(n.Attrs.Ints("pads", []int64{0, 0, 0, 0})) != 4 {
+			return 0
+		}
+		return 1
+	}
+	// pointwise: [M,C,1,1], s1, p0, both channel counts blocked
+	if ws[2] != 1 || ws[3] != 1 || S != 1 || ws[0]%8 != 0 || ws[1]%8 != 0 {
+		return 0
+	}
+	for _, p := range n.Attrs.Ints("pads", nil) {
+		if p != 0 {
+			return 0
+		}
+	}
+	return 2
+}
+
+// assignBlockedLayout rewrites maximal chains (length >= 2) of eligible
+// depthwise/pointwise Convs to run in nChw8c: a ToBlk8 before the chain,
+// blocked conv forms inside, FromBlk8 after. Runs once, after the rewrite
+// loop (chains do not create new fusion opportunities).
+func assignBlockedLayout(g *Graph, stats map[string]int) {
+	kind := map[*Node]int{}
+	for _, n := range g.Nodes {
+		kind[n] = blkEligible(n)
+	}
+	inChain := map[*Node]bool{}
+	type chain struct{ nodes []*Node }
+	var chains []chain
+	staticSmall := func(v *Value) bool {
+		if !v.HasShape || len(v.Shape) != 4 {
+			return false
+		}
+		h, w := v.Shape[2], v.Shape[3]
+		return h > 0 && w > 0 && h*w <= 224*224
+	}
+	for _, n := range g.Nodes {
+		if kind[n] == 0 || inChain[n] {
+			continue
+		}
+		// n starts a chain only if its input is not itself a chain-eligible
+		// sole-producer (then it would be discovered from the head).
+		if p := n.Inputs[0].Producer; p != nil && kind[p] != 0 && g.soleConsumer(n.Inputs[0]) == n {
+			continue
+		}
+		// Blocked layout pays at small spatial sizes; at det-scale planes
+		// the pipeline's near-peak GEMM wins (measured +39% regression).
+		// Dynamic-shape models (unknown H/W) stay on the pipeline.
+		if !staticSmall(n.Inputs[0]) {
+			continue
+		}
+		c := chain{nodes: []*Node{n}}
+		cur := n
+		for {
+			u := g.soleConsumer(cur.Outputs[0])
+			if u == nil || kind[u] == 0 || u.Inputs[0] != cur.Outputs[0] {
+				break
+			}
+			c.nodes = append(c.nodes, u)
+			cur = u
+		}
+		if len(c.nodes) >= 2 {
+			for _, m := range c.nodes {
+				inChain[m] = true
+			}
+			chains = append(chains, c)
+		}
+	}
+	if len(chains) == 0 {
+		return
+	}
+	before := map[*Node]*Node{} // conv head → ToBlk8 to insert before it
+	after := map[*Node]*Node{}  // conv tail → FromBlk8 to insert after it
+	for _, c := range chains {
+		head, tail := c.nodes[0], c.nodes[len(c.nodes)-1]
+		// ToBlk8: x → xb
+		x := head.Inputs[0]
+		xb := newConst(g, x.Name+"_blk", tensor.New(tensor.F32)) // placeholder value; fixed below
+		xb.Const = nil
+		xb.HasShape = false
+		toN := &Node{Name: head.Name + "_toblk", OpType: "ToBlk8", Domain: ingotDomain, Attrs: ops.Attrs{}}
+		toN.Inputs = []*Value{x}
+		toN.Outputs = []*Value{xb}
+		xb.Producer = toN
+		removeConsumer(x, head)
+		x.Consumers = append(x.Consumers, toN)
+		xb.Consumers = []*Node{head}
+		head.Inputs[0] = xb
+		before[head] = toN
+		// FromBlk8: tail's output value stays the graph-visible NCHW value;
+		// the chain's internal value becomes a fresh blocked one.
+		out := tail.Outputs[0]
+		ob := newConst(g, out.Name+"_blk", tensor.New(tensor.F32))
+		ob.Const = nil
+		ob.HasShape = false
+		fromN := &Node{Name: tail.Name + "_fromblk", OpType: "FromBlk8", Domain: ingotDomain, Attrs: ops.Attrs{}}
+		tail.Outputs[0] = ob
+		ob.Producer = tail
+		fromN.Inputs = []*Value{ob}
+		ob.Consumers = []*Node{fromN}
+		fromN.Outputs = []*Value{out}
+		out.Producer = fromN
+		after[tail] = fromN
+		// Rewrite the convs.
+		for _, m := range c.nodes {
+			attrs := ops.Attrs{}
+			for _, name := range []string{"ingot_act", "ingot_act_alpha", "ingot_act_beta", "ingot_post_scale", "ingot_post_shift"} {
+				if a, ok := m.Attrs[name]; ok {
+					attrs[name] = a
+				}
+			}
+			if kind[m] == 1 {
+				ws := m.Inputs[1].Const.Shape()
+				strides := m.Attrs.Ints("strides", []int64{1, 1})
+				attrs["kernel"] = ops.Attr{Kind: ops.KindInt, I: int64(ws[2])}
+				attrs["stride"] = ops.Attr{Kind: ops.KindInt, I: strides[0]}
+				attrs["pads"] = ops.Attr{Kind: ops.KindInts, Ints: append([]int64(nil), m.Attrs.Ints("pads", []int64{0, 0, 0, 0})...)}
+				m.OpType = "ConvDwBlk"
+			} else {
+				m.OpType = "ConvPwBlk"
+			}
+			m.Domain = ingotDomain
+			m.Attrs = attrs
+			stats["assign-blk"]++
+		}
+	}
+	// Rebuild the node list with conversions inserted in topological place.
+	nodes := make([]*Node, 0, len(g.Nodes)+2*len(chains))
+	for _, n := range g.Nodes {
+		if t := before[n]; t != nil {
+			nodes = append(nodes, t)
+		}
+		nodes = append(nodes, n)
+		if f := after[n]; f != nil {
+			nodes = append(nodes, f)
+		}
+	}
+	g.Nodes = nodes
+	g.Opsets[ingotDomain] = 1
+	stats["blk-chains"] += len(chains)
 }
