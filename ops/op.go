@@ -19,7 +19,25 @@ import (
 type Ctx struct {
 	Pool *tensor.Pool
 
+	// Decode carries autoregressive attention state across Runs (nil for
+	// stateless runs). See docs/DESIGN-kvcache.md.
+	Decode *DecodeState
+
 	outbuf [8]*tensor.Tensor // backs Out/OutPad — valid until the next Run on this Ctx
+}
+
+// DecodeState is the per-sequence KV cache: one slot per cached attention
+// node (keyed by node name), plus the shared position counter. The caller
+// (graph.Decode) owns the buffers; ops append and read.
+type DecodeState struct {
+	Pos   int // tokens already cached (before this Run)
+	MaxT  int
+	Slots map[string]*DecodeSlot
+}
+
+// DecodeSlot is one attention node's cache: K and V as [H][MaxT][dh] f32.
+type DecodeSlot struct {
+	K, V []float32
 }
 
 // Out returns the given tensors as an output slice backed by the context

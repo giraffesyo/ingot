@@ -204,6 +204,10 @@ func (s *Session) Graph() *Graph { return s.g }
 // owned by the caller (not pooled). Safe for concurrent use by multiple
 // goroutines (see the Session doc; the sole exception is Profile).
 func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tensor, error) {
+	return s.run(feeds, nil)
+}
+
+func (s *Session) run(feeds map[string]*tensor.Tensor, dec *ops.DecodeState) (map[string]*tensor.Tensor, error) {
 	sc, _ := s.scratch.Get().(*runScratch)
 	if sc == nil {
 		sc = &runScratch{
@@ -237,6 +241,8 @@ func (s *Session) Run(feeds map[string]*tensor.Tensor) (map[string]*tensor.Tenso
 	}
 	ctx := &sc.ctx
 	ctx.Pool = s.pool
+	ctx.Decode = dec
+	defer func() { ctx.Decode = nil }()
 	isOutput := s.isOutput
 	in := sc.in
 	defer func() { sc.in = in[:0] }()

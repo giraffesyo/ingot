@@ -75,7 +75,8 @@ type sdpaOp struct {
 	n                NodeInfo
 	scale            float32
 	strideOut        bool
-	aLay, bLay, vLay int // input layouts, see fuse-sdpa (0 = as-declared)
+	cache            bool // decode form: K/V append to the Ctx.Decode slot
+	aLay, bLay, vLay int  // input layouts, see fuse-sdpa (0 = as-declared)
 
 	// Cached classification of the (constant) mask into (rows × sdpaBk)
 	// blocks: 0 = clean (all zero), 1 = mixed, 2 = fully masked (skipped
@@ -146,6 +147,9 @@ func (o *sdpaOp) blockStates(mask []float32, T, Tk, rows int) []uint8 {
 func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if len(in) < 3 || in[0] == nil || in[1] == nil || in[2] == nil {
 		return nil, o.n.Errorf("SDPA: need A, B, V")
+	}
+	if o.cache {
+		return o.runCached(ctx, in)
 	}
 	a, bm, v := in[0], in[1], in[2]
 	var mask []float32
@@ -385,8 +389,66 @@ func init() {
 	})
 	Register("ingot", "SDPA", 1, func(n NodeInfo) (Op, error) {
 		return &sdpaOp{n: n, scale: n.Attrs.Float("scale", 1), strideOut: n.Attrs.Int("stride_out", 0) != 0,
-			aLay: int(n.Attrs.Int("a_layout", 0)), bLay: int(n.Attrs.Int("b_layout", 0)), vLay: int(n.Attrs.Int("v_layout", 0))}, nil
+			cache: n.Attrs.Int("cache", 0) != 0,
+			aLay:  int(n.Attrs.Int("a_layout", 0)), bLay: int(n.Attrs.Int("b_layout", 0)), vLay: int(n.Attrs.Int("v_layout", 0))}, nil
 	})
 }
 
 func expf(x float32) float32 { return float32(math.Exp(float64(x))) }
+
+// runCached is the decode form: inputs are q, kNew, vNew — each
+// [1, H, Tnew, dh] — appended to this node's KV slot; queries attend
+// causally over [0, Pos+i]. See docs/DESIGN-kvcache.md.
+func (o *sdpaOp) runCached(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	if ctx.Decode == nil {
+		return nil, o.n.Errorf("SDPA(cache): no decode state on this run")
+	}
+	st := ctx.Decode
+	q, kn, vn := in[0], in[1], in[2]
+	qs := q.Shape()
+	if len(qs) != 4 || qs[0] != 1 {
+		return nil, o.n.Errorf("SDPA(cache): want [1,H,T,dh] q, got %v", qs)
+	}
+	H, Tn, dh := qs[1], qs[2], qs[3]
+	slot := st.Slots[o.n.Name]
+	if slot == nil {
+		// First touch: sizes are only known at Run time. The executor is
+		// sequential within a Run, and each Decode owns its state.
+		slot = &DecodeSlot{K: make([]float32, H*st.MaxT*dh), V: make([]float32, H*st.MaxT*dh)}
+		st.Slots[o.n.Name] = slot
+	}
+	if kn.Numel() != H*Tn*dh || vn.Numel() != H*Tn*dh {
+		return nil, o.n.Errorf("SDPA(cache): K/V shape mismatch %v/%v", kn.Shape(), vn.Shape())
+	}
+	if st.Pos+Tn > st.MaxT {
+		return nil, o.n.Errorf("SDPA(cache): %d+%d exceeds MaxT %d", st.Pos, Tn, st.MaxT)
+	}
+	qf, kf, vf := q.F32(), kn.F32(), vn.F32()
+	// Append the new positions.
+	for h := 0; h < H; h++ {
+		copy(slot.K[(h*st.MaxT+st.Pos)*dh:], kf[h*Tn*dh:(h+1)*Tn*dh])
+		copy(slot.V[(h*st.MaxT+st.Pos)*dh:], vf[h*Tn*dh:(h+1)*Tn*dh])
+	}
+	out := ctx.NewUninit(tensor.F32, 1, H, Tn, dh)
+	of := out.F32()
+	workers := par.Workers()
+	scratch := ctx.NewUninit(tensor.F32, workers, st.Pos+Tn)
+	sAll := scratch.F32()
+	grain := max(1, (1<<15)/max(1, 2*(st.Pos+Tn)*dh))
+	par.For(H*Tn, grain, func(ht, wk int) {
+		h, t := ht/Tn, ht%Tn
+		kv := st.Pos + t + 1 // causal: attend over [0, Pos+t]
+		row := sAll[wk*(st.Pos+Tn) : wk*(st.Pos+Tn)+kv]
+		K := slot.K[h*st.MaxT*dh:]
+		V := slot.V[h*st.MaxT*dh:]
+		qrow := qf[(h*Tn+t)*dh : (h*Tn+t+1)*dh]
+		// scores = scale·q·Kᵀ over the cached range (GEMV at Tn==1).
+		gemm.SgemmTSerial(false, true, 1, kv, dh, o.scale, qrow, dh, K, dh, 0, row, kv)
+		softmaxRow(row, row, false)
+		gemm.SgemmTSerial(false, false, 1, dh, kv, 1, row, kv, V, dh, 0, of[(h*Tn+t)*dh:], dh)
+	})
+	if ctx.Pool != nil {
+		ctx.Pool.Put(scratch)
+	}
+	return ctx.Out(out), nil
+}
