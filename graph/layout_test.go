@@ -8,13 +8,15 @@ import (
 	"github.com/giraffesyo/ingot/tensor"
 )
 
-// buildResidualStack builds an mv2-style stack of two inverted-residual
-// blocks (all channels 8, 4x4 spatial): a seed pointwise conv, then per block
-// pw → dw → pw → Add(skip). The first block's output y1 feeds the second
+// buildResidualStack builds an mv2/effnet-style stack of two
+// inverted-residual blocks (all channels 8, 4x4 spatial): a seed pointwise
+// conv, then per block pw → dw → pw → Add(skip), with an SE island between
+// the second block's dw and pw. The first block's output y1 feeds the second
 // block's convs, the second Add, and an external Relu, so the pass must keep
 // y1 blocked inside the region and export one NCHW copy for the Relu.
 func buildResidualStack() *Graph {
 	tg := newTestGraph()
+	tg.g.Opsets["ingot"] = 1
 	shape4 := func(names ...string) {
 		for _, name := range names {
 			v := tg.val(name)
@@ -55,7 +57,19 @@ func buildResidualStack() *Graph {
 	tg.node("Add", []string{"c", "s"}, "y1")
 	tg.node("Conv", []string{"y1", "w3"}, "d")
 	dwAttrs(tg.node("Conv", []string{"d", "wd2"}, "e"))
-	tg.node("Conv", []string{"e", "w4"}, "f")
+	sew1 := make([]float32, 4*8)
+	sew2 := make([]float32, 8*4)
+	for i := range sew1 {
+		sew1[i] = float32(i%5-2) / 4
+		sew2[i] = float32(i%3-1) / 4
+	}
+	tg.constF32("wse1", []int{4, 8, 1, 1}, sew1...)
+	tg.constF32("bse1", []int{4}, 0.1, -0.2, 0.3, 0.05)
+	tg.constF32("wse2", []int{8, 4, 1, 1}, sew2...)
+	tg.constF32("bse2", []int{8}, 1, 0.9, 1.1, 1, 0.8, 1.2, 1, 1)
+	se := tg.node("SE", []string{"e", "wse1", "bse1", "wse2", "bse2"}, "es")
+	se.Domain = "ingot"
+	tg.node("Conv", []string{"es", "w4"}, "f")
 	tg.node("Add", []string{"f", "y1"}, "y2")
 	tg.node("Relu", []string{"y1"}, "z")
 	shape4("x", "s", "c", "y1", "f")
@@ -68,8 +82,8 @@ func buildResidualStack() *Graph {
 func TestBlockedLayoutResidual(t *testing.T) {
 	graw, gopt := buildResidualStack(), buildResidualStack()
 	stats := Optimize(gopt)
-	if stats["blk-regions"] != 1 || stats["assign-blk"] != 7 || stats["blk-add"] != 2 {
-		t.Fatalf("stats = %v, want blk-regions:1 assign-blk:7 blk-add:2", stats)
+	if stats["blk-regions"] != 1 || stats["assign-blk"] != 7 || stats["blk-add"] != 2 || stats["blk-se"] != 1 {
+		t.Fatalf("stats = %v, want blk-regions:1 assign-blk:7 blk-add:2 blk-se:1", stats)
 	}
 	count := map[string]int{}
 	for _, n := range gopt.Nodes {
@@ -79,7 +93,7 @@ func TestBlockedLayoutResidual(t *testing.T) {
 	if count["ToBlk8"] != 1 || count["FromBlk8"] != 2 {
 		t.Fatalf("conversions = %v, want 1 ToBlk8, 2 FromBlk8", count)
 	}
-	if count["Conv"] != 0 || count["ConvDwBlk"] != 2 || count["ConvPwBlk"] != 5 || count["Add"] != 2 {
+	if count["Conv"] != 0 || count["ConvDwBlk"] != 2 || count["ConvPwBlk"] != 5 || count["Add"] != 2 || count["SE"] != 1 {
 		t.Fatalf("node mix = %v", count)
 	}
 	// The Relu must read the NCHW copy of y1 (produced by a FromBlk8), while

@@ -308,6 +308,8 @@ func main() {
 		g.dwblkgen(ks[0], ks[1])
 	}
 	g.pwblk()
+	g.mulblk8()
+	g.sumblk8()
 	for _, k := range dwShapes {
 		g.qdwconv(k[0], k[1])
 	}
@@ -979,5 +981,80 @@ func (g *gen) pwblk() {
 		g.w("	VST1.P [V%d.S4, V%d.S4], 32(R1)", 4*p+2, 4*p+3)
 	}
 	g.w("	RET")
+	g.w("")
+}
+
+// mulblk8 emits func mulblk8_asm(dst, src []float32, n int, s []float32):
+// dst = src * s with the 8-lane channel pattern s repeated across an nChw8c
+// plane (per-channel scale, e.g. squeeze-excite). n is a multiple of 8; the
+// pattern lives in V30 (lanes 0-3) / V31 (lanes 4-7).
+func (g *gen) mulblk8() {
+	g.w("// func mulblk8_asm(dst, src []float32, n int, s []float32)")
+	g.w("TEXT ·mulblk8_asm(SB), NOSPLIT, $0-80")
+	g.w("\tMOVD dst_base+0(FP), R0")
+	g.w("\tMOVD src_base+24(FP), R1")
+	g.w("\tMOVD n+48(FP), R3")
+	g.w("\tMOVD s_base+56(FP), R2")
+	g.w("\tVLD1 (R2), [V30.S4, V31.S4]")
+	g.w("loop16:")
+	g.w("\tCMP $16, R3")
+	g.w("\tBLT loop8")
+	g.w("\tVLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]")
+	for i := 0; i < 4; i++ {
+		p := 30 + i%2
+		g.w("\tWORD $0x%08X // fmul v%d,v%d,v%d", fmul(i, i, p), i, i, p)
+	}
+	g.w("\tVST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R0)")
+	g.w("\tSUB $16, R3")
+	g.w("\tB loop16")
+	g.w("loop8:")
+	g.w("\tCMP $8, R3")
+	g.w("\tBLT done")
+	g.w("\tVLD1.P 32(R1), [V0.S4, V1.S4]")
+	g.w("\tWORD $0x%08X // fmul v0,v0,v30", fmul(0, 0, 30))
+	g.w("\tWORD $0x%08X // fmul v1,v1,v31", fmul(1, 1, 31))
+	g.w("\tVST1.P [V0.S4, V1.S4], 32(R0)")
+	g.w("\tSUB $8, R3")
+	g.w("\tB loop8")
+	g.w("done:")
+	g.w("\tRET")
+	g.w("")
+}
+
+// sumblk8 emits func sumblk8_asm(dst, src []float32, n int): dst[0:8] =
+// per-lane sums of the 8-lane pattern across an nChw8c plane (channel plane
+// sums, e.g. squeeze-excite pooling). n is a multiple of 8; dst is
+// overwritten. Four accumulators break the fadd dependency chain.
+func (g *gen) sumblk8() {
+	g.w("// func sumblk8_asm(dst, src []float32, n int)")
+	g.w("TEXT ·sumblk8_asm(SB), NOSPLIT, $0-56")
+	g.w("\tMOVD dst_base+0(FP), R0")
+	g.w("\tMOVD src_base+24(FP), R1")
+	g.w("\tMOVD n+48(FP), R3")
+	for v := 26; v <= 29; v++ {
+		g.movi0(v)
+	}
+	g.w("loop16:")
+	g.w("\tCMP $16, R3")
+	g.w("\tBLT loop8")
+	g.w("\tVLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]")
+	for i := 0; i < 4; i++ {
+		g.w("\tWORD $0x%08X // fadd v%d+=v%d", fadd(26+i, 26+i, i), 26+i, i)
+	}
+	g.w("\tSUB $16, R3")
+	g.w("\tB loop16")
+	g.w("loop8:")
+	g.w("\tCMP $8, R3")
+	g.w("\tBLT done")
+	g.w("\tVLD1.P 32(R1), [V0.S4, V1.S4]")
+	g.w("\tWORD $0x%08X // fadd v26+=v0", fadd(26, 26, 0))
+	g.w("\tWORD $0x%08X // fadd v27+=v1", fadd(27, 27, 1))
+	g.w("\tSUB $8, R3")
+	g.w("\tB loop8")
+	g.w("done:")
+	g.w("\tWORD $0x%08X // fadd v26+=v28", fadd(26, 26, 28))
+	g.w("\tWORD $0x%08X // fadd v27+=v29", fadd(27, 27, 29))
+	g.w("\tVST1 [V26.S4, V27.S4], (R0)")
+	g.w("\tRET")
 	g.w("")
 }

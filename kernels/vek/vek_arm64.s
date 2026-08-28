@@ -2484,6 +2484,69 @@ pwdone:
 	VST1.P [V22.S4, V23.S4], 32(R1)
 	RET
 
+// func mulblk8_asm(dst, src []float32, n int, s []float32)
+TEXT ·mulblk8_asm(SB), NOSPLIT, $0-80
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD n+48(FP), R3
+	MOVD s_base+56(FP), R2
+	VLD1 (R2), [V30.S4, V31.S4]
+loop16:
+	CMP $16, R3
+	BLT loop8
+	VLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]
+	WORD $0x6E3EDC00 // fmul v0,v0,v30
+	WORD $0x6E3FDC21 // fmul v1,v1,v31
+	WORD $0x6E3EDC42 // fmul v2,v2,v30
+	WORD $0x6E3FDC63 // fmul v3,v3,v31
+	VST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R0)
+	SUB $16, R3
+	B loop16
+loop8:
+	CMP $8, R3
+	BLT done
+	VLD1.P 32(R1), [V0.S4, V1.S4]
+	WORD $0x6E3EDC00 // fmul v0,v0,v30
+	WORD $0x6E3FDC21 // fmul v1,v1,v31
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	SUB $8, R3
+	B loop8
+done:
+	RET
+
+// func sumblk8_asm(dst, src []float32, n int)
+TEXT ·sumblk8_asm(SB), NOSPLIT, $0-56
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD n+48(FP), R3
+	WORD $0x4F00041A // movi v26.4s, #0
+	WORD $0x4F00041B // movi v27.4s, #0
+	WORD $0x4F00041C // movi v28.4s, #0
+	WORD $0x4F00041D // movi v29.4s, #0
+loop16:
+	CMP $16, R3
+	BLT loop8
+	VLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]
+	WORD $0x4E20D75A // fadd v26+=v0
+	WORD $0x4E21D77B // fadd v27+=v1
+	WORD $0x4E22D79C // fadd v28+=v2
+	WORD $0x4E23D7BD // fadd v29+=v3
+	SUB $16, R3
+	B loop16
+loop8:
+	CMP $8, R3
+	BLT done
+	VLD1.P 32(R1), [V0.S4, V1.S4]
+	WORD $0x4E20D75A // fadd v26+=v0
+	WORD $0x4E21D77B // fadd v27+=v1
+	SUB $8, R3
+	B loop8
+done:
+	WORD $0x4E3CD75A // fadd v26+=v28
+	WORD $0x4E3DD77B // fadd v27+=v29
+	VST1 [V26.S4, V27.S4], (R0)
+	RET
+
 // func qdw3x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
 TEXT ·qdw3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVD acc_base+0(FP), R0

@@ -231,6 +231,10 @@ func BenchmarkVek(b *testing.B) {
 	run("Erf", func() { Erf(out, x) })
 	run("Gelu", func() { Gelu(out, x) })
 	run("Sigmoid", func() { Sigmoid(out, x) })
+	s8 := randf(r, 8)
+	run("MulBlk8", func() { MulBlk8(out, x, s8) })
+	var acc [8]float32
+	run("SumBlk8", func() { SumBlk8(acc[:], x) })
 }
 
 // TestDwRowS1 checks every depthwise row kernel shape against a scalar
@@ -521,6 +525,41 @@ func TestPwBlk6x16(t *testing.T) {
 			}
 			if d := g1[i] - w1[i]; d > 1e-3 || d < -1e-3 {
 				t.Fatalf("cin=%d dst1[%d]: got %g want %g", cin, i, g1[i], w1[i])
+			}
+		}
+	}
+}
+
+func TestMulBlk8(t *testing.T) {
+	r := rand.New(rand.NewPCG(41, 42))
+	for _, n := range []int{0, 8, 16, 24, 32, 40, 200, 1568, 4096, 7, 9, 23, 100} {
+		src, s := randf(r, n), randf(r, 8)
+		dst := make([]float32, n)
+		MulBlk8(dst, src, s)
+		for i := range src {
+			want := src[i] * s[i&7]
+			if dst[i] != want {
+				t.Fatalf("MulBlk8 n=%d i=%d: got %g want %g", n, i, dst[i], want)
+			}
+		}
+	}
+}
+
+func TestSumBlk8(t *testing.T) {
+	r := rand.New(rand.NewPCG(43, 44))
+	for _, n := range []int{0, 8, 16, 24, 32, 200, 1568, 4096, 7, 9, 23, 100} {
+		src := randf(r, n)
+		dst := randf(r, 8) // must be overwritten
+		SumBlk8(dst, src)
+		var want [8]float64
+		var mag [8]float64
+		for i, v := range src {
+			want[i&7] += float64(v)
+			mag[i&7] += math.Abs(float64(v))
+		}
+		for l := 0; l < 8; l++ {
+			if d := math.Abs(float64(dst[l]) - want[l]); d > 1e-6*(1+mag[l]) {
+				t.Fatalf("SumBlk8 n=%d lane=%d: got %g want %g", n, l, dst[l], want[l])
 			}
 		}
 	}

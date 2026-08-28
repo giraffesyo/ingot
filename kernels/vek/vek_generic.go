@@ -194,3 +194,23 @@ func AxpyBF16(dst []float32, src []uint16, a float32) {
 		dst[i] += a * math.Float32frombits(uint32(src[i])<<16)
 	}
 }
+
+// MulBlk8 computes dst = src * s, with the 8-lane channel pattern s repeated
+// across an nChw8c plane (per-channel scale). Tail elements use s[i%8].
+func MulBlk8(dst, src, s []float32) {
+	n := min(len(dst), len(src))
+	for i := 0; i < n; i++ {
+		dst[i] = src[i] * s[i&7]
+	}
+}
+
+// SumBlk8 overwrites dst[0:8] with the per-lane sums of the 8-lane pattern
+// across an nChw8c plane src.
+func SumBlk8(dst, src []float32) {
+	for i := range dst[:8] {
+		dst[i] = 0
+	}
+	for i, v := range src {
+		dst[i&7] += v
+	}
+}

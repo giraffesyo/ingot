@@ -1328,6 +1328,75 @@ pwdone:
 	VZEROUPPER
 	RET
 
+// func mulblk8_asm(dst, src []float32, n int, s []float32)
+TEXT ·mulblk8_asm(SB), NOSPLIT, $0-80
+	MOVQ dst_base+0(FP), DI
+	MOVQ src_base+24(FP), SI
+	MOVQ n+48(FP), CX
+	MOVQ s_base+56(FP), BX
+	VMOVUPS (BX), Y13
+loop32:
+	CMPQ CX, $32
+	JL loop8
+	VMULPS 0(SI), Y13, Y0
+	VMULPS 32(SI), Y13, Y1
+	VMULPS 64(SI), Y13, Y2
+	VMULPS 96(SI), Y13, Y3
+	VMOVUPS Y0, 0(DI)
+	VMOVUPS Y1, 32(DI)
+	VMOVUPS Y2, 64(DI)
+	VMOVUPS Y3, 96(DI)
+	ADDQ $128, SI
+	ADDQ $128, DI
+	SUBQ $32, CX
+	JMP loop32
+loop8:
+	CMPQ CX, $8
+	JL done
+	VMULPS (SI), Y13, Y0
+	VMOVUPS Y0, (DI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP loop8
+done:
+	VZEROUPPER
+	RET
+
+// func sumblk8_asm(dst, src []float32, n int)
+TEXT ·sumblk8_asm(SB), NOSPLIT, $0-56
+	MOVQ dst_base+0(FP), DI
+	MOVQ src_base+24(FP), SI
+	MOVQ n+48(FP), CX
+	VXORPS Y0, Y0, Y0
+	VXORPS Y1, Y1, Y1
+	VXORPS Y2, Y2, Y2
+	VXORPS Y3, Y3, Y3
+loop32:
+	CMPQ CX, $32
+	JL loop8
+	VADDPS 0(SI), Y0, Y0
+	VADDPS 32(SI), Y1, Y1
+	VADDPS 64(SI), Y2, Y2
+	VADDPS 96(SI), Y3, Y3
+	ADDQ $128, SI
+	SUBQ $32, CX
+	JMP loop32
+loop8:
+	CMPQ CX, $8
+	JL done
+	VADDPS (SI), Y0, Y0
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP loop8
+done:
+	VADDPS Y1, Y0, Y0
+	VADDPS Y3, Y2, Y2
+	VADDPS Y2, Y0, Y0
+	VMOVUPS Y0, (DI)
+	VZEROUPPER
+	RET
+
 // func qdw3x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
 TEXT ·qdw3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVQ acc_base+0(FP), DI

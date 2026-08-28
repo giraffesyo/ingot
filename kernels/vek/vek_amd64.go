@@ -404,3 +404,32 @@ func flushSub(v float32) float32 {
 	}
 	return v
 }
+
+//go:noescape
+func mulblk8_asm(dst, src []float32, n int, s []float32)
+
+//go:noescape
+func sumblk8_asm(dst, src []float32, n int)
+
+// MulBlk8 computes dst = src * s, with the 8-lane channel pattern s repeated
+// across an nChw8c plane (per-channel scale). Tail elements use s[i%8].
+func MulBlk8(dst, src, s []float32) {
+	n := min(len(dst), len(src))
+	m := n &^ 7
+	if m > 0 {
+		mulblk8_asm(dst, src, m, s)
+	}
+	for i := m; i < n; i++ {
+		dst[i] = src[i] * s[i&7]
+	}
+}
+
+// SumBlk8 overwrites dst[0:8] with the per-lane sums of the 8-lane pattern
+// across an nChw8c plane src.
+func SumBlk8(dst, src []float32) {
+	m := len(src) &^ 7
+	sumblk8_asm(dst[:8], src, m)
+	for i := m; i < len(src); i++ {
+		dst[i&7] += src[i]
+	}
+}

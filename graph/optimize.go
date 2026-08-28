@@ -2211,13 +2211,15 @@ func blkAddEligible(n *Node) bool {
 	return true
 }
 
-// assignBlockedLayout rewrites regions of eligible depthwise/pointwise Convs
-// and same-shape residual Adds to run in nChw8c: a ToBlk8 wherever a region
-// consumes an NCHW value, blocked conv forms (and untouched Adds) inside, and
+// assignBlockedLayout rewrites regions of eligible depthwise/pointwise Convs,
+// same-shape residual Adds, and fused SE islands to run in nChw8c: a ToBlk8
+// wherever a region consumes an NCHW value, blocked forms inside, and
 // a FromBlk8 wherever a blocked value escapes to a consumer outside the
 // region or to a graph output. Growing through Adds keeps whole
 // inverted-residual stacks blocked instead of paying a FromBlk8/ToBlk8 round
-// trip at every skip connection. Regions with fewer than two convs don't pay
+// trip at every skip connection; likewise SE, whose op handles blocked
+// activations natively (its FC chain sees channels in natural order in both
+// layouts). Regions with fewer than two convs don't pay
 // for their conversion edges and stay NCHW. Runs once, after the rewrite loop
 // (blocked forms create no new fusion opportunities).
 func assignBlockedLayout(g *Graph, stats map[string]int) {
@@ -2247,16 +2249,18 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 			}
 		} else if blkAddEligible(n) && blkVal(n.Inputs[0]) && blkVal(n.Inputs[1]) {
 			blocked[n] = true
+		} else if n.OpType == "SE" && n.Domain == ingotDomain && blkVal(n.Inputs[0]) {
+			blocked[n] = true
 		}
 	}
 	if len(blocked) == 0 {
 		return
 	}
 	dataIn := func(n *Node) []*Value {
-		if kind[n] > 0 {
-			return n.Inputs[:1] // conv: weights/bias are const, not data edges
+		if n.OpType == "Add" {
+			return n.Inputs // both inputs are data
 		}
-		return n.Inputs // Add: both inputs are data
+		return n.Inputs[:1] // conv/SE: weights/bias are const, not data edges
 	}
 	// Group blocked nodes into connected regions (edges are blocked
 	// producer→consumer values) and prune regions with fewer than two convs.
@@ -2384,9 +2388,14 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 			ob.Consumers = append(inside, fromN)
 			after[n] = fromN
 		}
-		// Blocked node forms: convs are rewritten; Adds run unchanged.
+		// Blocked node forms: convs are rewritten; Adds and SE run unchanged
+		// (SE detects the blocked layout at runtime).
 		if kind[n] == 0 {
-			stats["blk-add"]++
+			if n.OpType == "SE" {
+				stats["blk-se"]++
+			} else {
+				stats["blk-add"]++
+			}
 			continue
 		}
 		attrs := ops.Attrs{}
