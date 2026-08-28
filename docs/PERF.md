@@ -1616,3 +1616,14 @@ references — the flag is a serving knob, never used in conformance,
 and only engages on CPUs where bf16 is a measured win (VDPBF16PS
 parts; Apple's quarter-rate BFMMLA never opts in). arm64 keeps its
 packed-A path for tests.
+
+## gptish_1k — the scale check (2026-08-28)
+
+gptish at T=1024 joins the zoo. Its causal mask is built at runtime by
+Expand+Trilu; the 4 MB Expand tripped fold-const's 1 MiB size guard and
+blocked fuse-sdpa entirely — the cap rises to 16 MiB (masks bake,
+blow-ups still refuse). Zen 5 pod: conformance 1.7e-06; **f32 37.6 ms,
+bf16 30.5 ms (−19%** vs T=256's −8% — conversion amortizes with K).
+Against ONNX Runtime on the same box: 1.47× ORT-16T, and ahead of ORT
+at matched 32 threads (30.5 vs 46.9 ms). The remaining gap at scale is
+ORT's flash attention and large-shape GEMM — the standing items.
