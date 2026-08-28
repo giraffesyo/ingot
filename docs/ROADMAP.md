@@ -122,8 +122,12 @@
       mv3_int8 −54% — x86 int8-vs-f32 gap 2.8× → 1.4×
 - [x] NCHWc SHIPPED end to end: kernels + assignBlockedLayout — mv2 −32%
       (beats ORT-32T), effnet −31%; spatial-gated (≤224² static); det/rec
-      on pipeline by measurement. Follow-ups in DESIGN-nchwc.md (residual
-      Adds in chains, per-shape assignment, mv3 5×5 tuning)
+      on pipeline by measurement. Follow-ups in DESIGN-nchwc.md (blocked
+      SE, per-shape assignment, mv3 5×5 tuning)
+- [x] NCHWc regions: residual Adds run blocked (no kernel needed — same
+      permutation both sides); pass grows regions through Adds and fan-out
+      instead of linear chains — mv2 16 chains/32 conversions → 1 region/2,
+      Zen 5 mv2 −18% (2.53 ms, 1.6× ORT-32T), effnet −6%
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32

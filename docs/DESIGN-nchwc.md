@@ -44,11 +44,18 @@ a blocked direct-conv kernel, not a row-major GEMM reinterpretation.
    Zen 5 1.58× (32w) / 2.16× (8w); Apple 1.07× (the CNN gap was always
    an x86 story). Parallelism must chunk (pair × positions) — output
    pairs alone starve wide machines.
-3. ~~A layout-assignment pass~~ **DONE (assignBlockedLayout)**: maximal
-   chains ≥2 of eligible dw/pw convs, ToBlk8/FromBlk8 at edges, gated to
+3. ~~A layout-assignment pass~~ **DONE (assignBlockedLayout)**: regions
+   of eligible dw/pw convs grown through same-shape residual Adds (an
+   Add of two nChw8c operands is correct unchanged — both sides carry
+   the same permutation, so it needs no kernel), ToBlk8 at region
+   entries, FromBlk8 wherever a blocked value escapes (outside consumer
+   or graph output), regions with <2 convs pruned. Seeding gated to
    statically-known spatial ≤ 224² (large planes measured +39% worse —
    the pipeline GEMM wins there; dynamic-shape models stay put).
-   Follow-ups: residual Adds inside chains (blocked eltwise), per-shape
+   Growing through Adds turned mv2 from 16 chains / 32 conversions into
+   ONE region / 2 conversions (all 10 skip Adds blocked); effnet 16 chains → 7
+   regions, 33→47 blocked convs (SE islands still split it).
+   Follow-ups: blocked SE (would merge effnet's regions), per-shape
    assignment for dynamic models, mv3's 5×5-heavy chains (~neutral).
 4. The win must be re-proven per step against the pipeline it replaces;
    the fused dw+pw kill and this prototype both show intuition
