@@ -1,6 +1,6 @@
 # Design: NCHWc blocked-layout CNN execution
 
-Status: kernel program underway (2026-08-28) — steps 1 (blocked dw) and 2 (blocked pointwise) shipped.
+Status: kernel program underway (2026-08-28) — steps 1-3 shipped (blocked dw incl. s2/5x5 variants, blocked pointwise). Next: layout-assignment pass.
 
 ## Motivation
 
@@ -37,7 +37,8 @@ a blocked direct-conv kernel, not a row-major GEMM reinterpretation.
 1. ~~Dedicated NCHWc depthwise kernels~~ **DONE (vek.DwBlk8S1, 3×3 s1,
    AVX2 + NEON)**: isolated A/B on the mv2 mid-block shape — Zen 5
    44.2 → 6.6 µs (6.7×), Apple 18.4 → 8.1 µs (2.3×), padding included
-   on both sides. Stride-2 and 5×5 variants remain.
+   on both sides. Stride-2 and 5×5 variants: DONE (dwblkgen over (K,S),
+   dispatched via vek.DwBlk8; covers the zoo + OCR depthwise mix).
 2. ~~A blocked pointwise/1×1 kernel~~ **DONE (vek.PwBlk6x16, AVX2 +
    NEON)**. Full mv2 inverted-residual block, blocked vs pipeline:
    Zen 5 1.58× (32w) / 2.16× (8w); Apple 1.07× (the CNN gap was always
