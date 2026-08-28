@@ -1664,3 +1664,17 @@ Zen 5: SgemmPackedB single-thread 208 → **249–269 GFLOPS (+25%, at
 the register-probe peak)**; 1024×4096×1024 multi-threaded 2.7 TFLOPS.
 Models on the 32-worker pod unchanged (panel counts gate pairing off);
 narrower machines pair on transformer shapes.
+
+## KV-cache decode lands (steps 1–2) (2026-08-28)
+
+The decode design's first half is code: `ingot.SDPA` gains a cached
+form (K/V append to a per-node slot, queries attend causally over the
+cached range — no mask tensor, causality *is* the append position),
+and `Session.RunDecode` threads a caller-owned `Decode` state object
+through the otherwise unchanged executor. Slots allocate lazily at
+first Run (shapes are dynamic); one Decode per sequence; the Session
+stays immutable. Op-level and graph-level property tests reproduce a
+dense causal recompute to 2e-5 against a float64 oracle across
+prefill + single-token steps. Remaining: the fuse-sdpa cache variant
+behind CompileDecode (needs a dynamic-T export), the bf16 single-row
+GEMV where decode's memory-bound 2× lives, and decodebench vs ORT.
