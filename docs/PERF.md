@@ -1740,3 +1740,16 @@ included on both sides: **Zen 5 44.2 → 6.6 µs (6.7×), Apple
 the win required a real kernel, and now it exists. Next: the blocked
 pointwise kernel, then the layout pass that lets models live in this
 layout end to end.
+
+## NCHWc step 2: the blocked pointwise kernel (2026-08-28)
+
+`vek.PwBlk6x16` (AVX2 + NEON) completes the kernel pair. The full mv2
+inverted-residual block — pw expand, blocked dw, pw project — now runs
+**1.58× faster on Zen 5 at 32 workers (2.16× at 8)** and 1.07× on
+Apple versus the current pipeline, with per-call padding and layout
+kept honest on both sides. The narrow-layer parallelism lesson
+recurred on day one: pointwise over output pairs alone gave 6 tasks to
+32 workers; (pair × position-chunk) scheduling fixed it. What remains
+for model-level NCHWc: dw stride-2/5×5 variants, the layout-assignment
+pass, and integration — each to be A/B'd against the pipeline it
+replaces, per this project's standing rule.

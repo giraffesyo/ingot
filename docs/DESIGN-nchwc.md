@@ -1,6 +1,6 @@
 # Design: NCHWc blocked-layout CNN execution
 
-Status: kernel program started (2026-08-28) — step 1 (blocked depthwise) shipped.
+Status: kernel program underway (2026-08-28) — steps 1 (blocked dw) and 2 (blocked pointwise) shipped.
 
 ## Motivation
 
@@ -38,9 +38,11 @@ a blocked direct-conv kernel, not a row-major GEMM reinterpretation.
    AVX2 + NEON)**: isolated A/B on the mv2 mid-block shape — Zen 5
    44.2 → 6.6 µs (6.7×), Apple 18.4 → 8.1 µs (2.3×), padding included
    on both sides. Stride-2 and 5×5 variants remain.
-2. A blocked pointwise/1×1 kernel consuming [C/16][HW][16] with
-   pre-packed weights (close to the existing GEMM micro-kernel but with
-   the blocked operand order).
+2. ~~A blocked pointwise/1×1 kernel~~ **DONE (vek.PwBlk6x16, AVX2 +
+   NEON)**. Full mv2 inverted-residual block, blocked vs pipeline:
+   Zen 5 1.58× (32w) / 2.16× (8w); Apple 1.07× (the CNN gap was always
+   an x86 story). Parallelism must chunk (pair × positions) — output
+   pairs alone starve wide machines.
 3. A layout-assignment pass (insert NCHW↔NCHWc conversions at graph
    edges and non-conv ops, or teach the elementwise/pool ops the blocked
    layout — they are layout-agnostic per element).
