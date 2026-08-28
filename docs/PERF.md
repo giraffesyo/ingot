@@ -1646,3 +1646,21 @@ online bookkeeping cost (measured, T=256 stays dense).
 Zen 5 pod, gptish_1k: SDPA 11.15 → 7.9 ms, model 37.6 → **33.2 ms
 (−12%)**; stacked with bf16 weights: **26.0 ms — −31% from baseline
 and 1.25× ONNX Runtime-16T**. Conformance identical (1.7e-06).
+
+## Paired-panel AVX-512 kernel — 1T at machine peak (2026-08-28)
+
+The wide-tile project, done without the feared NR/packing surgery. The
+banked 6×16 AVX-512 kernel is load-port bound (broadcasts are loads:
+14 loads per 12 FMAs → ~78% ceiling, measured 208 of 266 GFLOPS/core).
+`microKernel2AVX512` sweeps **two adjacent packed panels** per call —
+each A broadcast feeds two FMAs (8 loads / 12 FMAs) — and adjacent
+panels are already contiguous in the pre-packed-B layout, so no pack
+format changed. Pairing lives at the scheduling level and only engages
+when enough pairs remain to feed every worker (the first cut paired
+unconditionally and starved 32 workers with 16 tasks — caught by the
+model A/B).
+
+Zen 5: SgemmPackedB single-thread 208 → **249–269 GFLOPS (+25%, at
+the register-probe peak)**; 1024×4096×1024 multi-threaded 2.7 TFLOPS.
+Models on the 32-worker pod unchanged (panel counts gate pairing off);
+narrower machines pair on transformer shapes.

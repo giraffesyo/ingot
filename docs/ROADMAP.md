@@ -138,8 +138,8 @@
       gptish_1k SDPA −29%, model −12%; +bf16 = 26.0 ms, 1.25× ORT-16T
 - [ ] bf16 decode-shaped benchmark (needs KV-cache design);
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
-      µkernel now auto-selected via init probe: Zen 5 +12-15% GEMM, gptish −13%;
-      next lever would be a wider tile, which changes NR/packing)
+      µkernel auto-probed; paired-panel 6×32 kernel: 1T at machine peak
+      +25%, no packing changes — pairing gated by worker feed)
 - [x] weight pre-packing (gemm.PackA, cached per conv op); lock-free par hand-off
       (rec_320 MT 5.5 → 2.7 ms — the hand-off was 78% of CPU samples)
 - [x] allocation-free run loop: inline tensor shapes + pooled headers, pooled
