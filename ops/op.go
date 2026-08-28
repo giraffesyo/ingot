@@ -32,12 +32,19 @@ type Ctx struct {
 type DecodeState struct {
 	Pos   int // tokens already cached (before this Run)
 	MaxT  int
+	BF16  bool // store K/V as bf16 (halved cache bandwidth; ~1e-2 accuracy)
 	Slots map[string]*DecodeSlot
 }
 
-// DecodeSlot is one attention node's cache: K and V as [H][MaxT][dh] f32.
+// DecodeBF16 reports whether decode caches default to bf16 storage on this
+// build (the INGOT_BF16 opt-in on CPUs where bf16 is a measured win).
+func DecodeBF16() bool { return bf16Weights }
+
+// DecodeSlot is one attention node's cache: K and V as [H][MaxT][dh], f32
+// or bf16 (bits<<16) depending on DecodeState.BF16.
 type DecodeSlot struct {
-	K, V []float32
+	K, V     []float32
+	K16, V16 []uint16
 }
 
 // Out returns the given tensors as an output slice backed by the context

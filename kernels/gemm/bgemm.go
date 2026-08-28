@@ -294,7 +294,7 @@ func BgemmWeights(m int, x []float32, ldx int, pb *BPackedB, y []float32, ldy in
 	tail := kg*bKG - k // padded k positions the kernel reads past x
 	cvt := func(r int) {
 		row := xb[r*kAl:]
-		bf16Row(row[:k], x[r*ldx:r*ldx+k])
+		BF16Row(row[:k], x[r*ldx:r*ldx+k])
 		if tail > 0 {
 			clear(row[k : k+tail])
 		}

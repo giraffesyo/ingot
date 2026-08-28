@@ -19,7 +19,7 @@ func (d *Decode) Pos() int { return d.state.Pos }
 // NewDecode creates decode state with capacity for maxT positions. Slots
 // allocate lazily on first use (shapes are only known at Run time).
 func (s *Session) NewDecode(maxT int) *Decode {
-	return &Decode{state: ops.DecodeState{MaxT: maxT, Slots: map[string]*ops.DecodeSlot{}}}
+	return &Decode{state: ops.DecodeState{MaxT: maxT, BF16: ops.DecodeBF16(), Slots: map[string]*ops.DecodeSlot{}}}
 }
 
 // RunDecode is Run with decode state attached: cached ingot.SDPA nodes

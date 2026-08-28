@@ -2,7 +2,8 @@
 
 package gemm
 
-func bf16Row(dst []uint16, src []float32) {
+// BF16Row converts src to bf16 into dst.
+func BF16Row(dst []uint16, src []float32) {
 	for i := 0; i < min(len(dst), len(src)); i++ {
 		dst[i] = F32ToBF16(src[i])
 	}

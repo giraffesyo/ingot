@@ -443,3 +443,32 @@ func TestWidenDeint(t *testing.T) {
 		}
 	}
 }
+
+func TestBF16DotAxpy(t *testing.T) {
+	for _, n := range []int{0, 1, 15, 16, 33, 100, 256} {
+		a := make([]float32, n)
+		b := make([]uint16, n)
+		dst := make([]float32, n)
+		ref := make([]float32, n)
+		for i := range a {
+			a[i] = float32(i%17)*0.25 - 2
+			b[i] = uint16(0x3f80 + i%64) // bf16 values near 1
+			dst[i] = float32(i % 5)
+			ref[i] = dst[i]
+		}
+		var want float32
+		for i := 0; i < n; i++ {
+			want += a[i] * math.Float32frombits(uint32(b[i])<<16)
+		}
+		if got := DotBF16(a, b); math.Abs(float64(got-want)) > 1e-4*math.Max(1, math.Abs(float64(want))) {
+			t.Fatalf("DotBF16 n=%d: got %g want %g", n, got, want)
+		}
+		AxpyBF16(dst, b, 0.5)
+		for i := 0; i < n; i++ {
+			ref[i] += 0.5 * math.Float32frombits(uint32(b[i])<<16)
+			if math.Abs(float64(dst[i]-ref[i])) > 1e-5 {
+				t.Fatalf("AxpyBF16 n=%d i=%d: got %g want %g", n, i, dst[i], ref[i])
+			}
+		}
+	}
+}

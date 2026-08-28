@@ -416,7 +416,14 @@ func (o *sdpaOp) runCached(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 	if slot == nil {
 		// First touch: sizes are only known at Run time. The executor is
 		// sequential within a Run, and each Decode owns its state.
-		slot = &DecodeSlot{K: make([]float32, H*st.MaxT*dh), V: make([]float32, H*st.MaxT*dh)}
+		slot = &DecodeSlot{}
+		if st.BF16 {
+			slot.K16 = make([]uint16, H*st.MaxT*dh)
+			slot.V16 = make([]uint16, H*st.MaxT*dh)
+		} else {
+			slot.K = make([]float32, H*st.MaxT*dh)
+			slot.V = make([]float32, H*st.MaxT*dh)
+		}
 		st.Slots[o.n.Name] = slot
 	}
 	if kn.Numel() != H*Tn*dh || vn.Numel() != H*Tn*dh {
@@ -426,8 +433,19 @@ func (o *sdpaOp) runCached(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 		return nil, o.n.Errorf("SDPA(cache): %d+%d exceeds MaxT %d", st.Pos, Tn, st.MaxT)
 	}
 	qf, kf, vf := q.F32(), kn.F32(), vn.F32()
-	// Append the new positions.
+	// Append the new positions (converting once when the cache is bf16).
 	for h := 0; h < H; h++ {
+		if st.BF16 {
+			if o.kLay == 1 { // kNew is [1,Tn,H,dh]
+				for t := 0; t < Tn; t++ {
+					gemm.BF16Row(slot.K16[(h*st.MaxT+st.Pos+t)*dh:(h*st.MaxT+st.Pos+t)*dh+dh], kf[(t*H+h)*dh:(t*H+h)*dh+dh])
+				}
+			} else {
+				gemm.BF16Row(slot.K16[(h*st.MaxT+st.Pos)*dh:(h*st.MaxT+st.Pos+Tn)*dh], kf[h*Tn*dh:(h+1)*Tn*dh])
+			}
+			gemm.BF16Row(slot.V16[(h*st.MaxT+st.Pos)*dh:(h*st.MaxT+st.Pos+Tn)*dh], vf[h*Tn*dh:(h+1)*Tn*dh])
+			continue
+		}
 		if o.kLay == 1 { // kNew is [1,Tn,H,dh]
 			for t := 0; t < Tn; t++ {
 				copy(slot.K[(h*st.MaxT+st.Pos+t)*dh:(h*st.MaxT+st.Pos+t)*dh+dh], kf[(t*H+h)*dh:(t*H+h)*dh+dh])
@@ -447,9 +465,25 @@ func (o *sdpaOp) runCached(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 		h, t := ht/Tn, ht%Tn
 		kv := st.Pos + t + 1 // causal: attend over [0, Pos+t]
 		row := sAll[wk*(st.Pos+Tn) : wk*(st.Pos+Tn)+kv]
+		qrow := qf[(h*Tn+t)*dh : (h*Tn+t+1)*dh]
+		if st.BF16 {
+			K := slot.K16[h*st.MaxT*dh:]
+			V := slot.V16[h*st.MaxT*dh:]
+			for j := 0; j < kv; j++ {
+				row[j] = o.scale * vek.DotBF16(qrow, K[j*dh:(j+1)*dh])
+			}
+			softmaxRow(row, row, false)
+			dst := of[(h*Tn+t)*dh : (h*Tn+t+1)*dh]
+			clear(dst)
+			for j := 0; j < kv; j++ {
+				if row[j] != 0 {
+					vek.AxpyBF16(dst, V[j*dh:(j+1)*dh], row[j])
+				}
+			}
+			return
+		}
 		K := slot.K[h*st.MaxT*dh:]
 		V := slot.V[h*st.MaxT*dh:]
-		qrow := qf[(h*Tn+t)*dh : (h*Tn+t+1)*dh]
 		// scores = scale·q·Kᵀ over the cached range (GEMV at Tn==1).
 		gemm.SgemmTSerial(false, true, 1, kv, dh, o.scale, qrow, dh, K, dh, 0, row, kv)
 		softmaxRow(row, row, false)
