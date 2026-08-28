@@ -1713,7 +1713,7 @@ func fuseSDPA(g *Graph, stats map[string]int) bool {
 // never turn a working graph into a broken one.
 //
 // A size guard skips folds that would inflate resident memory: the folded
-// outputs must fit in max(1 MiB, 8× the const input bytes). This permits
+// outputs must fit in max(16 MiB, 8× the const input bytes). This permits
 // scalar chains and weight-shaped transforms while refusing to bake a
 // broadcast blow-up (e.g. Expand of a scalar to an activation shape) into
 // the model.
@@ -1767,8 +1767,11 @@ func foldConst(g *Graph, stats map[string]int) bool {
 			outBytes += outs[i].Numel() * outs[i].DType().Size()
 		}
 		lim := 8 * inBytes
-		if lim < 1<<20 {
-			lim = 1 << 20
+		if lim < 16<<20 {
+			// The flat cap admits attention masks built at runtime by
+			// Expand+Trilu chains (4 MB at T=1024) — baking those unblocks
+			// fuse-sdpa — while still refusing unbounded broadcast blow-ups.
+			lim = 16 << 20
 		}
 		if !foldable || outBytes > lim {
 			continue

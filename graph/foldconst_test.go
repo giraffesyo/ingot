@@ -139,11 +139,11 @@ func TestFoldConstGraphOutput(t *testing.T) {
 }
 
 // TestFoldConstSizeGuard refuses to bake a broadcast blow-up (Expand of a
-// scalar to 2M elements = 8 MiB out of ~28 input bytes) into the model.
+// scalar to 8M elements = 32 MiB out of ~28 input bytes) into the model.
 func TestFoldConstSizeGuard(t *testing.T) {
 	tg := newTestGraph()
 	tg.constF32("s", nil, 3)
-	tg.constI64("shape", []int{3}, 1, 1024, 2048)
+	tg.constI64("shape", []int{3}, 1, 2048, 4096)
 	tg.node("Expand", []string{"s", "shape"}, "e")
 	tg.node("Add", []string{"x", "e"}, "y")
 	g := tg.finish([]string{"x"}, []string{"y"})

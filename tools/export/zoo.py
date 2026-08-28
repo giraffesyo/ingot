@@ -154,6 +154,7 @@ MODELS = {
     "segnet": lambda: export("segnet", SegNet(), [torch.randn(1, 3, 32, 32)], ["x"]),
     "llmblock": lambda: export("llmblock", LLMBlock(), [torch.randn(1, 12, 48)], ["x"]),
     "gptish": lambda: export("gptish", GPTish(), [torch.randn(1, 256, 512)], ["x"]),
+    "gptish_1k": lambda: export("gptish_1k", GPTish(), [torch.randn(1, 1024, 512)], ["x"]),
     "mobilenet_v2": lambda: _mv2(),
     "efficientnet_b0": lambda: _effnet(),
 }
