@@ -76,6 +76,7 @@ type sdpaOp struct {
 	scale            float32
 	strideOut        bool
 	cache            bool // decode form: K/V append to the Ctx.Decode slot
+	kLay             int  // decode form: 1 = kNew arrives [1,Tn,H,dh]
 	aLay, bLay, vLay int  // input layouts, see fuse-sdpa (0 = as-declared)
 
 	// Cached classification of the (constant) mask into (rows × sdpaBk)
@@ -390,6 +391,7 @@ func init() {
 	Register("ingot", "SDPA", 1, func(n NodeInfo) (Op, error) {
 		return &sdpaOp{n: n, scale: n.Attrs.Float("scale", 1), strideOut: n.Attrs.Int("stride_out", 0) != 0,
 			cache: n.Attrs.Int("cache", 0) != 0,
+			kLay:  int(n.Attrs.Int("k_layout", 0)),
 			aLay:  int(n.Attrs.Int("a_layout", 0)), bLay: int(n.Attrs.Int("b_layout", 0)), vLay: int(n.Attrs.Int("v_layout", 0))}, nil
 	})
 }
@@ -426,7 +428,13 @@ func (o *sdpaOp) runCached(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, err
 	qf, kf, vf := q.F32(), kn.F32(), vn.F32()
 	// Append the new positions.
 	for h := 0; h < H; h++ {
-		copy(slot.K[(h*st.MaxT+st.Pos)*dh:], kf[h*Tn*dh:(h+1)*Tn*dh])
+		if o.kLay == 1 { // kNew is [1,Tn,H,dh]
+			for t := 0; t < Tn; t++ {
+				copy(slot.K[(h*st.MaxT+st.Pos+t)*dh:(h*st.MaxT+st.Pos+t)*dh+dh], kf[(t*H+h)*dh:(t*H+h)*dh+dh])
+			}
+		} else {
+			copy(slot.K[(h*st.MaxT+st.Pos)*dh:], kf[h*Tn*dh:(h+1)*Tn*dh])
+		}
 		copy(slot.V[(h*st.MaxT+st.Pos)*dh:], vf[h*Tn*dh:(h+1)*Tn*dh])
 	}
 	out := ctx.NewUninit(tensor.F32, 1, H, Tn, dh)

@@ -33,3 +33,17 @@ func (s *Session) RunDecode(d *Decode, feeds map[string]*tensor.Tensor, tokens i
 	}
 	return res, err
 }
+
+// CompileDecode compiles g for autoregressive decode: after the standard
+// optimizer, the exporter attention cores with runtime-built causal masks
+// are rewritten to the cached ingot.SDPA form (see docs/DESIGN-kvcache.md)
+// and the orphaned mask chains removed. Run the result via RunDecode.
+func CompileDecode(g *Graph) (*Session, error) {
+	Optimize(g)
+	st := map[string]int{}
+	if fuseSDPADecode(g, st) {
+		dce(g, st)
+	}
+	renumber(g)
+	return CompileRaw(g)
+}
