@@ -1,6 +1,9 @@
 package ops
 
 import (
+	"math"
+	"sync"
+
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/kernels/vek"
@@ -73,6 +76,71 @@ type sdpaOp struct {
 	scale            float32
 	strideOut        bool
 	aLay, bLay, vLay int // input layouts, see fuse-sdpa (0 = as-declared)
+
+	// Cached classification of the (constant) mask into (rows × sdpaBk)
+	// blocks: 0 = clean (all zero), 1 = mixed, 2 = fully masked (skipped
+	// entirely — the upper triangle of a causal mask is ~half the work).
+	stMu   sync.Mutex
+	stMask *float32
+	stR    int
+	stTk   int
+	st     []uint8
+}
+
+// sdpaBk is the flash path's key-block width.
+const sdpaBk = 128
+
+const (
+	blkClean = iota
+	blkMixed
+	blkMasked
+)
+
+// blockStates classifies mask blocks for the (rows, Tk) geometry, cached on
+// the op (the mask is a graph constant).
+func (o *sdpaOp) blockStates(mask []float32, T, Tk, rows int) []uint8 {
+	o.stMu.Lock()
+	defer o.stMu.Unlock()
+	if o.stMask == &mask[0] && o.stR == rows && o.stTk == Tk {
+		return o.st
+	}
+	nRow := (T + rows - 1) / rows
+	nKb := (Tk + sdpaBk - 1) / sdpaBk
+	st := make([]uint8, nRow*nKb)
+	negInf := float32(math.Inf(-1))
+	for rt := 0; rt < nRow; rt++ {
+		t0 := rt * rows
+		tcnt := min(rows, T-t0)
+		for kb := 0; kb < nKb; kb++ {
+			k0 := kb * sdpaBk
+			kc := min(sdpaBk, Tk-k0)
+			masked, clean := true, true
+			for t := t0; t < t0+tcnt && (masked || clean); t++ {
+				row := mask[t*Tk+k0 : t*Tk+k0+kc]
+				for _, v := range row {
+					if v != 0 {
+						clean = false
+					}
+					if v != negInf {
+						masked = false
+					}
+					if !masked && !clean {
+						break
+					}
+				}
+			}
+			switch {
+			case masked:
+				st[rt*nKb+kb] = blkMasked
+			case clean:
+				st[rt*nKb+kb] = blkClean
+			default:
+				st[rt*nKb+kb] = blkMixed
+			}
+		}
+	}
+	o.stMask, o.stR, o.stTk, o.st = &mask[0], rows, Tk, st
+	return st
 }
 
 func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
@@ -136,7 +204,18 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if nRow == 1 {
 		gemmT = gemm.SgemmT // untiled: let big per-head GEMMs fan out
 	}
-	sT := ctx.NewUninit(tensor.F32, workers, rows*Tk)
+	// Flash path: masked attention at long Tk streams key blocks with an
+	// online softmax — fully-masked blocks (the causal upper triangle,
+	// ~half the work) are skipped outright, and the working set per tile
+	// drops from rows×Tk to rows×Bk.
+	flash := mask != nil && Tk >= 4*sdpaBk // fewer blocks: skip savings < online-softmax overhead (T=256 measured flat-to-worse)
+	var st []uint8
+	scratchPer := rows * Tk
+	if flash {
+		st = o.blockStates(mask, T, Tk, rows)
+		scratchPer = rows*sdpaBk + rows*dh + 2*rows
+	}
+	sT := ctx.NewUninit(tensor.F32, workers, scratchPer)
 	sAll := sT.F32()
 	par.For(B*H*nRow, attnGrain(rows, Tk, dh), func(task, wk int) {
 		bh, rc := task/nRow, task%nRow
@@ -161,6 +240,97 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		vb, vldb := vf[(b*H+h)*Tk*dh:], dh
 		if o.vLay == 1 {
 			vb, vldb = vf[(b*Tk*H+h)*dh:], H*dh
+		}
+		if flash {
+			buf := sAll[wk*scratchPer:]
+			sblk := buf[:rows*sdpaBk]
+			acc := buf[rows*sdpaBk : rows*sdpaBk+rows*dh]
+			mrow := buf[rows*sdpaBk+rows*dh : rows*sdpaBk+rows*dh+rows]
+			lrow := buf[rows*sdpaBk+rows*dh+rows:]
+			clear(acc[:tc*dh])
+			nKb := (Tk + sdpaBk - 1) / sdpaBk
+			stRow := st[rc*nKb:]
+			for i := 0; i < tc; i++ {
+				mrow[i] = float32(math.Inf(-1))
+				lrow[i] = 0
+			}
+			for kb := 0; kb < nKb; kb++ {
+				state := stRow[kb]
+				if state == blkMasked {
+					continue
+				}
+				k0 := kb * sdpaBk
+				kc := min(sdpaBk, Tk-k0)
+				var bkb []float32
+				switch o.bLay {
+				case 1:
+					bkb = bb[k0*H*dh:]
+				case 2:
+					bkb = bb[k0*dh:]
+				default:
+					bkb = bb[k0:]
+				}
+				gemmT(false, bT, tc, kc, dh, o.scale, ab, alda, bkb, bldb, 0, sblk, kc)
+				for i := 0; i < tc; i++ {
+					row := sblk[i*kc : (i+1)*kc]
+					if state == blkMixed {
+						vek.Add(row, row, mask[(t0+i)*Tk+k0:(t0+i)*Tk+k0+kc])
+					}
+					mb := row[0]
+					for _, v := range row[1:] {
+						if v > mb {
+							mb = v
+						}
+					}
+					mnew := mrow[i]
+					if mb > mnew {
+						mnew = mb
+					}
+					vek.AddScalar(row, row, -mnew)
+					vek.Exp(row, row)
+					// Flush the saturated exp of masked entries (1.2e-38) to
+					// zero in the sum pass — their products in the acc GEMM
+					// would be subnormal on x86 (the softmax ambush).
+					var sum float32
+					for j, v := range row {
+						if v < 1e-30 {
+							row[j] = 0
+							continue
+						}
+						sum += v
+					}
+					if mrow[i] != mnew {
+						if lrow[i] != 0 {
+							sc := expf(mrow[i] - mnew)
+							lrow[i] *= sc
+							vek.MulScalar(acc[i*dh:(i+1)*dh], acc[i*dh:(i+1)*dh], sc)
+						}
+						mrow[i] = mnew
+					}
+					lrow[i] += sum
+				}
+				var vkb []float32
+				if o.vLay == 1 {
+					vkb = vb[k0*H*dh:]
+				} else {
+					vkb = vb[k0*dh:]
+				}
+				gemmT(false, false, tc, dh, kc, 1, sblk, kc, vkb, vldb, 1, acc, dh)
+			}
+			for i := 0; i < tc; i++ {
+				inv := float32(0)
+				if lrow[i] != 0 {
+					inv = 1 / lrow[i]
+				}
+				var dst []float32
+				if o.strideOut {
+					dst = of[((b*T+t0+i)*H+h)*dh:]
+				} else {
+					dst = of[((b*H+h)*T+t0+i)*dh:]
+				}
+				vek.MulScalar(dst[:dh], acc[i*dh:(i+1)*dh], inv)
+			}
+			return
 		}
 		s := sAll[wk*rows*Tk:]
 		gemmT(false, bT, tc, Tk, dh, o.scale, ab, alda, bb, bldb, 0, s, Tk)
@@ -218,3 +388,5 @@ func init() {
 			aLay: int(n.Attrs.Int("a_layout", 0)), bLay: int(n.Attrs.Int("b_layout", 0)), vLay: int(n.Attrs.Int("v_layout", 0))}, nil
 	})
 }
+
+func expf(x float32) float32 { return float32(math.Exp(float64(x))) }
