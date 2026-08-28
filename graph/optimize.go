@@ -1959,3 +1959,176 @@ func fuseSE(g *Graph, stats map[string]int) bool {
 	g.compact(dead)
 	return changed
 }
+
+// causalMaskChain reports whether v is a runtime-built causal mask:
+// Expand(-inf scalar, [T,T]) → Trilu(upper=1, k=1). Dynamic-shape exports
+// build the mask per run; the decode form drops it (causality is the append
+// position) and DCE removes the chain.
+func causalMaskChain(v *Value) bool {
+	tr := v.Producer
+	if tr == nil || tr.OpType != "Trilu" || tr.Domain != "" || tr.Attrs.Int("upper", 1) != 1 {
+		return false
+	}
+	if len(tr.Inputs) < 2 || tr.Inputs[1] == nil || tr.Inputs[1].Const == nil {
+		return false
+	}
+	k := tr.Inputs[1].Const
+	if k.DType() != tensor.I64 || k.Numel() != 1 || k.I64()[0] != 1 {
+		return false
+	}
+	ex := tr.Inputs[0].Producer
+	if ex == nil || ex.OpType != "Expand" || ex.Domain != "" {
+		return false
+	}
+	sc := ex.Inputs[0]
+	if sc == nil || sc.Const == nil || sc.Const.DType() != tensor.F32 || sc.Const.Numel() != 1 {
+		return false
+	}
+	f := sc.Const.F32()[0]
+	return math.IsInf(float64(f), -1)
+}
+
+// fuseSDPADecode rewrites the exporter attention core into the cached
+// ingot.SDPA form for autoregressive decode: the runtime-built causal mask
+// is dropped (the cached op is causal by construction), cache=1 is set, and
+// no transpose peeling happens (the cached op wants [1,H,T,dh] inputs).
+func fuseSDPADecode(g *Graph, stats map[string]int) bool {
+	dead := map[*Node]bool{}
+	changed := false
+	for _, sm := range g.Nodes {
+		if dead[sm] || sm.OpType != "Softmax" || sm.Domain != "" {
+			continue
+		}
+		if ax := sm.Attrs.Int("axis", -1); ax != -1 && ax != 3 {
+			continue
+		}
+		scale := 1.0
+		cur := sm.Inputs[0]
+		var mid []*Node
+		matched := false
+		for i := 0; i < 2; i++ {
+			p := cur.Producer
+			if p == nil || dead[p] || p.Domain != "" || g.soleConsumer(cur) == nil {
+				break
+			}
+			if p.OpType == "Add" && len(p.Inputs) == 2 && !matched {
+				var mv *Value
+				var xv *Value
+				switch {
+				case p.Inputs[1] != nil && causalMaskChain(p.Inputs[1]):
+					mv, xv = p.Inputs[1], p.Inputs[0]
+				case p.Inputs[0] != nil && causalMaskChain(p.Inputs[0]):
+					mv, xv = p.Inputs[0], p.Inputs[1]
+				}
+				if mv == nil {
+					break
+				}
+				matched = true
+				mid = append(mid, p)
+				cur = xv
+				continue
+			}
+			if x, c, right, ok := binaryWithConst(p); ok && (p.OpType == "Mul" || (p.OpType == "Div" && right && c != 0)) {
+				if p.OpType == "Mul" {
+					scale *= float64(c)
+				} else {
+					scale /= float64(c)
+				}
+				mid = append(mid, p)
+				cur = x
+				continue
+			}
+			break
+		}
+		if !matched {
+			continue
+		}
+		mm1 := cur.Producer
+		if mm1 == nil || dead[mm1] || mm1.OpType != "MatMul" || mm1.Domain != "" || g.soleConsumer(mm1.Outputs[0]) == nil {
+			continue
+		}
+		mm2 := g.soleConsumer(sm.Outputs[0])
+		if mm2 == nil || dead[mm2] || mm2.OpType != "MatMul" || mm2.Inputs[0] != sm.Outputs[0] {
+			continue
+		}
+		// mm1's B input is Kᵀ: peel the transpose to reach K itself. The
+		// legacy export transposes [1,H,T,dh] with [0,1,3,2] (k_layout 0);
+		// the dynamo export builds Kᵀ straight from the [1,T,H,dh] view
+		// with [0,2,3,1] (k_layout 1 — the append reads it strided).
+		kv := mm1.Inputs[1]
+		kLay := 0
+		var ktr *Node
+		if t := transProducer(g, kv, dead, 0, 1, 3, 2); t != nil {
+			ktr = t
+			kv = t.Inputs[0]
+		} else if t := transProducer(g, kv, dead, 0, 2, 3, 1); t != nil {
+			ktr = t
+			kv = t.Inputs[0]
+			kLay = 1
+		} else {
+			continue // cached form needs K reachable behind a transpose
+		}
+		av := mm1.Inputs[0]
+		vv := mm2.Inputs[1]
+		out := mm2.Outputs[0]
+		drop := append(mid, sm, mm2, ktr)
+		host := mm1
+		ins := []*Value{av, kv, vv}
+		for _, v := range ins {
+			v.Consumers = append(v.Consumers, host)
+		}
+		oldIns := host.Inputs
+		for _, n2 := range drop {
+			dead[n2] = true
+			g.dropNode(n2)
+		}
+		for _, v := range oldIns {
+			if v != nil {
+				removeConsumer(v, host)
+			}
+		}
+		mid1 := host.Outputs[0]
+		delete(g.Values, mid1.Name)
+		g.Values[out.Name] = out
+		host.OpType, host.Domain = "SDPA", ingotDomain
+		host.Attrs = ops.Attrs{
+			"scale":    fattr(float32(scale)),
+			"cache":    {Kind: ops.KindInt, I: 1},
+			"k_layout": {Kind: ops.KindInt, I: int64(kLay)},
+		}
+		host.Inputs = ins
+		host.Outputs = []*Value{out}
+		out.Producer = host
+		g.Opsets[ingotDomain] = 1
+		stats["fuse-sdpa-cache"]++
+		changed = true
+	}
+	g.compact(dead)
+	return changed
+}
+
+// dce removes nodes whose outputs are entirely unconsumed and not graph
+// outputs (the decode rewrite orphans the mask-construction chain).
+func dce(g *Graph, stats map[string]int) {
+	for {
+		dead := map[*Node]bool{}
+		for _, n := range g.Nodes {
+			live := false
+			for _, v := range n.Outputs {
+				if v != nil && (len(v.Consumers) > 0 || g.isOutput(v)) {
+					live = true
+					break
+				}
+			}
+			if !live {
+				dead[n] = true
+				g.dropNode(n)
+				stats["dce"]++
+			}
+		}
+		if len(dead) == 0 {
+			return
+		}
+		g.compact(dead)
+	}
+}

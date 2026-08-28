@@ -12,12 +12,13 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "..", "testdata", "models")
 os.makedirs(OUT, exist_ok=True)
 torch.manual_seed(0); np.random.seed(0)
 
-def export(name, model, inputs, input_names, opset=17):
+def export(name, model, inputs, input_names, opset=17, dynamic_shapes=None):
     model.eval()
     path = os.path.join(OUT, name + ".onnx")
     try:
         torch.onnx.export(model, tuple(inputs), path, input_names=input_names,
-                          output_names=["out"], opset_version=opset, do_constant_folding=True)
+                          output_names=["out"], opset_version=opset, do_constant_folding=True,
+                          dynamic_shapes=dynamic_shapes)
     except Exception as e:
         print(f"{name}: EXPORT FAILED: {e}")
         return
@@ -155,6 +156,8 @@ MODELS = {
     "llmblock": lambda: export("llmblock", LLMBlock(), [torch.randn(1, 12, 48)], ["x"]),
     "gptish": lambda: export("gptish", GPTish(), [torch.randn(1, 256, 512)], ["x"]),
     "gptish_1k": lambda: export("gptish_1k", GPTish(), [torch.randn(1, 1024, 512)], ["x"]),
+    "gptish_dyn": lambda: export("gptish_dyn", GPTish(), [torch.randn(1, 256, 512)], ["x"],
+                                 dynamic_shapes={"x": {1: torch.export.Dim("T", min=2, max=2048)}}),
     "mobilenet_v2": lambda: _mv2(),
     "efficientnet_b0": lambda: _effnet(),
 }
