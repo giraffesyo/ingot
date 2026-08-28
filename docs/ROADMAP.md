@@ -131,7 +131,8 @@
       ALU; Bgemm sq512 1484 GFLOPS = 2.6× f32 Sgemm — bf16 verdict flips on x86
 - [x] bf16 weights wired (INGOT_BF16=1, MatMul): rows-kernel v2 (no A pack) —
       gptish −8% on Zen 5, ≈1.27× ORT; accuracy 7e-3 documented, serving-only
-- [ ] bf16: Gemm op wiring (bertish/vit); decode-shaped benchmark;
+- [x] bf16 Gemm wiring (post-added beta*C; bertish −3%, toy-scale flat)
+- [ ] bf16 decode-shaped benchmark;
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
       µkernel now auto-selected via init probe: Zen 5 +12-15% GEMM, gptish −13%;
       next lever would be a wider tile, which changes NR/packing)
