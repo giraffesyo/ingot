@@ -2010,6 +2010,63 @@ loop:
 done:
 	RET
 
+// func dwblk8s1_asm(dst, src, w []float32, ncols, wp int)
+TEXT ·dwblk8s1_asm(SB), NOSPLIT, $0-88
+	MOVD dst_base+0(FP), R0
+	MOVD src_base+24(FP), R1
+	MOVD w_base+48(FP), R2
+	MOVD ncols+72(FP), R3
+	MOVD wp+80(FP), R4
+	LSL $5, R4, R4 // row stride bytes (wp*8*4)
+	VLD1.P 64(R2), [V8.S4, V9.S4, V10.S4, V11.S4]
+	VLD1.P 64(R2), [V12.S4, V13.S4, V14.S4, V15.S4]
+	VLD1.P 64(R2), [V16.S4, V17.S4, V18.S4, V19.S4]
+	VLD1.P 64(R2), [V20.S4, V21.S4, V22.S4, V23.S4]
+	VLD1 (R2), [V24.S4, V25.S4]
+	MOVD R1, R5
+	ADD R4, R1, R6
+	ADD R4, R6, R7
+blk8loop:
+	CBZ R3, blk8done
+	MOVD R5, R8
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x6E28DC40 // fmul v0 = v2*v8
+	WORD $0x6E29DC61 // fmul v1 = v3*v9
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E2ACC40 // fmla v0 += v2*v10
+	WORD $0x4E2BCC61 // fmla v1 += v3*v11
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E2CCC40 // fmla v0 += v2*v12
+	WORD $0x4E2DCC61 // fmla v1 += v3*v13
+	MOVD R6, R8
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E2ECC40 // fmla v0 += v2*v14
+	WORD $0x4E2FCC61 // fmla v1 += v3*v15
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E30CC40 // fmla v0 += v2*v16
+	WORD $0x4E31CC61 // fmla v1 += v3*v17
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E32CC40 // fmla v0 += v2*v18
+	WORD $0x4E33CC61 // fmla v1 += v3*v19
+	MOVD R7, R8
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E34CC40 // fmla v0 += v2*v20
+	WORD $0x4E35CC61 // fmla v1 += v3*v21
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E36CC40 // fmla v0 += v2*v22
+	WORD $0x4E37CC61 // fmla v1 += v3*v23
+	VLD1.P 32(R8), [V2.S4, V3.S4]
+	WORD $0x4E38CC40 // fmla v0 += v2*v24
+	WORD $0x4E39CC61 // fmla v1 += v3*v25
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	ADD $32, R5, R5
+	ADD $32, R6, R6
+	ADD $32, R7, R7
+	SUB $1, R3, R3
+	B blk8loop
+blk8done:
+	RET
+
 // func qdw3x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
 TEXT ·qdw3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVD acc_base+0(FP), R0
