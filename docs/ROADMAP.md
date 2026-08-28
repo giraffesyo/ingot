@@ -136,7 +136,8 @@
       fold-const cap 16 MiB for runtime-built masks
 - [x] flash SDPA (online softmax, causal block skip, Bk=128, ≥4-block gate):
       gptish_1k SDPA −29%, model −12%; +bf16 = 26.0 ms, 1.25× ORT-16T
-- [ ] bf16 decode-shaped benchmark (needs KV-cache design);
+- [ ] KV-cache/decode: design written (docs/DESIGN-kvcache.md, 4 steps —
+      Decode state object, cached-SDPA form, bf16 GEMV row kernel, decodebench);
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
       µkernel auto-probed; paired-panel 6×32 kernel: 1T at machine peak
       +25%, no packing changes — pairing gated by worker feed)
