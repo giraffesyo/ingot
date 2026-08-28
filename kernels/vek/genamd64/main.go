@@ -310,6 +310,7 @@ func main() {
 	g.dotbf16()
 	g.axpybf16()
 	g.dwblk8()
+	g.pwblk()
 	for _, k := range [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}} {
 		g.qdw(k[0], k[1])
 	}
@@ -892,6 +893,57 @@ func (g *gen) dwblk8() {
 	g.w("\tDECQ CX")
 	g.w("\tJMP loop")
 	g.w("done:")
+	g.w("\tVZEROUPPER")
+	g.w("\tRET")
+	g.w("")
+}
+
+// pwblk: channel-blocked 1x1 conv micro-kernel — 6 spatial positions x 16
+// output channels (two 8-blocks). x is nChw8c [cb][P][8]; weights packed
+// [ci over Cin][16] for this output pair. Per input channel: 2 weight loads
+// + 6 broadcasts feed 12 FMAs (the paired-panel load ratio, applied from
+// day one).
+func (g *gen) pwblk() {
+	g.w("// func pwblk6x16_asm(dst0, dst1, x, w []float32, cin, xbstride int)")
+	g.w("// dst0/dst1: 6 positions x 8 each; x: base at position 0 of block 0;")
+	g.w("// xbstride: bytes between input channel blocks; w: [cin][16].")
+	g.w("TEXT ·pwblk6x16_asm(SB), NOSPLIT, $0-112")
+	g.w("\tMOVQ dst0_base+0(FP), DI")
+	g.w("\tMOVQ dst1_base+24(FP), SI")
+	g.w("\tMOVQ x_base+48(FP), DX")
+	g.w("\tMOVQ w_base+72(FP), BX")
+	g.w("\tMOVQ cin+96(FP), CX")
+	g.w("\tMOVQ xbstride+104(FP), R10")
+	for r := 0; r < 12; r++ {
+		g.w("\tVXORPS Y%d, Y%d, Y%d", r, r, r)
+	}
+	g.w("\tMOVQ DX, R8  // current block base")
+	g.w("\tXORQ R9, R9  // ci within block")
+	g.w("pwloop:")
+	g.w("\tTESTQ CX, CX")
+	g.w("\tJE pwdone")
+	g.w("\tVMOVUPS (BX), Y12")
+	g.w("\tVMOVUPS 32(BX), Y13")
+	g.w("\tADDQ $64, BX")
+	g.w("\tLEAQ (R8)(R9*4), R11 // &x[block][0][ci]")
+	for p := 0; p < 6; p++ {
+		g.w("\tVBROADCASTSS %d(R11), Y14", p*32)
+		g.w("\tVFMADD231PS Y14, Y12, Y%d", 2*p)
+		g.w("\tVFMADD231PS Y14, Y13, Y%d", 2*p+1)
+	}
+	g.w("\tINCQ R9")
+	g.w("\tCMPQ R9, $8")
+	g.w("\tJL pwnext")
+	g.w("\tXORQ R9, R9")
+	g.w("\tADDQ R10, R8")
+	g.w("pwnext:")
+	g.w("\tDECQ CX")
+	g.w("\tJMP pwloop")
+	g.w("pwdone:")
+	for p := 0; p < 6; p++ {
+		g.w("\tVMOVUPS Y%d, %d(DI)", 2*p, p*32)
+		g.w("\tVMOVUPS Y%d, %d(SI)", 2*p+1, p*32)
+	}
 	g.w("\tVZEROUPPER")
 	g.w("\tRET")
 	g.w("")

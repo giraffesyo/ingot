@@ -1058,6 +1058,79 @@ done:
 	VZEROUPPER
 	RET
 
+// func pwblk6x16_asm(dst0, dst1, x, w []float32, cin, xbstride int)
+// dst0/dst1: 6 positions x 8 each; x: base at position 0 of block 0;
+// xbstride: bytes between input channel blocks; w: [cin][16].
+TEXT ·pwblk6x16_asm(SB), NOSPLIT, $0-112
+	MOVQ dst0_base+0(FP), DI
+	MOVQ dst1_base+24(FP), SI
+	MOVQ x_base+48(FP), DX
+	MOVQ w_base+72(FP), BX
+	MOVQ cin+96(FP), CX
+	MOVQ xbstride+104(FP), R10
+	VXORPS Y0, Y0, Y0
+	VXORPS Y1, Y1, Y1
+	VXORPS Y2, Y2, Y2
+	VXORPS Y3, Y3, Y3
+	VXORPS Y4, Y4, Y4
+	VXORPS Y5, Y5, Y5
+	VXORPS Y6, Y6, Y6
+	VXORPS Y7, Y7, Y7
+	VXORPS Y8, Y8, Y8
+	VXORPS Y9, Y9, Y9
+	VXORPS Y10, Y10, Y10
+	VXORPS Y11, Y11, Y11
+	MOVQ DX, R8  // current block base
+	XORQ R9, R9  // ci within block
+pwloop:
+	TESTQ CX, CX
+	JE pwdone
+	VMOVUPS (BX), Y12
+	VMOVUPS 32(BX), Y13
+	ADDQ $64, BX
+	LEAQ (R8)(R9*4), R11 // &x[block][0][ci]
+	VBROADCASTSS 0(R11), Y14
+	VFMADD231PS Y14, Y12, Y0
+	VFMADD231PS Y14, Y13, Y1
+	VBROADCASTSS 32(R11), Y14
+	VFMADD231PS Y14, Y12, Y2
+	VFMADD231PS Y14, Y13, Y3
+	VBROADCASTSS 64(R11), Y14
+	VFMADD231PS Y14, Y12, Y4
+	VFMADD231PS Y14, Y13, Y5
+	VBROADCASTSS 96(R11), Y14
+	VFMADD231PS Y14, Y12, Y6
+	VFMADD231PS Y14, Y13, Y7
+	VBROADCASTSS 128(R11), Y14
+	VFMADD231PS Y14, Y12, Y8
+	VFMADD231PS Y14, Y13, Y9
+	VBROADCASTSS 160(R11), Y14
+	VFMADD231PS Y14, Y12, Y10
+	VFMADD231PS Y14, Y13, Y11
+	INCQ R9
+	CMPQ R9, $8
+	JL pwnext
+	XORQ R9, R9
+	ADDQ R10, R8
+pwnext:
+	DECQ CX
+	JMP pwloop
+pwdone:
+	VMOVUPS Y0, 0(DI)
+	VMOVUPS Y1, 0(SI)
+	VMOVUPS Y2, 32(DI)
+	VMOVUPS Y3, 32(SI)
+	VMOVUPS Y4, 64(DI)
+	VMOVUPS Y5, 64(SI)
+	VMOVUPS Y6, 96(DI)
+	VMOVUPS Y7, 96(SI)
+	VMOVUPS Y8, 128(DI)
+	VMOVUPS Y9, 128(SI)
+	VMOVUPS Y10, 160(DI)
+	VMOVUPS Y11, 160(SI)
+	VZEROUPPER
+	RET
+
 // func qdw3x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
 TEXT ·qdw3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVQ acc_base+0(FP), DI

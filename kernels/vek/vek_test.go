@@ -494,3 +494,32 @@ func TestDwBlk8S1(t *testing.T) {
 		}
 	}
 }
+
+func TestPwBlk6x16(t *testing.T) {
+	for _, cin := range []int{8, 16, 96, 576} {
+		nb := cin / 8
+		const pos = 6
+		x := make([]float32, nb*pos*8)
+		w := make([]float32, cin*16)
+		for i := range x {
+			x[i] = float32(i%19)*0.05 - 0.4
+		}
+		for i := range w {
+			w[i] = float32(i%23)*0.04 - 0.5
+		}
+		g0 := make([]float32, pos*8)
+		g1 := make([]float32, pos*8)
+		w0 := make([]float32, pos*8)
+		w1 := make([]float32, pos*8)
+		PwBlk6x16(g0, g1, x, w, cin, pos*8*4)
+		pwBlkRef(w0, w1, x, w, cin, pos*8*4)
+		for i := range w0 {
+			if d := g0[i] - w0[i]; d > 1e-3 || d < -1e-3 {
+				t.Fatalf("cin=%d dst0[%d]: got %g want %g", cin, i, g0[i], w0[i])
+			}
+			if d := g1[i] - w1[i]; d > 1e-3 || d < -1e-3 {
+				t.Fatalf("cin=%d dst1[%d]: got %g want %g", cin, i, g1[i], w1[i])
+			}
+		}
+	}
+}
