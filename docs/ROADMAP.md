@@ -141,7 +141,8 @@
 - [x] decode e2e: CompileDecode (causal-chain mask proof + DCE), gptish_dyn
       dynamic-T export, decodebench — 1.71 ms/token flat (1.10 bf16), 3.4-17×
       over naive recompute
-- [ ] decode polish: bf16 K/V cache + single-row VDPBF16PS attention GEMV;
+- [x] decode polish: bf16 K/V cache + SIMD DotBF16/AxpyBF16 — 1.042 ms/token
+      (−39% vs f32 decode); DotBF16 no longer scalar on amd64
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
       µkernel auto-probed; paired-panel 6×32 kernel: 1T at machine peak
       +25%, no packing changes — pairing gated by worker feed)

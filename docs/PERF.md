@@ -1701,3 +1701,15 @@ Zen 5 pod, idle, prefill 128 + 384 generated tokens:
 layers deliver their memory-bound win exactly where the design
 predicted. Remaining polish: bf16 K/V cache storage and a dedicated
 single-row VDPBF16PS kernel for the attention GEMVs.
+
+## Decode polish: bf16 K/V cache (2026-08-28)
+
+The design's final step. Decode caches store K/V as bf16 when the
+INGOT_BF16 opt-in engages — converted once at append — and the
+attention GEMVs read them through two new amd64 vek kernels: a SIMD
+DotBF16 (previously scalar on amd64, so this also speeds the existing
+bf16 GEMV path) and AxpyBF16. Zen 5, gptish_dyn, prefill 128 + 384
+tokens: f32 1.70 → bf16 weights 1.10 → **weights + cache 1.042
+ms/token (−39% total)**, with the cache's share growing with context
+length. Both storage modes run the incremental property test against
+the float64 oracle.
