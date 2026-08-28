@@ -9,3 +9,9 @@ var microKernel = microKernelARM64
 //
 //go:noescape
 func microKernelARM64(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)
+
+func pairKernel() bool { return false }
+
+func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool) {
+	panic("gemm: paired kernel not available")
+}

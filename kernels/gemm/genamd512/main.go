@@ -94,5 +94,61 @@ func main() {
 	}
 	w("\tVZEROUPPER")
 	w("\tRET")
+
+	// Paired-panel kernel: 6×32 (two adjacent NR=16 panels). Each A broadcast
+	// feeds two FMAs, cutting the load:FMA ratio from 14:12 (the banked 6×16
+	// kernel's ceiling — broadcasts are loads) to 8:12.
+	w("")
+	w("// func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool)")
+	w("// 6x32 tile over two adjacent packed panels; c covers 32 columns.")
+	w("TEXT ·microKernel2AVX512(SB), NOSPLIT, $0-113")
+	w("\tMOVQ kc+0(FP), DX")
+	w("\tMOVQ ap_base+8(FP), AX")
+	w("\tMOVQ bp0_base+32(FP), BX")
+	w("\tMOVQ bp1_base+56(FP), SI")
+	w("\tMOVQ c_base+80(FP), CX")
+	w("\tMOVQ ldc+104(FP), DI")
+	w("\tSHLQ $2, DI")
+	w("\tMOVBQZX accumulate+112(FP), R14")
+	w("\tMOVQ CX, R8")
+	w("\tLEAQ (R8)(DI*1), R9")
+	w("\tLEAQ (R9)(DI*1), R10")
+	w("\tLEAQ (R10)(DI*1), R11")
+	w("\tLEAQ (R11)(DI*1), R12")
+	w("\tLEAQ (R12)(DI*1), R13")
+	rows2 := []string{"R8", "R9", "R10", "R11", "R12", "R13"}
+	w("\tTESTQ R14, R14")
+	w("\tJZ p2zero")
+	for r := 0; r < MR; r++ {
+		w("\tVMOVUPS (%s), Z%d", rows2[r], 2*r)
+		w("\tVMOVUPS 64(%s), Z%d", rows2[r], 2*r+1)
+	}
+	w("\tJMP p2loop")
+	w("p2zero:")
+	for r := 0; r < 2*MR; r++ {
+		w("\tVXORPS Z%d, Z%d, Z%d", r, r, r)
+	}
+	w("p2loop:")
+	w("\tTESTQ DX, DX")
+	w("\tJZ p2done")
+	w("\tVMOVUPS (BX), Z16")
+	w("\tVMOVUPS (SI), Z17")
+	w("\tADDQ $64, BX")
+	w("\tADDQ $64, SI")
+	for r := 0; r < MR; r++ {
+		w("\tVBROADCASTSS %d(AX), Z18", r*4)
+		w("\tVFMADD231PS Z18, Z16, Z%d", 2*r)
+		w("\tVFMADD231PS Z18, Z17, Z%d", 2*r+1)
+	}
+	w("\tADDQ $24, AX")
+	w("\tDECQ DX")
+	w("\tJMP p2loop")
+	w("p2done:")
+	for r := 0; r < MR; r++ {
+		w("\tVMOVUPS Z%d, (%s)", 2*r, rows2[r])
+		w("\tVMOVUPS Z%d, 64(%s)", 2*r+1, rows2[r])
+	}
+	w("\tVZEROUPPER")
+	w("\tRET")
 	os.Stdout.WriteString(b.String())
 }

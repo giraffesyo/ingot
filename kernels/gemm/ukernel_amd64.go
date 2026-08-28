@@ -97,3 +97,10 @@ func microKernelAVX2(kc int, ap, bp []float32, c []float32, ldc int, accumulate 
 
 //go:noescape
 func microKernelAVX512(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)
+
+//go:noescape
+func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool)
+
+// pairKernel reports whether the paired-panel 6x32 kernel should be used
+// (adjacent full panels, avx512 active).
+func pairKernel() bool { return ActiveKernel == "avx512" }

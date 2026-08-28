@@ -12,12 +12,13 @@ import (
 // par.Task for the three parallel phases (pack B, pack A, macro-kernel) so a
 // call allocates nothing in steady state.
 type gemmCtx struct {
-	pb    *PackedB    // pre-packed B for the small-M sweep (nil: pack per panel)
-	a     []float32   // packed A block: MC*KC (MR-padded)
-	b     []float32   // packed B panel: KC*NC (NR-padded)
-	tiles [][]float32 // per-worker MR*NR edge tiles
-	bpans [][]float32 // per-worker KC*NR B panels (small-M path)
-	asm   []float32   // small-M path: all of A packed, [kBlock][mPanel][KC*MR]
+	pb       *PackedB    // pre-packed B for the small-M sweep (nil: pack per panel)
+	pairMode bool        // sweep panels in pairs with the 6×32 kernel
+	a        []float32   // packed A block: MC*KC (MR-padded)
+	b        []float32   // packed B panel: KC*NC (NR-padded)
+	tiles    [][]float32 // per-worker MR*NR edge tiles
+	bpans    [][]float32 // per-worker KC*NR B panels (small-M path)
+	asm      []float32   // small-M path: all of A packed, [kBlock][mPanel][KC*MR]
 
 	phase int // phasePackB, phasePackA, phaseMacro, phaseSmallPackA, phaseSmallM
 
@@ -276,14 +277,26 @@ func (g *gemmCtx) smallM(m, n, k int, a, b, c []float32, firstOverwrite bool, wo
 // smallMSweep runs the N-panel sweep of the small-M path over g.asm.
 func (g *gemmCtx) smallMSweep(m, k, workers int) {
 	g.phase = phaseSmallM
+	// Pairing halves the task count: only pair when enough pairs remain to
+	// keep every worker busy (or the sweep is single-threaded anyway).
+	g.pairMode = g.pb != nil && g.alpha == 1 && pairKernel() && g.nPanels >= 2 &&
+		(workers == 1 || (g.nPanels+1)/2 >= 2*workers)
+	tasks := g.nPanels
+	if g.pairMode {
+		tasks = (g.nPanels + 1) / 2
+	}
 	if workers > 1 {
 		grain := max(1, macroTaskMACs/(NR*m*k))
-		par.Run(g.nPanels, grain, g)
+		if g.pairMode {
+			grain = max(1, grain/2)
+		}
+		par.Run(tasks, grain, g)
 	} else {
-		for t := 0; t < g.nPanels; t++ {
+		for t := 0; t < tasks; t++ {
 			g.smallMTask(t, 0)
 		}
 	}
+	g.pairMode = false
 }
 
 func (g *gemmCtx) smallPackA(t int) {
@@ -301,8 +314,27 @@ func (g *gemmCtx) smallPackA(t int) {
 
 // smallMTask computes C[:, panel t] over the whole k range: for each k block
 // it packs the B panel into this worker's buffer and sweeps the A panels.
+// spill writes a scratch MR×NR tile into C (mr rows, nr cols), accumulating
+// when acc.
+func (g *gemmCtx) spill(tile, cptr []float32, mr, nr int, acc bool) {
+	for r := 0; r < mr; r++ {
+		row := cptr[r*g.ldc : r*g.ldc+nr]
+		tr := tile[r*NR : r*NR+nr]
+		if acc {
+			for q := range row {
+				row[q] += tr[q]
+			}
+		} else {
+			copy(row, tr)
+		}
+	}
+}
+
 func (g *gemmCtx) smallMTask(t, w int) {
 	jp := t
+	if g.pairMode {
+		jp = 2 * t
+	}
 	nr := min(NR, g.nc-jp*NR)
 	bp := g.bpans[w]
 	if bp == nil {
@@ -311,6 +343,36 @@ func (g *gemmCtx) smallMTask(t, w int) {
 	}
 	ldc := g.ldc
 	nkb := (g.kc + KC - 1) / KC
+	// Paired-panel fast path: with pre-packed B and the AVX-512 kernel the
+	// next panel is adjacent in memory — a 6×32 kernel halves the broadcast
+	// loads per FMA (the banked 6×16 kernel is load-port bound at ~78% of
+	// peak). Scheduling pairs the panels (smallMSweep halves the task
+	// count); an odd final panel or narrow edge falls through to singles.
+	if g.pairMode && jp+1 < g.nPanels && min(NR, g.nc-(jp+1)*NR) == NR {
+		ldc := g.ldc
+		for kb := 0; kb < nkb; kb++ {
+			p0 := kb * KC
+			kc := min(KC, g.kc-p0)
+			bp0 := g.pb.data[(kb*g.pb.np+jp)*KC*NR:]
+			bp1 := g.pb.data[(kb*g.pb.np+jp+1)*KC*NR:]
+			acc := g.acc || kb > 0
+			for ip := 0; ip < g.mPanels; ip++ {
+				mr := min(MR, g.mc-ip*MR)
+				apan := g.asm[(kb*g.mPanels+ip)*KC*MR:]
+				cptr := g.cblk[ip*MR*ldc+jp*NR:]
+				if mr == MR {
+					microKernel2AVX512(kc, apan, bp0, bp1, cptr, ldc, acc)
+					continue
+				}
+				tile := g.tiles[w]
+				microKernel(kc, apan, bp0, tile, NR, false)
+				g.spill(tile, cptr, mr, NR, acc)
+				microKernel(kc, apan, bp1, tile, NR, false)
+				g.spill(tile, cptr[NR:], mr, NR, acc)
+			}
+		}
+		return
+	}
 	for kb := 0; kb < nkb; kb++ {
 		p0 := kb * KC
 		kc := min(KC, g.kc-p0)

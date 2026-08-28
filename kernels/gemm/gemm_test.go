@@ -292,3 +292,23 @@ func TestSgemmPackedB(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkSgemmPackedB(b *testing.B) {
+	r := rand.New(rand.NewPCG(41, 42))
+	for _, sh := range []struct{ m, n, k int }{
+		{256, 512, 512}, {256, 1376, 512}, {1024, 4096, 1024},
+	} {
+		a := randMat(r, sh.m*sh.k)
+		bm := randMat(r, sh.k*sh.n)
+		c := make([]float32, sh.m*sh.n)
+		pb := PackB(false, sh.k, sh.n, bm, sh.n)
+		b.Run(fmt.Sprintf("m%d_n%d_k%d", sh.m, sh.n, sh.k), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				SgemmPackedB(sh.m, 1, a, sh.k, pb, 0, c, sh.n)
+			}
+			flops := 2 * float64(sh.m) * float64(sh.n) * float64(sh.k)
+			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+	}
+}
