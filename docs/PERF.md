@@ -1678,3 +1678,26 @@ dense causal recompute to 2e-5 against a float64 oracle across
 prefill + single-token steps. Remaining: the fuse-sdpa cache variant
 behind CompileDecode (needs a dynamic-T export), the bf16 single-row
 GEMV where decode's memory-bound 2× lives, and decodebench vs ORT.
+
+## Decode, end to end (2026-08-28)
+
+The KV-cache design's remaining steps: `CompileDecode` rewrites
+exporter attention into the cached form when the mask is a provably
+causal runtime chain (Expand(−inf) → Trilu(upper, k=1)) and removes
+the orphaned mask construction; `gptish_dyn` (torch.export.Dim) joins
+the zoo because static exports bake T into Reshape constants. The E2E
+test drives prefill + single-token steps and matches the stateless
+full-sequence run position for position.
+
+Zen 5 pod, idle, prefill 128 + 384 generated tokens:
+
+| mode                  | ms/token          |
+|-----------------------|-------------------|
+| decode (f32)          | 1.71, flat        |
+| decode + INGOT_BF16   | **1.10** (−36%)   |
+| naive full recompute  | 5.8 → 29.9 (pos 128→512) |
+
+3.4×–17× over recompute and widening with position; the bf16 dense
+layers deliver their memory-bound win exactly where the design
+predicted. Remaining polish: bf16 K/V cache storage and a dedicated
+single-row VDPBF16PS kernel for the attention GEMVs.
