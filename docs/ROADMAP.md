@@ -138,8 +138,10 @@
       gptish_1k SDPA −29%, model −12%; +bf16 = 26.0 ms, 1.25× ORT-16T
 - [x] KV-cache steps 1-2: cached ingot.SDPA + Session.RunDecode, property-
       tested vs dense causal oracle (2e-5)
-- [ ] KV-cache steps 3-4: CompileDecode + dynamic-T export, bf16 single-row
-      GEMV, decodebench vs ORT;
+- [x] decode e2e: CompileDecode (causal-chain mask proof + DCE), gptish_dyn
+      dynamic-T export, decodebench — 1.71 ms/token flat (1.10 bf16), 3.4-17×
+      over naive recompute
+- [ ] decode polish: bf16 K/V cache + single-row VDPBF16PS attention GEMV;
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
       µkernel auto-probed; paired-panel 6×32 kernel: 1T at machine peak
       +25%, no packing changes — pairing gated by worker feed)
