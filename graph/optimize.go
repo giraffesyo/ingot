@@ -2190,18 +2190,41 @@ func blkEligible(n *Node) int {
 	return 2
 }
 
-// assignBlockedLayout rewrites maximal chains (length >= 2) of eligible
-// depthwise/pointwise Convs to run in nChw8c: a ToBlk8 before the chain,
-// blocked conv forms inside, FromBlk8 after. Runs once, after the rewrite
-// loop (chains do not create new fusion opportunities).
+// blkAddEligible reports whether n is a plain same-shape rank-4 Add. On two
+// nChw8c operands such an Add computes the correct blocked result unchanged
+// (both sides carry the same permutation), so it can live inside a blocked
+// region. Operand dtype is f32 by construction: blocked values trace back to
+// blocked conv outputs through other blocked Adds.
+func blkAddEligible(n *Node) bool {
+	if n.OpType != "Add" || n.Domain != "" || len(n.Inputs) != 2 {
+		return false
+	}
+	a, b := n.Inputs[0], n.Inputs[1]
+	if a == nil || b == nil || !a.HasShape || !b.HasShape || len(a.Shape) != 4 || len(b.Shape) != 4 {
+		return false
+	}
+	for i := range a.Shape {
+		if a.Shape[i] != b.Shape[i] || a.Shape[i] <= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// assignBlockedLayout rewrites regions of eligible depthwise/pointwise Convs
+// and same-shape residual Adds to run in nChw8c: a ToBlk8 wherever a region
+// consumes an NCHW value, blocked conv forms (and untouched Adds) inside, and
+// a FromBlk8 wherever a blocked value escapes to a consumer outside the
+// region or to a graph output. Growing through Adds keeps whole
+// inverted-residual stacks blocked instead of paying a FromBlk8/ToBlk8 round
+// trip at every skip connection. Regions with fewer than two convs don't pay
+// for their conversion edges and stay NCHW. Runs once, after the rewrite loop
+// (blocked forms create no new fusion opportunities).
 func assignBlockedLayout(g *Graph, stats map[string]int) {
 	kind := map[*Node]int{}
 	for _, n := range g.Nodes {
 		kind[n] = blkEligible(n)
 	}
-	inChain := map[*Node]bool{}
-	type chain struct{ nodes []*Node }
-	var chains []chain
 	staticSmall := func(v *Value) bool {
 		if !v.HasShape || len(v.Shape) != 4 {
 			return false
@@ -2209,102 +2232,187 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 		h, w := v.Shape[2], v.Shape[3]
 		return h > 0 && w > 0 && h*w <= 224*224
 	}
+	// Mark candidate nodes in topological order. A conv joins when its
+	// activation input is already blocked, or seeds a new region at small
+	// static spatial extents (blocked layout pays at small planes; at
+	// det-scale planes the pipeline's near-peak GEMM wins — measured +39%
+	// regression — and dynamic-shape models stay on the pipeline). An Add
+	// joins when both inputs are blocked.
+	blocked := map[*Node]bool{}
+	blkVal := func(v *Value) bool { return v != nil && v.Producer != nil && blocked[v.Producer] }
 	for _, n := range g.Nodes {
-		if kind[n] == 0 || inChain[n] {
-			continue
-		}
-		// n starts a chain only if its input is not itself a chain-eligible
-		// sole-producer (then it would be discovered from the head).
-		if p := n.Inputs[0].Producer; p != nil && kind[p] != 0 && g.soleConsumer(n.Inputs[0]) == n {
-			continue
-		}
-		// Blocked layout pays at small spatial sizes; at det-scale planes
-		// the pipeline's near-peak GEMM wins (measured +39% regression).
-		// Dynamic-shape models (unknown H/W) stay on the pipeline.
-		if !staticSmall(n.Inputs[0]) {
-			continue
-		}
-		c := chain{nodes: []*Node{n}}
-		cur := n
-		for {
-			u := g.soleConsumer(cur.Outputs[0])
-			if u == nil || kind[u] == 0 || u.Inputs[0] != cur.Outputs[0] {
-				break
+		if kind[n] > 0 {
+			if blkVal(n.Inputs[0]) || staticSmall(n.Inputs[0]) {
+				blocked[n] = true
 			}
-			c.nodes = append(c.nodes, u)
-			cur = u
-		}
-		if len(c.nodes) >= 2 {
-			for _, m := range c.nodes {
-				inChain[m] = true
-			}
-			chains = append(chains, c)
+		} else if blkAddEligible(n) && blkVal(n.Inputs[0]) && blkVal(n.Inputs[1]) {
+			blocked[n] = true
 		}
 	}
-	if len(chains) == 0 {
+	if len(blocked) == 0 {
 		return
 	}
-	before := map[*Node]*Node{} // conv head → ToBlk8 to insert before it
-	after := map[*Node]*Node{}  // conv tail → FromBlk8 to insert after it
-	for _, c := range chains {
-		head, tail := c.nodes[0], c.nodes[len(c.nodes)-1]
-		// ToBlk8: x → xb
-		x := head.Inputs[0]
-		xb := newConst(g, x.Name+"_blk", tensor.New(tensor.F32)) // placeholder value; fixed below
-		xb.Const = nil
-		xb.HasShape = false
-		toN := &Node{Name: head.Name + "_toblk", OpType: "ToBlk8", Domain: ingotDomain, Attrs: ops.Attrs{}}
-		toN.Inputs = []*Value{x}
-		toN.Outputs = []*Value{xb}
-		xb.Producer = toN
-		removeConsumer(x, head)
-		x.Consumers = append(x.Consumers, toN)
-		xb.Consumers = []*Node{head}
-		head.Inputs[0] = xb
-		before[head] = toN
-		// FromBlk8: tail's output value stays the graph-visible NCHW value;
-		// the chain's internal value becomes a fresh blocked one.
-		out := tail.Outputs[0]
-		ob := newConst(g, out.Name+"_blk", tensor.New(tensor.F32))
-		ob.Const = nil
-		ob.HasShape = false
-		fromN := &Node{Name: tail.Name + "_fromblk", OpType: "FromBlk8", Domain: ingotDomain, Attrs: ops.Attrs{}}
-		tail.Outputs[0] = ob
-		ob.Producer = tail
-		fromN.Inputs = []*Value{ob}
-		ob.Consumers = []*Node{fromN}
-		fromN.Outputs = []*Value{out}
-		out.Producer = fromN
-		after[tail] = fromN
-		// Rewrite the convs.
-		for _, m := range c.nodes {
-			attrs := ops.Attrs{}
-			for _, name := range []string{"ingot_act", "ingot_act_alpha", "ingot_act_beta", "ingot_post_scale", "ingot_post_shift"} {
-				if a, ok := m.Attrs[name]; ok {
-					attrs[name] = a
+	dataIn := func(n *Node) []*Value {
+		if kind[n] > 0 {
+			return n.Inputs[:1] // conv: weights/bias are const, not data edges
+		}
+		return n.Inputs // Add: both inputs are data
+	}
+	// Group blocked nodes into connected regions (edges are blocked
+	// producer→consumer values) and prune regions with fewer than two convs.
+	compID := map[*Node]int{}
+	var comps [][]*Node
+	for _, n := range g.Nodes {
+		if !blocked[n] || compID[n] != 0 {
+			continue
+		}
+		id := len(comps) + 1
+		compID[n] = id
+		queue := []*Node{n}
+		var comp []*Node
+		for len(queue) > 0 {
+			m := queue[0]
+			queue = queue[1:]
+			comp = append(comp, m)
+			for _, v := range dataIn(m) {
+				if p := v.Producer; p != nil && blocked[p] && compID[p] == 0 {
+					compID[p] = id
+					queue = append(queue, p)
 				}
 			}
-			if kind[m] == 1 {
-				ws := m.Inputs[1].Const.Shape()
-				strides := m.Attrs.Ints("strides", []int64{1, 1})
-				attrs["kernel"] = ops.Attr{Kind: ops.KindInt, I: int64(ws[2])}
-				attrs["stride"] = ops.Attr{Kind: ops.KindInt, I: strides[0]}
-				attrs["pads"] = ops.Attr{Kind: ops.KindInts, Ints: append([]int64(nil), m.Attrs.Ints("pads", []int64{0, 0, 0, 0})...)}
-				m.OpType = "ConvDwBlk"
-			} else {
-				m.OpType = "ConvPwBlk"
+			for _, c := range m.Outputs[0].Consumers {
+				if blocked[c] && compID[c] == 0 {
+					compID[c] = id
+					queue = append(queue, c)
+				}
 			}
-			m.Domain = ingotDomain
-			m.Attrs = attrs
-			stats["assign-blk"]++
 		}
+		comps = append(comps, comp)
+	}
+	regions := 0
+	for _, comp := range comps {
+		convs := 0
+		for _, m := range comp {
+			if kind[m] > 0 {
+				convs++
+			}
+		}
+		if convs < 2 {
+			for _, m := range comp {
+				delete(blocked, m)
+			}
+			continue
+		}
+		regions++
+	}
+	if regions == 0 {
+		return
+	}
+	// Rewrite. Values produced inside a region keep their identity and simply
+	// carry blocked tensors at runtime; fresh values are created only at the
+	// conversion edges (matching the executor's expectation that graph-visible
+	// names stay NCHW).
+	before := map[*Node][]*Node{} // node → ToBlk8 conversions to insert before it
+	after := map[*Node]*Node{}    // node → FromBlk8 to insert after it
+	toBlk := map[*Value]*Value{}  // NCHW entry value → shared blocked twin
+	newBlkVal := func(base string) *Value {
+		v := newConst(g, base+"_blk", tensor.New(tensor.F32)) // placeholder value
+		v.Const = nil
+		v.HasShape = false
+		return v
+	}
+	for _, n := range g.Nodes {
+		if !blocked[n] {
+			continue
+		}
+		// Entry edges: an NCHW input gets a ToBlk8, shared across the region.
+		in := dataIn(n)
+		for i := range in {
+			v := n.Inputs[i]
+			if v.Producer != nil && blocked[v.Producer] {
+				continue // produced blocked in-region
+			}
+			vb := toBlk[v]
+			if vb == nil {
+				vb = newBlkVal(v.Name)
+				toN := &Node{Name: n.Name + "_toblk", OpType: "ToBlk8", Domain: ingotDomain, Attrs: ops.Attrs{}}
+				toN.Inputs = []*Value{v}
+				toN.Outputs = []*Value{vb}
+				vb.Producer = toN
+				v.Consumers = append(v.Consumers, toN)
+				before[n] = append(before[n], toN)
+				toBlk[v] = vb
+			}
+			removeConsumer(v, n)
+			vb.Consumers = append(vb.Consumers, n)
+			n.Inputs[i] = vb
+		}
+		// Exit edge: if the output escapes the region (an unblocked consumer
+		// or a graph output), the node writes a fresh blocked value and a
+		// FromBlk8 restores the original NCHW value for the outside world.
+		out := n.Outputs[0]
+		escapes := g.isOutput(out)
+		for _, c := range out.Consumers {
+			if !blocked[c] {
+				escapes = true
+			}
+		}
+		if escapes {
+			ob := newBlkVal(out.Name)
+			n.Outputs[0] = ob
+			ob.Producer = n
+			fromN := &Node{Name: n.Name + "_fromblk", OpType: "FromBlk8", Domain: ingotDomain, Attrs: ops.Attrs{}}
+			fromN.Inputs = []*Value{ob}
+			fromN.Outputs = []*Value{out}
+			out.Producer = fromN
+			var inside, outside []*Node
+			for _, c := range out.Consumers {
+				if blocked[c] {
+					inside = append(inside, c)
+				} else {
+					outside = append(outside, c)
+				}
+			}
+			for _, c := range inside {
+				for i, iv := range c.Inputs {
+					if iv == out {
+						c.Inputs[i] = ob
+					}
+				}
+			}
+			out.Consumers = outside
+			ob.Consumers = append(inside, fromN)
+			after[n] = fromN
+		}
+		// Blocked node forms: convs are rewritten; Adds run unchanged.
+		if kind[n] == 0 {
+			stats["blk-add"]++
+			continue
+		}
+		attrs := ops.Attrs{}
+		for _, name := range []string{"ingot_act", "ingot_act_alpha", "ingot_act_beta", "ingot_post_scale", "ingot_post_shift"} {
+			if a, ok := n.Attrs[name]; ok {
+				attrs[name] = a
+			}
+		}
+		if kind[n] == 1 {
+			ws := n.Inputs[1].Const.Shape()
+			strides := n.Attrs.Ints("strides", []int64{1, 1})
+			attrs["kernel"] = ops.Attr{Kind: ops.KindInt, I: int64(ws[2])}
+			attrs["stride"] = ops.Attr{Kind: ops.KindInt, I: strides[0]}
+			attrs["pads"] = ops.Attr{Kind: ops.KindInts, Ints: append([]int64(nil), n.Attrs.Ints("pads", []int64{0, 0, 0, 0})...)}
+			n.OpType = "ConvDwBlk"
+		} else {
+			n.OpType = "ConvPwBlk"
+		}
+		n.Domain = ingotDomain
+		n.Attrs = attrs
+		stats["assign-blk"]++
 	}
 	// Rebuild the node list with conversions inserted in topological place.
-	nodes := make([]*Node, 0, len(g.Nodes)+2*len(chains))
+	nodes := make([]*Node, 0, len(g.Nodes)+2*regions)
 	for _, n := range g.Nodes {
-		if t := before[n]; t != nil {
-			nodes = append(nodes, t)
-		}
+		nodes = append(nodes, before[n]...)
 		nodes = append(nodes, n)
 		if f := after[n]; f != nil {
 			nodes = append(nodes, f)
@@ -2312,5 +2420,5 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 	}
 	g.Nodes = nodes
 	g.Opsets[ingotDomain] = 1
-	stats["blk-chains"] += len(chains)
+	stats["blk-regions"] += regions
 }

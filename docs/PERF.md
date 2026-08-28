@@ -1772,3 +1772,33 @@ ONNX Runtime at matched 32 threads (4.05) — **efficientnet_b0
 untouched by design. The x86 CNN project that began as a 3× deficit
 and three failed intuitions closes its first model-level chapter with
 conformance identical and the mechanism fully understood.
+
+## NCHWc regions: residual Adds join the blocked layout (2026-08-28)
+
+The chain-based pass paid a FromBlk8/ToBlk8 round trip at every skip
+connection: a residual Add sat outside the chain, so each
+inverted-residual block converted twice. But an Add of two nChw8c
+operands is correct *unchanged* — both sides carry the same permutation
+and the same-shape fast path is rank-agnostic — so the Add needs no
+kernel at all, only layout bookkeeping.
+
+`assignBlockedLayout` now grows *regions* instead of linear chains: a
+conv joins when its activation input is already blocked (or seeds at
+small static spatial, as before), a same-shape rank-4 Add joins when
+both inputs are blocked, and values may fan out to several blocked
+consumers. ToBlk8 appears only where a region consumes an NCHW value,
+FromBlk8 only where a blocked value escapes (an outside consumer or a
+graph output); regions with fewer than two convs are pruned.
+mobilenet_v2 collapses from 16 chains / 32 conversions to **one region
+/ 2 conversions** with all 10 skip Adds blocked; efficientnet_b0 goes
+from 16 chains (33 convs) to 7 regions (47 convs, 9 Adds) — SE islands
+still split it.
+
+Zen 5 pod, idle, interleaved medians of 6: **mobilenet_v2 3.09 →
+2.53 ms (−18%)** — 1.6× faster than ONNX Runtime at matched 32 threads
+(4.05) — **efficientnet_b0 4.95 → 4.65 ms (−6.2%)**. mv3_small,
+resnetish, tiny_conv flat within ±1.5% (no regions in either build —
+clean controls). Apple M-series (loaded box, directional): mv2 −12%,
+effnet −4%. Conformance and optimizer A/B identical. Next lever from
+here: a blocked SE form, which would merge efficientnet's 7 regions
+into ~1 and drop 12 more conversion pairs.
