@@ -1,6 +1,6 @@
 # Design: NCHWc blocked-layout CNN execution
 
-Status: kernel program underway (2026-08-28) — steps 1-3 shipped (blocked dw incl. s2/5x5 variants, blocked pointwise). Next: layout-assignment pass.
+Status: SHIPPED end to end (2026-08-28) — kernels (steps 1-3) + layout assignment + model integration. mv2 −32%, effnet −31% on Zen 5; spatial-size gate keeps large-plane/dynamic models (det/rec) on the pipeline where its GEMM wins.
 
 ## Motivation
 
@@ -44,9 +44,12 @@ a blocked direct-conv kernel, not a row-major GEMM reinterpretation.
    Zen 5 1.58× (32w) / 2.16× (8w); Apple 1.07× (the CNN gap was always
    an x86 story). Parallelism must chunk (pair × positions) — output
    pairs alone starve wide machines.
-3. A layout-assignment pass (insert NCHW↔NCHWc conversions at graph
-   edges and non-conv ops, or teach the elementwise/pool ops the blocked
-   layout — they are layout-agnostic per element).
+3. ~~A layout-assignment pass~~ **DONE (assignBlockedLayout)**: maximal
+   chains ≥2 of eligible dw/pw convs, ToBlk8/FromBlk8 at edges, gated to
+   statically-known spatial ≤ 224² (large planes measured +39% worse —
+   the pipeline GEMM wins there; dynamic-shape models stay put).
+   Follow-ups: residual Adds inside chains (blocked eltwise), per-shape
+   assignment for dynamic models, mv3's 5×5-heavy chains (~neutral).
 4. The win must be re-proven per step against the pipeline it replaces;
    the fused dw+pw kill and this prototype both show intuition
    mispredicts on cached-activation workloads.
