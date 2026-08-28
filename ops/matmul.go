@@ -3,6 +3,7 @@ package ops
 import (
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/par"
+	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
 	"os"
 	"sync"
@@ -67,6 +68,36 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	if !o.transA {
 		if pb := o.bCache.get(o.transB, K, N, b.F32(), b.Dim(1)); pb != nil {
+			if bp16 := o.bCache.getBF16(b.F32()); bp16 != nil && o.alpha == 1 {
+				// bf16 overwrites (beta=0 semantics): the bias preload above
+				// is redone as a post-add of beta*C.
+				gemm.BgemmWeights(M, a.F32(), a.Dim(1), bp16, of, N, true)
+				if beta != 0 {
+					c := in[2]
+					cs := c.Shape()
+					cf := c.F32()
+					switch {
+					case cs.Numel() == M*N:
+						for i := range of {
+							of[i] += beta * cf[i]
+						}
+					case cs.Numel() == N:
+						for i := 0; i < M; i++ {
+							row := of[i*N : (i+1)*N]
+							for j := range row {
+								row[j] += beta * cf[j]
+							}
+						}
+					case cs.Numel() == M:
+						for i := 0; i < M; i++ {
+							vek.AddScalar(of[i*N:(i+1)*N], of[i*N:(i+1)*N], beta*cf[i])
+						}
+					default: // scalar
+						vek.AddScalar(of, of, beta*cf[0])
+					}
+				}
+				return ctx.Out(out), nil
+			}
 			gemm.SgemmPackedB(M, o.alpha, a.F32(), a.Dim(1), pb, beta, of, N)
 			return ctx.Out(out), nil
 		}
