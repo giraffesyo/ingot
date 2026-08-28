@@ -309,7 +309,9 @@ func main() {
 	g.qlut()
 	g.dotbf16()
 	g.axpybf16()
-	g.dwblk8()
+	for _, ks := range [][2]int{{3, 1}, {3, 2}, {5, 1}, {5, 2}} {
+		g.dwblkgen(ks[0], ks[1])
+	}
 	g.pwblk()
 	for _, k := range [][2]int{{3, 3}, {5, 5}, {3, 2}, {3, 1}, {5, 3}, {5, 2}} {
 		g.qdw(k[0], k[1])
@@ -854,45 +856,65 @@ func (g *gen) axpybf16() {
 	g.w("")
 }
 
-// dwblk8: one output row of a 3x3 stride-1 depthwise conv in channel-blocked
-// layout ([row][col][8] f32, spatially pre-padded src). The 9 tap-weight
-// vectors live in registers; each output column is 9 loads + 9 FMAs + 1
-// store — single pass, the NCHWc design's core claim.
-func (g *gen) dwblk8() {
-	g.w("// func dwblk8s1_asm(dst, src, w []float32, ncols, wp int)")
-	g.w("// dst: [ncols][8]; src: padded rows base [3 rows x wp cols x 8]; w: [9][8].")
-	g.w("TEXT ·dwblk8s1_asm(SB), NOSPLIT, $0-88")
+// dwblkgen emits one output row of a KxK stride-S depthwise conv in
+// channel-blocked layout ([.][8] f32, spatially pre-padded src). 3x3 keeps
+// its 9 tap vectors in registers; 5x5's 25 stream from L1 (w operand reads
+// fold into the FMAs). Stride 2 advances the source two blocks per output.
+func (g *gen) dwblkgen(K, S int) {
+	name := fmt.Sprintf("dwblk8k%ds%d", K, S)
+	rows := []string{"SI", "DX", "R8", "R9", "R10"}[:K]
+	g.w("// func %s_asm(dst, src, w []float32, ncols, wp int)", name)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-88", name)
 	g.w("\tMOVQ dst_base+0(FP), DI")
 	g.w("\tMOVQ src_base+24(FP), SI")
 	g.w("\tMOVQ w_base+48(FP), BX")
 	g.w("\tMOVQ ncols+72(FP), CX")
 	g.w("\tMOVQ wp+80(FP), AX")
 	g.w("\tSHLQ $5, AX // row stride in bytes (wp*8*4)")
-	for t := 0; t < 9; t++ {
-		g.w("\tVMOVUPS %d(BX), Y%d", t*32, 7+t)
+	for r := 1; r < K; r++ {
+		if r == 1 {
+			g.w("\tLEAQ (SI)(AX*1), %s", rows[1])
+		} else {
+			g.w("\tLEAQ (%s)(AX*1), %s", rows[r-1], rows[r])
+		}
 	}
-	g.w("\tLEAQ (SI)(AX*1), DX  // row 1")
-	g.w("\tLEAQ (SI)(AX*2), BX  // row 2 (w regs loaded, BX free)")
-	g.w("loop:")
+	inRegs := K == 3
+	if inRegs {
+		for t := 0; t < 9; t++ {
+			g.w("\tVMOVUPS %d(BX), Y%d", t*32, 7+t)
+		}
+	}
+	g.w("%s_loop:", name)
 	g.w("\tTESTQ CX, CX")
-	g.w("\tJE done")
-	g.w("\tVMULPS (SI), Y7, Y0")
-	g.w("\tVFMADD231PS 32(SI), Y8, Y0")
-	g.w("\tVFMADD231PS 64(SI), Y9, Y0")
-	g.w("\tVFMADD231PS (DX), Y10, Y0")
-	g.w("\tVFMADD231PS 32(DX), Y11, Y0")
-	g.w("\tVFMADD231PS 64(DX), Y12, Y0")
-	g.w("\tVFMADD231PS (BX), Y13, Y0")
-	g.w("\tVFMADD231PS 32(BX), Y14, Y0")
-	g.w("\tVFMADD231PS 64(BX), Y15, Y0")
+	g.w("\tJE %s_done", name)
+	first := true
+	for kh := 0; kh < K; kh++ {
+		for kw := 0; kw < K; kw++ {
+			t := kh*K + kw
+			var wop string
+			if inRegs {
+				wop = fmt.Sprintf("Y%d", 7+t)
+			} else {
+				g.w("\tVMOVUPS %d(BX), Y2", t*32)
+				wop = "Y2"
+			}
+			if first {
+				g.w("\tVMULPS %d(%s), %s, Y0", kw*32, rows[kh], wop)
+				first = false
+			} else {
+				g.w("\tVFMADD231PS %d(%s), %s, Y0", kw*32, rows[kh], wop)
+			}
+		}
+	}
 	g.w("\tVMOVUPS Y0, (DI)")
-	g.w("\tADDQ $32, SI")
-	g.w("\tADDQ $32, DX")
-	g.w("\tADDQ $32, BX")
+	step := 32 * S
+	for _, r := range rows {
+		g.w("\tADDQ $%d, %s", step, r)
+	}
 	g.w("\tADDQ $32, DI")
 	g.w("\tDECQ CX")
-	g.w("\tJMP loop")
-	g.w("done:")
+	g.w("\tJMP %s_loop", name)
+	g.w("%s_done:", name)
 	g.w("\tVZEROUPPER")
 	g.w("\tRET")
 	g.w("")

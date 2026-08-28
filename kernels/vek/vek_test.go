@@ -474,22 +474,24 @@ func TestBF16DotAxpy(t *testing.T) {
 }
 
 func TestDwBlk8S1(t *testing.T) {
-	for _, tc := range []struct{ ncols, wp int }{{1, 3}, {4, 6}, {14, 16}, {30, 32}} {
-		src := make([]float32, (2+tc.wp+tc.ncols)*8*3+3*tc.wp*8)
-		w := make([]float32, 9*8)
-		for i := range src {
-			src[i] = float32(i%23)*0.1 - 1
-		}
-		for i := range w {
-			w[i] = float32(i%7)*0.25 - 0.5
-		}
-		got := make([]float32, tc.ncols*8)
-		want := make([]float32, tc.ncols*8)
-		DwBlk8S1(got, src, w, tc.ncols, tc.wp)
-		dwBlk8Ref(want, src, w, tc.ncols, tc.wp)
-		for i := range want {
-			if d := got[i] - want[i]; d > 1e-4 || d < -1e-4 {
-				t.Fatalf("ncols=%d i=%d: got %g want %g", tc.ncols, i, got[i], want[i])
+	for _, v := range []struct{ K, S int }{{3, 1}, {3, 2}, {5, 1}, {5, 2}} {
+		for _, tc := range []struct{ ncols, wp int }{{1, 8}, {4, 12}, {14, 32}, {30, 64}} {
+			src := make([]float32, (v.K*tc.wp+tc.ncols*v.S+v.K)*8)
+			w := make([]float32, v.K*v.K*8)
+			for i := range src {
+				src[i] = float32(i%23)*0.1 - 1
+			}
+			for i := range w {
+				w[i] = float32(i%7)*0.25 - 0.5
+			}
+			got := make([]float32, tc.ncols*8)
+			want := make([]float32, tc.ncols*8)
+			DwBlk8(got, src, w, tc.ncols, tc.wp, v.K, v.S)
+			dwBlk8Ref(want, src, w, tc.ncols, tc.wp, v.K, v.S)
+			for i := range want {
+				if d := got[i] - want[i]; d > 1e-4 || d < -1e-4 {
+					t.Fatalf("K%dS%d ncols=%d i=%d: got %g want %g", v.K, v.S, tc.ncols, i, got[i], want[i])
+				}
 			}
 		}
 	}

@@ -304,7 +304,9 @@ func main() {
 	for _, k := range dwShapes {
 		g.dwconv(k[0], k[1])
 	}
-	g.dwblk8()
+	for _, ks := range [][2]int{{3, 1}, {3, 2}, {5, 1}, {5, 2}} {
+		g.dwblkgen(ks[0], ks[1])
+	}
 	g.pwblk()
 	for _, k := range dwShapes {
 		g.qdwconv(k[0], k[1])
@@ -859,54 +861,70 @@ func vregListH(base, n int) string {
 	return strings.Join(parts, ", ")
 }
 
-// dwblk8 emits the channel-blocked (nChw8c) 3x3 stride-1 depthwise row
-// kernel: dst[j][8] = Σ w[t][8] ⊙ src[(kh*wp+j+kw)][8]. The 9 tap-weight
-// vectors (2 q-regs each) stay in V8..V25; each output column is 9 paired
-// loads + 18 FMLA + 1 store — single pass.
-func (g *gen) dwblk8() {
-	g.w("// func dwblk8s1_asm(dst, src, w []float32, ncols, wp int)")
-	g.w("TEXT ·dwblk8s1_asm(SB), NOSPLIT, $0-88")
+// dwblkgen emits one output row of a KxK stride-S channel-blocked depthwise
+// conv. 3x3 keeps its 9 tap-vector pairs in V8..V25; 5x5's 25 pairs stream
+// from memory per column (VLD1.P walk, order matching the packed w layout).
+func (g *gen) dwblkgen(K, S int) {
+	name := fmt.Sprintf("dwblk8k%ds%d", K, S)
+	g.w("// func %s_asm(dst, src, w []float32, ncols, wp int)", name)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-88", name)
 	g.w("	MOVD dst_base+0(FP), R0")
 	g.w("	MOVD src_base+24(FP), R1")
 	g.w("	MOVD w_base+48(FP), R2")
 	g.w("	MOVD ncols+72(FP), R3")
 	g.w("	MOVD wp+80(FP), R4")
 	g.w("	LSL $5, R4, R4 // row stride bytes (wp*8*4)")
-	for base := 0; base < 18; base += 4 {
-		cnt := min(4, 18-base)
-		if base+cnt < 18 {
-			g.w("	VLD1.P %d(R2), [%s]", cnt*16, vregList(8+base, cnt))
-		} else {
-			g.w("	VLD1 (R2), [%s]", vregList(8+base, cnt))
+	inRegs := K == 3
+	if inRegs {
+		for base := 0; base < 18; base += 4 {
+			cnt := min(4, 18-base)
+			if base+cnt < 18 {
+				g.w("	VLD1.P %d(R2), [%s]", cnt*16, vregList(8+base, cnt))
+			} else {
+				g.w("	VLD1 (R2), [%s]", vregList(8+base, cnt))
+			}
 		}
 	}
+	rows := []string{"R5", "R6", "R7", "R10", "R11"}[:K]
 	g.w("	MOVD R1, R5")
-	g.w("	ADD R4, R1, R6")
-	g.w("	ADD R4, R6, R7")
-	g.w("blk8loop:")
-	g.w("	CBZ R3, blk8done")
-	rows := []string{"R5", "R6", "R7"}
-	for kh := 0; kh < 3; kh++ {
+	for r := 1; r < K; r++ {
+		g.w("	ADD R4, %s, %s", rows[r-1], rows[r])
+	}
+	g.w("%s_loop:", name)
+	g.w("	CBZ R3, %s_done", name)
+	if !inRegs {
+		g.w("	MOVD R2, R12 // walk the packed taps")
+	}
+	first := true
+	for kh := 0; kh < K; kh++ {
 		g.w("	MOVD %s, R8", rows[kh])
-		for kw := 0; kw < 3; kw++ {
-			t := kh*3 + kw
-			g.w("	VLD1.P 32(R8), [V2.S4, V3.S4]")
-			if t == 0 {
-				g.w("	WORD $0x%08X // fmul v0 = v2*v8", fmul(0, 2, 8))
-				g.w("	WORD $0x%08X // fmul v1 = v3*v9", fmul(1, 3, 9))
+		for kw := 0; kw < K; kw++ {
+			t := kh*K + kw
+			var w0, w1 int
+			if inRegs {
+				w0, w1 = 8+2*t, 9+2*t
 			} else {
-				g.w("	WORD $0x%08X // fmla v0 += v2*v%d", fmla(0, 2, 8+2*t), 8+2*t)
-				g.w("	WORD $0x%08X // fmla v1 += v3*v%d", fmla(1, 3, 9+2*t), 9+2*t)
+				w0, w1 = 26, 27
+				g.w("	VLD1.P 32(R12), [V26.S4, V27.S4]")
+			}
+			g.w("	VLD1.P 32(R8), [V2.S4, V3.S4]")
+			if first {
+				g.w("	WORD $0x%08X // fmul v0 = v2*v%d", fmul(0, 2, w0), w0)
+				g.w("	WORD $0x%08X // fmul v1 = v3*v%d", fmul(1, 3, w1), w1)
+				first = false
+			} else {
+				g.w("	WORD $0x%08X // fmla v0 += v2*v%d", fmla(0, 2, w0), w0)
+				g.w("	WORD $0x%08X // fmla v1 += v3*v%d", fmla(1, 3, w1), w1)
 			}
 		}
 	}
 	g.w("	VST1.P [V0.S4, V1.S4], 32(R0)")
-	g.w("	ADD $32, R5, R5")
-	g.w("	ADD $32, R6, R6")
-	g.w("	ADD $32, R7, R7")
+	for _, r := range rows {
+		g.w("	ADD $%d, %s, %s", 32*S, r, r)
+	}
 	g.w("	SUB $1, R3, R3")
-	g.w("	B blk8loop")
-	g.w("blk8done:")
+	g.w("	B %s_loop", name)
+	g.w("%s_done:", name)
 	g.w("	RET")
 	g.w("")
 }
