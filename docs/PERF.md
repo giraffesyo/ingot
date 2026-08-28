@@ -1713,3 +1713,17 @@ tokens: f32 1.70 → bf16 weights 1.10 → **weights + cache 1.042
 ms/token (−39% total)**, with the cache's share growing with context
 length. Both storage modes run the incremental property test against
 the float64 oracle.
+
+## NCHWc: prototyped, parked with data (2026-08-28)
+
+Closing the queue's last open question with a measurement instead of a
+plan. A hand-blocked prototype of one mv2 inverted-residual block
+(channel-last activations, existing SgemmPackedB + vek primitives)
+came out **0.80× (Zen 5) / 0.97× (Apple)** vs the current pipeline —
+recomposing existing kernels does not deliver the layout win. The real
+NCHWc requires dedicated register-tap depthwise kernels (the prototype
+pays 18 memory passes per output where a jit'd kernel pays one) and a
+blocked pointwise kernel — a kernel program comparable in scope to the
+int8 arc. docs/DESIGN-nchwc.md is the map; the transformer/decode
+program was prioritized because its measured wins per unit of work
+were larger.

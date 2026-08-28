@@ -120,11 +120,11 @@
 - [x] x86 int8 epilogues (AVX2 vek: requant/quant/shift/deint/QLut/depthwise
       rows; noescape fix both arches): Zen 5 pod rec_int8 −52%, det_int8 −39%,
       mv3_int8 −54% — x86 int8-vs-f32 gap 2.8× → 1.4×
-- [ ] persistent blocked-layout (NCHWc) activations — THE x86 CNN item; its
-      win is repack elimination + channel-vectorized depthwise, NOT DRAM
-      avoidance: fused dw+pw was built and measured 2-3× SLOWER both arches
-      (intermediates are LLC-resident at batch-1; PERF 2026-08-28) — killed.
-      Pool micro-tuning also exhausted (3 negatives, PERF 2026-08-27)
+- [ ] NCHWc: designed + prototyped (docs/DESIGN-nchwc.md) — recomposing
+      existing kernels measured 0.80-0.97× (no win); requires a dedicated
+      kernel program (register-tap dw, blocked pointwise, layout pass).
+      Prior kills: fused dw+pw 2-3× slower (LLC-resident intermediates),
+      pool micro-tuning (3 negatives)
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32
