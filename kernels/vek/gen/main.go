@@ -305,6 +305,7 @@ func main() {
 		g.dwconv(k[0], k[1])
 	}
 	g.dwblk8()
+	g.pwblk()
 	for _, k := range dwShapes {
 		g.qdwconv(k[0], k[1])
 	}
@@ -906,6 +907,59 @@ func (g *gen) dwblk8() {
 	g.w("	SUB $1, R3, R3")
 	g.w("	B blk8loop")
 	g.w("blk8done:")
+	g.w("	RET")
+	g.w("")
+}
+
+// ld1r4s: LD1R {Vt.4S}, [Xn] — broadcast-load one f32 to all four lanes.
+func ld1r4s(t, n int) uint32 { return 0x4D40C800 | u(n)<<5 | u(t) }
+
+// pwblk emits the channel-blocked 1x1 conv tile (6 positions × 16 output
+// channels) matching the amd64 kernel's ABI: per input channel, two weight
+// vectors (16 outs = 4 q-regs) and six broadcast-loads feed 24 FMLA.
+func (g *gen) pwblk() {
+	g.w("// func pwblk6x16_asm(dst0, dst1, x, w []float32, cin, xbstride int)")
+	g.w("TEXT ·pwblk6x16_asm(SB), NOSPLIT, $0-112")
+	g.w("	MOVD dst0_base+0(FP), R0")
+	g.w("	MOVD dst1_base+24(FP), R1")
+	g.w("	MOVD x_base+48(FP), R2")
+	g.w("	MOVD w_base+72(FP), R3")
+	g.w("	MOVD cin+96(FP), R4")
+	g.w("	MOVD xbstride+104(FP), R5")
+	// acc V0..V23 (6 pos × (2 q for dst0 + 2 q for dst1)? layout: pos p:
+	// dst0 -> V(4p), V(4p+1); dst1 -> V(4p+2), V(4p+3)
+	for r := 0; r < 24; r++ {
+		g.w("	WORD $0x%08X // movi v%d.4s, #0", movi0(r), r)
+	}
+	g.w("	MOVD R2, R6 // block base")
+	g.w("	MOVD $0, R7 // ci within block")
+	g.w("pwloop:")
+	g.w("	CBZ R4, pwdone")
+	g.w("	VLD1.P 64(R3), [V24.S4, V25.S4, V26.S4, V27.S4] // w pair (16 f32)")
+	g.w("	ADD R7<<2, R6, R8 // &x[block][0][ci]")
+	for p := 0; p < 6; p++ {
+		g.w("	WORD $0x%08X // ld1r v28 = x[p%d][ci]", ld1r4s(28, 8), p)
+		if p < 5 {
+			g.w("	ADD $32, R8, R8")
+		}
+		g.w("	WORD $0x%08X // fmla v%d += v24*v28", fmla(4*p, 24, 28), 4*p)
+		g.w("	WORD $0x%08X // fmla v%d += v25*v28", fmla(4*p+1, 25, 28), 4*p+1)
+		g.w("	WORD $0x%08X // fmla v%d += v26*v28", fmla(4*p+2, 26, 28), 4*p+2)
+		g.w("	WORD $0x%08X // fmla v%d += v27*v28", fmla(4*p+3, 27, 28), 4*p+3)
+	}
+	g.w("	ADD $1, R7, R7")
+	g.w("	CMP $8, R7")
+	g.w("	BLT pwnext")
+	g.w("	MOVD $0, R7")
+	g.w("	ADD R5, R6, R6")
+	g.w("pwnext:")
+	g.w("	SUB $1, R4, R4")
+	g.w("	B pwloop")
+	g.w("pwdone:")
+	for p := 0; p < 6; p++ {
+		g.w("	VST1.P [V%d.S4, V%d.S4], 32(R0)", 4*p, 4*p+1)
+		g.w("	VST1.P [V%d.S4, V%d.S4], 32(R1)", 4*p+2, 4*p+3)
+	}
 	g.w("	RET")
 	g.w("")
 }
