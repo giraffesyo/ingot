@@ -1627,3 +1627,22 @@ bf16 30.5 ms (−19%** vs T=256's −8% — conversion amortizes with K).
 Against ONNX Runtime on the same box: 1.47× ORT-16T, and ahead of ORT
 at matched 32 threads (30.5 vs 46.9 ms). The remaining gap at scale is
 ORT's flash attention and large-shape GEMM — the standing items.
+
+## Flash SDPA — online softmax + causal skip (2026-08-28)
+
+The first of the designed projects lands. Masked attention at long
+context streams key blocks (Bk=128) with an online softmax: running
+max/sum with rescaled accumulation, the per-tile working set drops
+from rows×Tk to rows×Bk, and — the headline — **fully-masked blocks
+are skipped outright**. The causal upper triangle is ~half the
+attention work at T=1024, and the runtime was computing it and
+throwing it away. Block classification (clean / mixed / masked) is
+cached on the op since the mask is a graph constant; mixed diagonal
+blocks flush masked entries' saturated exp to zero (the subnormal
+ambush would otherwise sneak back in through the accumulation GEMM).
+Gated at ≥4 key blocks — at 2 blocks the skip saved less than the
+online bookkeeping cost (measured, T=256 stays dense).
+
+Zen 5 pod, gptish_1k: SDPA 11.15 → 7.9 ms, model 37.6 → **33.2 ms
+(−12%)**; stacked with bf16 weights: **26.0 ms — −31% from baseline
+and 1.25× ONNX Runtime-16T**. Conformance identical (1.7e-06).

@@ -134,6 +134,8 @@
 - [x] bf16 Gemm wiring (post-added beta*C; bertish −3%, toy-scale flat)
 - [x] gptish_1k (T=1024) zoo model: bf16 −19%, 1.47× ORT-16T, beats ORT-32T;
       fold-const cap 16 MiB for runtime-built masks
+- [x] flash SDPA (online softmax, causal block skip, Bk=128, ≥4-block gate):
+      gptish_1k SDPA −29%, model −12%; +bf16 = 26.0 ms, 1.25× ORT-16T
 - [ ] bf16 decode-shaped benchmark (needs KV-cache design);
       remaining f32 GEMM efficiency vs MLAS at transformer shapes (AVX-512
       µkernel now auto-selected via init probe: Zen 5 +12-15% GEMM, gptish −13%;
