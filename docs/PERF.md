@@ -1753,3 +1753,22 @@ recurred on day one: pointwise over output pairs alone gave 6 tasks to
 for model-level NCHWc: dw stride-2/5×5 variants, the layout-assignment
 pass, and integration — each to be A/B'd against the pipeline it
 replaces, per this project's standing rule.
+
+## NCHWc ships end to end (2026-08-28)
+
+Steps 4–5: `assignBlockedLayout` finds maximal chains of eligible
+depthwise/pointwise convs and runs them in nChw8c — conversions at the
+edges, the step-1–3 kernels inside, weights repacked lazily per op.
+Two measured guardrails shaped the pass: bias/epilogue runs as a
+separate pass (the pointwise overlap-tail rewrite races post-processing
+otherwise), and chains only form at statically-known spatial ≤ 224² —
+at det-scale planes the pipeline's near-peak GEMM beats the
+broadcast-bound blocked pointwise by 39%, so large-plane and
+dynamic-shape models keep the pipeline.
+
+Zen 5 pod, idle: **mobilenet_v2 4.4 → 3.03 ms (−32%)** — now ahead of
+ONNX Runtime at matched 32 threads (4.05) — **efficientnet_b0
+7.2 → 5.0 ms (−31%)**, mv3_small ~neutral (5×5-heavy chains), det/rec
+untouched by design. The x86 CNN project that began as a 3× deficit
+and three failed intuitions closes its first model-level chapter with
+conformance identical and the mechanism fully understood.

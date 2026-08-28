@@ -120,10 +120,10 @@
 - [x] x86 int8 epilogues (AVX2 vek: requant/quant/shift/deint/QLut/depthwise
       rows; noescape fix both arches): Zen 5 pod rec_int8 −52%, det_int8 −39%,
       mv3_int8 −54% — x86 int8-vs-f32 gap 2.8× → 1.4×
-- [ ] NCHWc program (docs/DESIGN-nchwc.md): steps 1-3 DONE — blocked dw
-      (3×3/5×5 × s1/s2, both arches) + PwBlk6x16; full mv2 block 1.58×
-      Zen5-32w / 2.16× 8w / 1.07× Apple; next: layout-assignment pass +
-      model integration
+- [x] NCHWc SHIPPED end to end: kernels + assignBlockedLayout — mv2 −32%
+      (beats ORT-32T), effnet −31%; spatial-gated (≤224² static); det/rec
+      on pipeline by measurement. Follow-ups in DESIGN-nchwc.md (residual
+      Adds in chains, per-shape assignment, mv3 5×5 tuning)
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32
