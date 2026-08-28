@@ -1015,6 +1015,49 @@ done:
 	VZEROUPPER
 	RET
 
+// func dwblk8s1_asm(dst, src, w []float32, ncols, wp int)
+// dst: [ncols][8]; src: padded rows base [3 rows x wp cols x 8]; w: [9][8].
+TEXT ·dwblk8s1_asm(SB), NOSPLIT, $0-88
+	MOVQ dst_base+0(FP), DI
+	MOVQ src_base+24(FP), SI
+	MOVQ w_base+48(FP), BX
+	MOVQ ncols+72(FP), CX
+	MOVQ wp+80(FP), AX
+	SHLQ $5, AX // row stride in bytes (wp*8*4)
+	VMOVUPS 0(BX), Y7
+	VMOVUPS 32(BX), Y8
+	VMOVUPS 64(BX), Y9
+	VMOVUPS 96(BX), Y10
+	VMOVUPS 128(BX), Y11
+	VMOVUPS 160(BX), Y12
+	VMOVUPS 192(BX), Y13
+	VMOVUPS 224(BX), Y14
+	VMOVUPS 256(BX), Y15
+	LEAQ (SI)(AX*1), DX  // row 1
+	LEAQ (SI)(AX*2), BX  // row 2 (w regs loaded, BX free)
+loop:
+	TESTQ CX, CX
+	JE done
+	VMULPS (SI), Y7, Y0
+	VFMADD231PS 32(SI), Y8, Y0
+	VFMADD231PS 64(SI), Y9, Y0
+	VFMADD231PS (DX), Y10, Y0
+	VFMADD231PS 32(DX), Y11, Y0
+	VFMADD231PS 64(DX), Y12, Y0
+	VFMADD231PS (BX), Y13, Y0
+	VFMADD231PS 32(BX), Y14, Y0
+	VFMADD231PS 64(BX), Y15, Y0
+	VMOVUPS Y0, (DI)
+	ADDQ $32, SI
+	ADDQ $32, DX
+	ADDQ $32, BX
+	ADDQ $32, DI
+	DECQ CX
+	JMP loop
+done:
+	VZEROUPPER
+	RET
+
 // func qdw3x3s1_asm(acc []int32, src, wp []int16, ncols, W int)
 TEXT ·qdw3x3s1_asm(SB), NOSPLIT, $0-88
 	MOVQ acc_base+0(FP), DI
