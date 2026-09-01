@@ -88,3 +88,53 @@ func TestConvDwBlkOracle(t *testing.T) {
 		}
 	}
 }
+
+// TestConvPwBlkOracle sweeps blocked pointwise shapes against a float64
+// oracle, with bias and a NON-idempotent epilogue (post scale/shift): a
+// position post-processed twice, or rewritten raw after post-processing
+// (the ragged-tile overlap race), fails loudly. P sweeps all tile residues
+// and chunk-fold geometries; odd M/8 exercises the discarded upper half.
+func TestConvPwBlkOracle(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 10))
+	Ps := []int{1, 2, 5, 6, 7, 11, 12, 13, 30, 35, 36, 37, 49, 100, 196, 1201, 12544 / 8}
+	for _, C := range []int{8, 16} {
+		for _, M := range []int{16, 24} {
+			for _, P := range Ps {
+				x := tensor.New(tensor.F32, 1, C/8, P, 1, 8)
+				xf := x.F32()
+				for i := range xf {
+					xf[i] = r.Float32()*2 - 1
+				}
+				w := tensor.New(tensor.F32, M, C, 1, 1)
+				wf := w.F32()
+				for i := range wf {
+					wf[i] = r.Float32()*2 - 1
+				}
+				bias := tensor.New(tensor.F32, M)
+				bf := bias.F32()
+				for i := range bf {
+					bf[i] = r.Float32()
+				}
+				op := &convPwBlkOp{epi: epilogue{act: "relu", post: true, scale: 1.5, shift: -0.25}}
+				got, err := op.Run(&Ctx{}, []*tensor.Tensor{x, w, bias})
+				if err != nil {
+					t.Fatal(err)
+				}
+				gf := got[0].Clone().F32()
+				for m := 0; m < M; m++ {
+					for p := 0; p < P; p++ {
+						acc := float64(bf[m])
+						for ci := 0; ci < C; ci++ {
+							acc += float64(wf[m*C+ci]) * float64(xf[((ci/8)*P+p)*8+ci%8])
+						}
+						acc = math.Max(acc, 0)*1.5 - 0.25
+						g := gf[((m/8)*P+p)*8+m%8]
+						if d := math.Abs(float64(g) - acc); d > 1e-5*(1+math.Abs(acc)) {
+							t.Fatalf("C=%d M=%d P=%d out[%d,%d]: got %g want %g", C, M, P, m, p, g, acc)
+						}
+					}
+				}
+			}
+		}
+	}
+}

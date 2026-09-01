@@ -1858,3 +1858,26 @@ sweeps, not policy. Remaining mv2 top nodes: thin-cin blocked pointwise
 (pw 16→96 @112² = 183 µs; cin=16 reloads the 16-wide weight pair every 6
 positions), the im2col stem (192 µs), scalar ToBlk8 interleave (72 µs).
 mv2 2.20 vs ORT-16T ~1.45 → 1.5× (arc start: 3×).
+
+## ConvPwBlk: bias/epilogue fused into chunk tasks (2026-09-01)
+
+The blocked pointwise op post-processed in a separate plane-granular
+pass (M/8 tasks re-reading and re-writing the whole output — 9.6 MB at
+112²×96, behind 12 streams). The separate pass existed because the
+ragged-tile overlap (p0 clamps to P−6) rewrites raw values, racing any
+earlier post-processing. But the overlap only ever spans the LAST TWO
+tiles, so per-chunk bias+epilogue is safe as long as those tiles share a
+chunk — the chunker now folds a ragged-only last chunk into its
+predecessor, and each task applies bias+epi to its own position range
+while it is cache-hot. New pw oracle test sweeps all tile residues and
+chunk-fold geometries with a NON-idempotent epilogue (post scale/shift),
+so a double-apply or late raw overwrite fails loudly.
+
+Zen 5 pod, interleaved medians of 6: **mv2 2.24 → 2.00 ms (−10.8%)**,
+**mv3_small 1.48 → 1.09 (−26.4%)**, **effnet 3.68 → 3.38 (−7.9%)**;
+resnetish +2% = code-layout noise (no blocked regions, identical path).
+mv2 is now 1.38× ORT-16T (~1.45); **mv3_small is FASTER than ORT's best
+(~1.2-1.9)**. Session cumulative (starvation + fusion): mv2 2.48 → 2.00
+(−19%), mv3 1.60 → 1.09 (−32%), effnet 3.76 → 3.38 (−10%). Remaining
+mv2 nodes: stem im2col conv (~192 µs), thin-cin pw kernel width
+(AVX-512 6×32 candidate), scalar ToBlk8 interleave.

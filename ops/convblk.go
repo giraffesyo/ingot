@@ -267,53 +267,70 @@ func (o *convPwBlkOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	workers := par.Workers()
 	chunk := max(1, nTiles/max(1, 2*workers/max(1, N*pairs)))
 	nChunks := (nTiles + chunk - 1) / chunk
+	// The ragged last tile overlaps its predecessor (p0 clamps to P-6). Keep
+	// those two tiles in one chunk so bias/epilogue can run per chunk: within
+	// a task the overlap is written (twice, identical raw values) before
+	// post-processing; across tasks it would race. If the last chunk would
+	// hold only the ragged tile, fold it into the previous chunk.
+	if P%6 != 0 && nChunks > 1 && (nTiles-1)%chunk == 0 {
+		nChunks--
+	}
 	scratch := ctx.NewUninit(tensor.F32, workers, 6*blkC)
 	sf := scratch.F32()
+	doEpi := bias != nil || o.epi.active()
 	par.For(N*pairs*nChunks, 1, func(t, wk int) {
 		ch := t % nChunks
 		np := t / nChunks
 		n, pr := np/pairs, np%pairs
 		xb := xf[n*CB*P*blkC:]
 		d0 := of[(n*(M/blkC)+2*pr)*P*blkC:]
+		discard := odd && pr == pairs-1
 		var d1 []float32
-		if odd && pr == pairs-1 {
+		if discard {
 			d1 = sf[wk*6*blkC:] // discarded upper half
 		} else {
 			d1 = of[(n*(M/blkC)+2*pr+1)*P*blkC:]
 		}
-		w := wp[pr*C*2*blkC:]
-		for ti := ch * chunk; ti < min((ch+1)*chunk, nTiles); ti++ {
+		tEnd := min((ch+1)*chunk, nTiles)
+		if ch == nChunks-1 {
+			tEnd = nTiles // absorbs a folded ragged tile
+		}
+		for ti := ch * chunk; ti < tEnd; ti++ {
 			p0 := ti * 6
 			if p0 > P-6 {
 				p0 = P - 6 // overlap tail: rewrites identical raw values
 			}
 			dd1 := d1
-			if odd && pr == pairs-1 {
-				dd1 = sf[wk*6*blkC:]
-			} else {
+			if !discard {
 				dd1 = d1[p0*blkC:]
 			}
-			vek.PwBlk6x16(d0[p0*blkC:], dd1, xb[p0*blkC:], w, C, P*blkC*4)
+			vek.PwBlk6x16(d0[p0*blkC:], dd1, xb[p0*blkC:], wp[pr*C*2*blkC:], C, P*blkC*4)
 		}
-	})
-	// Bias + epilogue in a separate pass: the overlap-tail tile may rewrite
-	// raw values, so nothing may post-process a position until every GEMM
-	// write for the plane is done.
-	if bias != nil || o.epi.active() {
-		par.For(N*(M/blkC), max(1, unaryChunk/max(P*blkC, 1)), func(nm, _ int) {
-			mb := nm % (M / blkC)
-			plane := of[nm*P*blkC : (nm+1)*P*blkC]
+		if !doEpi {
+			return
+		}
+		// Bias + epilogue on this chunk's position range, in cache while hot.
+		// Every write to these positions happened above (tail overlap stays
+		// within the chunk), and each position belongs to exactly one chunk.
+		p0, p1 := ch*chunk*6, min(tEnd*6, P)
+		for half := 0; half < 2; half++ {
+			if half == 1 && discard {
+				break
+			}
+			d := d0
+			if half == 1 {
+				d = d1
+			}
+			seg := d[p0*blkC : p1*blkC]
 			if bias != nil {
-				bb := bias[mb*blkC : (mb+1)*blkC]
-				for j := 0; j < P; j++ {
-					for c := 0; c < blkC; c++ {
-						plane[j*blkC+c] += bb[c]
-					}
+				b := bias[(2*pr+half)*blkC : (2*pr+half+1)*blkC]
+				for j := range seg {
+					seg[j] += b[j&(blkC-1)]
 				}
 			}
-			o.epi.apply(plane)
-		})
-	}
+			o.epi.apply(seg)
+		}
+	})
 	if ctx.Pool != nil {
 		ctx.Pool.Put(scratch)
 	}
