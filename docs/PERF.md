@@ -1983,3 +1983,34 @@ x86 OCR int8 numbers in earlier entries were taken at 32w and should
 improve at the new default; revalidate next OCR round. End-of-day
 (defaults, no knobs): **mv2 1.80 ms (1.24× ORT-16T), effnet 2.80
 (~3.2× faster than ORT), mv3_small 0.92, gptish 8.2**.
+
+## Shape declarations: blocked layout reaches dynamic models (2026-09-01)
+
+graph.SetInputShape + a propagateShapes pass (conv/pool/eltwise/concat/
+resize arithmetic, best-effort, runs before assignBlockedLayout) let
+dynamic-shape models opt into blocked regions: shapes steer layout
+placement only, so a session compiled for one declared shape stays
+correct at any runtime shape. Propagation also removes the value_info
+dependency for static exports (the mv3 gap now fixes itself).
+
+Measured per model and arch, and the verdicts differ:
+- rec [1,3,48,320] declared on amd64: 24 blocked convs in 5 regions —
+  **rec_b8 24.6 → 20.9 ms (−15.3%) on Zen 5**, rec_320 flat. On Apple
+  rec_320 measured +11% WORSE (10-rep medians and minima agree) — the
+  blocked-conv advantage is an x86 story, so the declaration is
+  amd64-only (SME-auto-policy precedent).
+- det declared at 960²: one region over the deep backbone, only 4
+  conversions — still +4-8% on Zen 5: at det's plane/channel mix the
+  pipeline im2col GEMM wins. det stays undeclared.
+
+Width-default cross-check on OCR (first mixed result): rec_320 −5.3%,
+rec_int8 −6.3%, det ~flat at the new 12-worker default, but rec_b8 was
++7.4% (batch-8 genuinely uses width) — now more than recovered by the
+blocked plan (net −9% vs the 32w baseline). Blocked SE pooling chunks
+are now a fixed function of P (never workers or batch): rec's batch
+test requires single-vs-batched bit-exactness.
+
+DISCOVERED, pre-existing: models/ocr rec_batch_test FAILS on amd64
+(old and new binaries identically) — single-vs-batch low-bit drift and
+padding flipping borderline chars. It had never run on x86 (CI skips
+gitignored testdata). Open item; arm64 passes.

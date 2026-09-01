@@ -153,6 +153,13 @@
 - [x] pool-width sweep + OCR_WORKERS knob: every model fastest at 8-16
       workers on 32-core Zen 5 (mv3 −24%, resnetish −40% at 8w). Best-of:
       mv2 1.79 (1.23× ORT-16T), effnet 2.80, mv3 0.854
+- [x] SetInputShape + propagateShapes: blocked layout for dynamic models —
+      rec declared on amd64 (rec_b8 −15% Zen 5; Apple +11% → arm64 stays
+      pipeline); det measured +4-8% blocked → stays pipeline. SE pooling
+      chunks now deterministic (batch bit-exactness)
+- [ ] rec_batch_test fails on amd64 (PRE-EXISTING, discovered when the OCR
+      suite first ran on x86): single-vs-batch low-bit drift + padding
+      flips borderline chars; arm64 passes
 - [x] pool-width default: min(GOMAXPROCS, 12) on amd64 (Zen 5 rigorous sweep:
       w12 wins/ties every model; Zen 4 agreed in Aug; Apple scales to full
       width so arm64 keeps GOMAXPROCS) — out-of-box effnet −6.7%, gptish

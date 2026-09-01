@@ -31,6 +31,11 @@ func NewDetector(path string) (*Detector, error) {
 	if err != nil {
 		return nil, err
 	}
+	// NOT declared blocked (cf. NewRecognizer): declaring a shape forms one
+	// blocked region over det's deep backbone (23 convs, only 4 conversions),
+	// but it measured +4-8% on Zen 5 — at det's plane/channel mix (large
+	// spatial, thin C) the pipeline's im2col GEMM beats the blocked kernels.
+	// det stays on the pipeline.
 	s, err := graph.Compile(g)
 	if err != nil {
 		return nil, err

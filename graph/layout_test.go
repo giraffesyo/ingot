@@ -72,7 +72,9 @@ func buildResidualStack() *Graph {
 	tg.node("Conv", []string{"es", "w4"}, "f")
 	tg.node("Add", []string{"f", "y1"}, "y2")
 	tg.node("Relu", []string{"y1"}, "z")
-	shape4("x", "s", "c", "y1", "f")
+	// Only the input carries a shape: propagateShapes must derive the rest
+	// (conv arithmetic, dw pads, Add broadcast, SE passthrough).
+	shape4("x")
 	return tg.finish([]string{"x"}, []string{"y2", "z"})
 }
 
