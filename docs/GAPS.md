@@ -26,16 +26,34 @@ Notable: LLM decoder blocks (RMSNorm/SwiGLU/causal attention) and BERT/ViT
 encoders run today because they decompose to supported primitives — no fused
 Attention/RMSNorm op is required.
 
-## Supported ops (45)
+## Supported ops (91 + control flow)
 
-AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv ConvTranspose Dropout Elu Expand Flatten Gather Gelu Gemm GlobalAveragePool GlobalMaxPool GridSample HardSigmoid HardSwish Identity InstanceNormalization LayerNormalization LeakyRelu MatMul MaxPool NonMaxSuppression Not Pad Range Relu Reshape Resize Shape Sigmoid Slice Split Squeeze Tile TopK Transpose Trilu Unsqueeze Where 
+Abs Add And ArgMax ArgMin AveragePool BatchNormalization Cast Ceil Clip Concat
+Constant ConstantOfShape Conv ConvTranspose DequantizeLinear Div Dropout
+DynamicQuantizeLinear Elu Equal Erf Exp Expand Flatten Floor Gather Gelu Gemm
+GlobalAveragePool GlobalMaxPool Greater GreaterOrEqual GridSample HardSigmoid
+HardSwish Identity InstanceNormalization LayerNormalization LeakyRelu Less
+LessOrEqual Log LogSoftmax MatMul MatMulInteger Max MaxPool Min Mish Mul Neg
+NonMaxSuppression Not Or Pad Pow QLinearConv QLinearMatMul QuantizeLinear Range
+Reciprocal ReduceL1 ReduceL2 ReduceMax ReduceMean ReduceMin ReduceProd ReduceSum
+ReduceSumSquare Relu Reshape Resize Round Shape Sigmoid Slice Softmax Softplus
+Split Sqrt Squeeze Sub Tanh Tile TopK Transpose Trilu Unsqueeze Where Xor
+
+Plus **If** and **Loop** as executor-level control flow (compiled
+sub-Sessions; see below). This list is `ops.Supported()` — the previous
+hand-curated list here had drifted badly.
 
 ## Gaps, by priority
 
 ### Blocks OCR (phase 3) — do first
-- **Control flow: If / Loop / Scan.** Subgraph attributes error at graph-build.
-  Needed for autoregressive decoding with dynamic length (PARSeq, TrOCR, Nougat).
-  Fixed-length AR can be unrolled without these; truly dynamic loops cannot.
+- **Control flow: If / Loop supported** (2026-09-01). Subgraphs build
+  recursively with lexical scoping — outer values a subgraph reads become
+  explicit extra inputs on the node (Node.Caps), so the optimizer preserves
+  them; each subgraph compiles to its own Session (full Optimize pipeline)
+  and If/Loop run as executor ops. Loop covers max-trip, data-dependent
+  termination (while), loop-carried state, scan outputs (stacked on a new
+  leading axis), and zero-trip; verified bit-exact vs ORT (ctrlprobe,
+  whileprobe). **Scan** remains a loud error (GRAPHS attributes).
 - **GridSample: supported** (2026-09-01) — bilinear/nearest, zeros/border/
   reflection padding, align_corners both; verified vs ORT (gridprobe, 6
   attribute combinations, ≤1.1e-6). Bicubic errors loudly.
