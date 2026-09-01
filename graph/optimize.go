@@ -2,6 +2,8 @@ package graph
 
 import (
 	"math"
+	"os"
+	"strconv"
 
 	"github.com/giraffesyo/ingot/ops"
 	"github.com/giraffesyo/ingot/tensor"
@@ -2190,6 +2192,18 @@ func blkEligible(n *Node) int {
 	return 2
 }
 
+// blkSpatialGate returns the maximum H*W at which a blocked region may seed
+// (default 224², the measured break-even; see docs/DESIGN-nchwc.md).
+// OCR_BLK_GATE=<side> overrides for tuning sweeps.
+func blkSpatialGate() int {
+	if v := os.Getenv("OCR_BLK_GATE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n * n
+		}
+	}
+	return 224 * 224
+}
+
 // blkAddEligible reports whether n is a plain same-shape rank-4 Add. On two
 // nChw8c operands such an Add computes the correct blocked result unchanged
 // (both sides carry the same permutation), so it can live inside a blocked
@@ -2227,12 +2241,13 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 	for _, n := range g.Nodes {
 		kind[n] = blkEligible(n)
 	}
+	gate := blkSpatialGate()
 	staticSmall := func(v *Value) bool {
 		if !v.HasShape || len(v.Shape) != 4 {
 			return false
 		}
 		h, w := v.Shape[2], v.Shape[3]
-		return h > 0 && w > 0 && h*w <= 224*224
+		return h > 0 && w > 0 && h*w <= gate
 	}
 	// Mark candidate nodes in topological order. A conv joins when its
 	// activation input is already blocked, or seeds a new region at small

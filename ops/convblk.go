@@ -28,12 +28,20 @@ func (o *toBlk8Op) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	P := H * W
 	out := ctx.NewUninit(tensor.F32, N, C/blkC, H, W, blkC)
 	xf, of := x.F32(), out.F32()
-	par.For(N*C/blkC, max(1, unaryChunk/max(P*blkC, 1)), func(ncb, _ int) {
+	// Chunk over spatial ranges too: N*C/8 alone starves a wide pool at the
+	// region entry (mv2's single ToBlk8 sits at 112²x32 = 4 plane tasks).
+	// For a fixed block the destination range [p0,p1) is contiguous.
+	NCB := N * C / blkC
+	chunks := max(1, min(P/2048, 2*par.Workers()/max(1, NCB)))
+	cp := (P + chunks - 1) / chunks
+	par.For(NCB*chunks, 1, func(t, _ int) {
+		ncb, ch := t/chunks, t%chunks
 		n, cb := ncb/(C/blkC), ncb%(C/blkC)
+		p0, p1 := ch*cp, min((ch+1)*cp, P)
 		dst := of[ncb*P*blkC:]
 		for c := 0; c < blkC; c++ {
 			src := xf[(n*C+cb*blkC+c)*P:]
-			for p := 0; p < P; p++ {
+			for p := p0; p < p1; p++ {
 				dst[p*blkC+c] = src[p]
 			}
 		}
@@ -54,12 +62,18 @@ func (o *fromBlk8Op) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error
 	P := H * W
 	out := ctx.NewUninit(tensor.F32, N, CB*blkC, H, W)
 	xf, of := x.F32(), out.F32()
-	par.For(N*CB, max(1, unaryChunk/max(P*blkC, 1)), func(ncb, _ int) {
+	// Spatial chunking, mirroring ToBlk8: per-plane channel writes are
+	// disjoint for disjoint [p0,p1) ranges.
+	chunks := max(1, min(P/2048, 2*par.Workers()/max(1, N*CB)))
+	cp := (P + chunks - 1) / chunks
+	par.For(N*CB*chunks, 1, func(t, _ int) {
+		ncb, ch := t/chunks, t%chunks
 		n, cb := ncb/CB, ncb%CB
+		p0, p1 := ch*cp, min((ch+1)*cp, P)
 		src := xf[ncb*P*blkC:]
 		for c := 0; c < blkC; c++ {
 			dst := of[(n*CB*blkC+cb*blkC+c)*P:]
-			for p := 0; p < P; p++ {
+			for p := p0; p < p1; p++ {
 				dst[p] = src[p*blkC+c]
 			}
 		}
@@ -118,25 +132,40 @@ func (o *convDwBlkOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	out := ctx.NewUninit(tensor.F32, N, CB, OH, OW, blkC)
 	xf, of := x.F32(), out.F32()
 	wp := o.taps(wt.F32(), C)
-	Hp, Wp := H+pt+pb, W+pl+pr
+	Wp := W + pl + pr
 	workers := par.Workers()
-	scratch := ctx.NewUninit(tensor.F32, workers, Hp*Wp*blkC)
+	// Row-strip tasks: whole planes starve a wide pool at small C (mv2's
+	// early dw convs are C=32 → 4 tasks on 32 workers), and the padded copy
+	// then serialises behind those few streams. Each strip copies only its
+	// input window (K-1 halo rows per strip).
+	strips := min(OH, max(1, 2*workers/max(1, N*CB)))
+	sr := (OH + strips - 1) / strips
+	strips = (OH + sr - 1) / sr
+	inRows := (sr-1)*S + K
+	scratch := ctx.NewUninit(tensor.F32, workers, inRows*Wp*blkC)
 	sf := scratch.F32()
-	par.For(N*CB, 1, func(ncb, wk int) {
+	par.For(N*CB*strips, 1, func(t, wk int) {
+		ncb, st := t/strips, t%strips
 		cb := ncb % CB
-		p := sf[wk*Hp*Wp*blkC:]
-		clear(p[:pt*Wp*blkC])
-		clear(p[(pt+H)*Wp*blkC : Hp*Wp*blkC])
-		for i := 0; i < H; i++ {
-			row := p[(pt+i)*Wp*blkC:]
+		r0 := st * sr
+		r1 := min(r0+sr, OH)
+		in0 := r0*S - pt // first input row the strip reads (may be out of range)
+		p := sf[wk*inRows*Wp*blkC:]
+		for i := 0; i < (r1-1-r0)*S+K; i++ {
+			row := p[i*Wp*blkC:]
+			src := in0 + i
+			if src < 0 || src >= H {
+				clear(row[:Wp*blkC])
+				continue
+			}
 			clear(row[:pl*blkC])
-			copy(row[pl*blkC:(pl+W)*blkC], xf[(ncb*H+i)*W*blkC:])
+			copy(row[pl*blkC:(pl+W)*blkC], xf[(ncb*H+src)*W*blkC:])
 			clear(row[(pl+W)*blkC : Wp*blkC])
 		}
 		taps := wp[cb*K*K*blkC:]
-		for i := 0; i < OH; i++ {
+		for i := r0; i < r1; i++ {
 			dst := of[(ncb*OH+i)*OW*blkC : (ncb*OH+i+1)*OW*blkC]
-			vek.DwBlk8(dst, p[i*S*Wp*blkC:], taps, OW, Wp, K, S)
+			vek.DwBlk8(dst, p[(i-r0)*S*Wp*blkC:], taps, OW, Wp, K, S)
 			if bias != nil {
 				b := bias[cb*blkC : (cb+1)*blkC]
 				for j := 0; j < OW; j++ {
