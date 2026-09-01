@@ -47,14 +47,11 @@ func main() {
 	w("\tLEAQ (R11)(DI*1), R12")
 	w("\tLEAQ (R12)(DI*1), R13")
 	rows := []string{"R8", "R9", "R10", "R11", "R12", "R13"}
-	w("\tTESTQ SI, SI")
-	w("\tJZ zero")
-	for r := 0; r < MR; r++ {
-		w("\tVMOVUPS (%s), %s", rows[r], acc(r, 0))
-		w("\tVMOVUPS 32(%s), %s", rows[r], acc(r, 1))
-	}
-	w("\tJMP kloop")
-	w("zero:")
+	// Accumulators always start at zero; when accumulating, C is added at the
+	// store (C + sum) — the SAME grouping as the edge-tile spill (row += tile)
+	// and the generic kernel, so a row's bits cannot depend on whether it went
+	// through a full panel or an edge tile (batch invariance; the OCR rec
+	// batch test caught the preload-vs-post-add mismatch end to end).
 	for r := 0; r < MR; r++ {
 		w("\tVXORPS %s, %s, %s", acc(r, 0), acc(r, 0), acc(r, 0))
 		w("\tVXORPS %s, %s, %s", acc(r, 1), acc(r, 1), acc(r, 1))
@@ -74,6 +71,13 @@ func main() {
 	w("\tDECQ DX")
 	w("\tJMP ktail")
 	w("store:")
+	w("\tTESTQ SI, SI")
+	w("\tJZ storeraw")
+	for r := 0; r < MR; r++ {
+		w("\tVADDPS (%s), %s, %s", rows[r], acc(r, 0), acc(r, 0))
+		w("\tVADDPS 32(%s), %s, %s", rows[r], acc(r, 1), acc(r, 1))
+	}
+	w("storeraw:")
 	for r := 0; r < MR; r++ {
 		w("\tVMOVUPS %s, (%s)", acc(r, 0), rows[r])
 		w("\tVMOVUPS %s, 32(%s)", acc(r, 1), rows[r])
