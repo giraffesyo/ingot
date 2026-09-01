@@ -141,6 +141,11 @@
       into predecessor chunk → per-chunk post-processing is race-free):
       mv2 −11% (2.00 ms, 1.38× ORT-16T), mv3_small −26% (1.09 ms — beats
       ORT's best), effnet −8%; non-idempotent-epilogue oracle test
+- [x] blocked-SE pool/scale spatial chunking (two-phase partial sums):
+      effnet −8.5% (SE was 27% of the model); ZMM pointwise tile
+      pwblk6x16z (1 wload+6 bcast+6 FMA per ci, init-probed): mv2 −2.6%,
+      effnet/mv3 −1.5%. Day cumulative: mv2 2.48→1.95, effnet 3.76→3.10,
+      mv3 1.60→1.05
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32

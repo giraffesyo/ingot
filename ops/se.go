@@ -95,14 +95,46 @@ func (o *seOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	inv := 1 / float32(P)
 	if blocked {
 		// sm[n*C+cb*8+l] is channel cb*8+l — natural order, so the FC chain
-		// below is layout-blind.
-		par.For(N*C/blkC, max(1, unaryChunk/max(P*blkC, 1)), func(ncb, _ int) {
+		// below is layout-blind. Pool in two phases with spatial chunks:
+		// N*C/8 plane tasks starve a wide pool at small C / large planes
+		// (effnet's early SE: 4 tasks on 32 workers).
+		NCB := N * C / blkC
+		chunks := max(1, min(P/2048, 2*par.Workers()/max(1, NCB)))
+		var part []float32
+		var pscr *tensor.Tensor
+		if chunks > 1 {
+			pscr = ctx.NewUninit(tensor.F32, NCB*chunks*blkC)
+			part = pscr.F32()
+		}
+		cp := (P + chunks - 1) / chunks
+		par.For(NCB*chunks, 1, func(t, _ int) {
+			ncb, ch := t/chunks, t%chunks
+			p0, p1 := ch*cp, min((ch+1)*cp, P)
+			d := sm[ncb*blkC : ncb*blkC+blkC]
+			if chunks > 1 {
+				d = part[t*blkC : (t+1)*blkC]
+			}
+			vek.SumBlk8(d, xf[(ncb*P+p0)*blkC:(ncb*P+p1)*blkC])
+		})
+		for ncb := 0; ncb < NCB; ncb++ {
 			s8 := sm[ncb*blkC : ncb*blkC+blkC]
-			vek.SumBlk8(s8, xf[ncb*P*blkC:(ncb+1)*P*blkC])
+			if chunks > 1 {
+				for l := range s8 {
+					s8[l] = 0
+				}
+				for ch := 0; ch < chunks; ch++ {
+					for l := range s8 {
+						s8[l] += part[(ncb*chunks+ch)*blkC+l]
+					}
+				}
+			}
 			for l := range s8 {
 				s8[l] *= inv
 			}
-		})
+		}
+		if pscr != nil && ctx.Pool != nil {
+			ctx.Pool.Put(pscr)
+		}
 	} else {
 		par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
 			row := xf[nc*P : (nc+1)*P]
@@ -143,8 +175,13 @@ func (o *seOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		o.epi2.apply(s)
 	}
 	if blocked {
-		par.For(N*C/blkC, max(1, unaryChunk/max(P*blkC, 1)), func(ncb, _ int) {
-			vek.MulBlk8(of[ncb*P*blkC:(ncb+1)*P*blkC], xf[ncb*P*blkC:(ncb+1)*P*blkC], sm[ncb*blkC:ncb*blkC+blkC])
+		NCB := N * C / blkC
+		chunks := max(1, min(P/2048, 2*par.Workers()/max(1, NCB)))
+		cp := (P + chunks - 1) / chunks
+		par.For(NCB*chunks, 1, func(t, _ int) {
+			ncb, ch := t/chunks, t%chunks
+			p0, p1 := ch*cp, min((ch+1)*cp, P)
+			vek.MulBlk8(of[(ncb*P+p0)*blkC:(ncb*P+p1)*blkC], xf[(ncb*P+p0)*blkC:(ncb*P+p1)*blkC], sm[ncb*blkC:ncb*blkC+blkC])
 		})
 	} else {
 		par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
