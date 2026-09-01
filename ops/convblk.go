@@ -295,16 +295,32 @@ func (o *convPwBlkOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 		if ch == nChunks-1 {
 			tEnd = nTiles // absorbs a folded ragged tile
 		}
-		for ti := ch * chunk; ti < tEnd; ti++ {
-			p0 := ti * 6
-			if p0 > P-6 {
-				p0 = P - 6 // overlap tail: rewrites identical raw values
+		t0 := ch * chunk
+		w := wp[pr*C*2*blkC:]
+		if discard {
+			// Odd trailing pair: dst1 is a 6x8 scratch, so run per tile.
+			for ti := t0; ti < tEnd; ti++ {
+				p0 := ti * 6
+				if p0 > P-6 {
+					p0 = P - 6 // overlap tail: rewrites identical raw values
+				}
+				vek.PwBlk6x16(d0[p0*blkC:], d1, xb[p0*blkC:], w, C, P*blkC*4)
 			}
-			dd1 := d1
-			if !discard {
-				dd1 = d1[p0*blkC:]
+		} else {
+			// Full tiles in one asm-looped call; the ragged last tile (p0
+			// clamps to P-6, overlapping its predecessor) runs singly.
+			full := tEnd - t0
+			ragged := tEnd == nTiles && P%6 != 0
+			if ragged {
+				full--
 			}
-			vek.PwBlk6x16(d0[p0*blkC:], dd1, xb[p0*blkC:], wp[pr*C*2*blkC:], C, P*blkC*4)
+			if full > 0 {
+				vek.PwBlk6x16Tiles(d0[t0*6*blkC:], d1[t0*6*blkC:], xb[t0*6*blkC:], w, C, P*blkC*4, full)
+			}
+			if ragged {
+				p0 := P - 6
+				vek.PwBlk6x16(d0[p0*blkC:], d1[p0*blkC:], xb[p0*blkC:], w, C, P*blkC*4)
+			}
 		}
 		if !doEpi {
 			return

@@ -938,16 +938,39 @@ func ld1r4s(t, n int) uint32 { return 0x4D40C800 | u(n)<<5 | u(t) }
 // channels) matching the amd64 kernel's ABI: per input channel, two weight
 // vectors (16 outs = 4 q-regs) and six broadcast-loads feed 24 FMLA.
 func (g *gen) pwblk() {
-	g.w("// func pwblk6x16_asm(dst0, dst1, x, w []float32, cin, xbstride int)")
-	g.w("TEXT ·pwblk6x16_asm(SB), NOSPLIT, $0-112")
+	g.pwblkKernel(false)
+	g.pwblkKernel(true)
+}
+
+// pwblkKernel emits the blocked-pointwise tile kernel; looped variants
+// process `tiles` consecutive 6-position tiles in asm (dst/x advance 192 B
+// per tile, weights rewind) — the per-tile Go call was 13% of mv2's CPU
+// profile on amd64; same structure here.
+// acc V0..V23: pos p → dst0: V(4p), V(4p+1); dst1: V(4p+2), V(4p+3).
+func (g *gen) pwblkKernel(looped bool) {
+	name := "pwblk6x16"
+	frame, sig := 112, "(dst0, dst1, x, w []float32, cin, xbstride int)"
+	if looped {
+		name += "t"
+		frame, sig = 120, "(dst0, dst1, x, w []float32, cin, xbstride, tiles int)"
+	}
+	g.w("// func %s_asm%s", name, sig)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-%d", name, frame)
 	g.w("	MOVD dst0_base+0(FP), R0")
 	g.w("	MOVD dst1_base+24(FP), R1")
 	g.w("	MOVD x_base+48(FP), R2")
 	g.w("	MOVD w_base+72(FP), R3")
 	g.w("	MOVD cin+96(FP), R4")
 	g.w("	MOVD xbstride+104(FP), R5")
-	// acc V0..V23 (6 pos × (2 q for dst0 + 2 q for dst1)? layout: pos p:
-	// dst0 -> V(4p), V(4p+1); dst1 -> V(4p+2), V(4p+3)
+	if looped {
+		g.w("	MOVD tiles+112(FP), R9")
+		g.w("	MOVD R3, R10 // w base (rewinds per tile)")
+		g.w("	MOVD R4, R11 // cin (reloaded per tile)")
+		g.w("tileloop:")
+		g.w("	CBZ R9, alldone")
+		g.w("	MOVD R10, R3")
+		g.w("	MOVD R11, R4")
+	}
 	for r := 0; r < 24; r++ {
 		g.w("	WORD $0x%08X // movi v%d.4s, #0", movi0(r), r)
 	}
@@ -979,6 +1002,12 @@ func (g *gen) pwblk() {
 	for p := 0; p < 6; p++ {
 		g.w("	VST1.P [V%d.S4, V%d.S4], 32(R0)", 4*p, 4*p+1)
 		g.w("	VST1.P [V%d.S4, V%d.S4], 32(R1)", 4*p+2, 4*p+3)
+	}
+	if looped {
+		g.w("	ADD $192, R2, R2 // x advances 6 positions")
+		g.w("	SUB $1, R9, R9")
+		g.w("	B tileloop")
+		g.w("alldone:")
 	}
 	g.w("	RET")
 	g.w("")

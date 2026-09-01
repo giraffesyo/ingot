@@ -2484,6 +2484,113 @@ pwdone:
 	VST1.P [V22.S4, V23.S4], 32(R1)
 	RET
 
+// func pwblk6x16t_asm(dst0, dst1, x, w []float32, cin, xbstride, tiles int)
+TEXT ·pwblk6x16t_asm(SB), NOSPLIT, $0-120
+	MOVD dst0_base+0(FP), R0
+	MOVD dst1_base+24(FP), R1
+	MOVD x_base+48(FP), R2
+	MOVD w_base+72(FP), R3
+	MOVD cin+96(FP), R4
+	MOVD xbstride+104(FP), R5
+	MOVD tiles+112(FP), R9
+	MOVD R3, R10 // w base (rewinds per tile)
+	MOVD R4, R11 // cin (reloaded per tile)
+tileloop:
+	CBZ R9, alldone
+	MOVD R10, R3
+	MOVD R11, R4
+	WORD $0x4F000400 // movi v0.4s, #0
+	WORD $0x4F000401 // movi v1.4s, #0
+	WORD $0x4F000402 // movi v2.4s, #0
+	WORD $0x4F000403 // movi v3.4s, #0
+	WORD $0x4F000404 // movi v4.4s, #0
+	WORD $0x4F000405 // movi v5.4s, #0
+	WORD $0x4F000406 // movi v6.4s, #0
+	WORD $0x4F000407 // movi v7.4s, #0
+	WORD $0x4F000408 // movi v8.4s, #0
+	WORD $0x4F000409 // movi v9.4s, #0
+	WORD $0x4F00040A // movi v10.4s, #0
+	WORD $0x4F00040B // movi v11.4s, #0
+	WORD $0x4F00040C // movi v12.4s, #0
+	WORD $0x4F00040D // movi v13.4s, #0
+	WORD $0x4F00040E // movi v14.4s, #0
+	WORD $0x4F00040F // movi v15.4s, #0
+	WORD $0x4F000410 // movi v16.4s, #0
+	WORD $0x4F000411 // movi v17.4s, #0
+	WORD $0x4F000412 // movi v18.4s, #0
+	WORD $0x4F000413 // movi v19.4s, #0
+	WORD $0x4F000414 // movi v20.4s, #0
+	WORD $0x4F000415 // movi v21.4s, #0
+	WORD $0x4F000416 // movi v22.4s, #0
+	WORD $0x4F000417 // movi v23.4s, #0
+	MOVD R2, R6 // block base
+	MOVD $0, R7 // ci within block
+pwloop:
+	CBZ R4, pwdone
+	VLD1.P 64(R3), [V24.S4, V25.S4, V26.S4, V27.S4] // w pair (16 f32)
+	ADD R7<<2, R6, R8 // &x[block][0][ci]
+	WORD $0x4D40C91C // ld1r v28 = x[p0][ci]
+	ADD $32, R8, R8
+	WORD $0x4E3CCF00 // fmla v0 += v24*v28
+	WORD $0x4E3CCF21 // fmla v1 += v25*v28
+	WORD $0x4E3CCF42 // fmla v2 += v26*v28
+	WORD $0x4E3CCF63 // fmla v3 += v27*v28
+	WORD $0x4D40C91C // ld1r v28 = x[p1][ci]
+	ADD $32, R8, R8
+	WORD $0x4E3CCF04 // fmla v4 += v24*v28
+	WORD $0x4E3CCF25 // fmla v5 += v25*v28
+	WORD $0x4E3CCF46 // fmla v6 += v26*v28
+	WORD $0x4E3CCF67 // fmla v7 += v27*v28
+	WORD $0x4D40C91C // ld1r v28 = x[p2][ci]
+	ADD $32, R8, R8
+	WORD $0x4E3CCF08 // fmla v8 += v24*v28
+	WORD $0x4E3CCF29 // fmla v9 += v25*v28
+	WORD $0x4E3CCF4A // fmla v10 += v26*v28
+	WORD $0x4E3CCF6B // fmla v11 += v27*v28
+	WORD $0x4D40C91C // ld1r v28 = x[p3][ci]
+	ADD $32, R8, R8
+	WORD $0x4E3CCF0C // fmla v12 += v24*v28
+	WORD $0x4E3CCF2D // fmla v13 += v25*v28
+	WORD $0x4E3CCF4E // fmla v14 += v26*v28
+	WORD $0x4E3CCF6F // fmla v15 += v27*v28
+	WORD $0x4D40C91C // ld1r v28 = x[p4][ci]
+	ADD $32, R8, R8
+	WORD $0x4E3CCF10 // fmla v16 += v24*v28
+	WORD $0x4E3CCF31 // fmla v17 += v25*v28
+	WORD $0x4E3CCF52 // fmla v18 += v26*v28
+	WORD $0x4E3CCF73 // fmla v19 += v27*v28
+	WORD $0x4D40C91C // ld1r v28 = x[p5][ci]
+	WORD $0x4E3CCF14 // fmla v20 += v24*v28
+	WORD $0x4E3CCF35 // fmla v21 += v25*v28
+	WORD $0x4E3CCF56 // fmla v22 += v26*v28
+	WORD $0x4E3CCF77 // fmla v23 += v27*v28
+	ADD $1, R7, R7
+	CMP $8, R7
+	BLT pwnext
+	MOVD $0, R7
+	ADD R5, R6, R6
+pwnext:
+	SUB $1, R4, R4
+	B pwloop
+pwdone:
+	VST1.P [V0.S4, V1.S4], 32(R0)
+	VST1.P [V2.S4, V3.S4], 32(R1)
+	VST1.P [V4.S4, V5.S4], 32(R0)
+	VST1.P [V6.S4, V7.S4], 32(R1)
+	VST1.P [V8.S4, V9.S4], 32(R0)
+	VST1.P [V10.S4, V11.S4], 32(R1)
+	VST1.P [V12.S4, V13.S4], 32(R0)
+	VST1.P [V14.S4, V15.S4], 32(R1)
+	VST1.P [V16.S4, V17.S4], 32(R0)
+	VST1.P [V18.S4, V19.S4], 32(R1)
+	VST1.P [V20.S4, V21.S4], 32(R0)
+	VST1.P [V22.S4, V23.S4], 32(R1)
+	ADD $192, R2, R2 // x advances 6 positions
+	SUB $1, R9, R9
+	B tileloop
+alldone:
+	RET
+
 // func mulblk8_asm(dst, src []float32, n int, s []float32)
 TEXT ·mulblk8_asm(SB), NOSPLIT, $0-80
 	MOVD dst_base+0(FP), R0

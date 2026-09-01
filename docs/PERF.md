@@ -1904,3 +1904,22 @@ not issue-bound.
 
 Round total: effnet 3.44 → 3.10 (−10%), mv2 −3%, mv3 −3%. Today's
 cumulative: mv2 2.48 → 1.95, effnet 3.76 → 3.10, mv3_small 1.60 → 1.05.
+
+## Multi-tile pointwise entry; the curve flattens (2026-09-01)
+
+The mv2 CPU profile put 13% in the Go caller around the pointwise tile
+(per-tile call, bounds checks, dispatch branch — vs 24% in the kernel
+itself). PwBlk6x16Tiles moves the tile loop into asm on all three
+paths (AVX2/ZMM/NEON): dst/x advance 48 floats per tile, weights
+rewind, cin reloads; the ragged clamped tile still runs singly and the
+odd-pair discard half keeps the per-tile loop.
+
+Zen 5 pod, interleaved medians of 6: **mv2 1.96 → 1.92 ms (−2.3%)**,
+mv3_small −0.7%, effnet flat. The lesson: CPU-profile share ≠ wall
+share on a wide box — caller overhead ran concurrently, so shedding it
+mostly converts to idle spin (par.worker was 26% flat) except where the
+op was genuinely compute-bound. What remains in mv2's 1.92 ms is
+bandwidth (activation re-streams per output pair) and per-node region
+churn (~70 regions/run, Adds cost ~10 µs where the math is ~3), not
+instructions. Day cumulative: mv2 2.48 → 1.92 (1.32× ORT-16T), effnet
+3.76 → 3.10, mv3_small 1.60 → 1.05.

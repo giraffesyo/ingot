@@ -146,6 +146,8 @@
       pwblk6x16z (1 wload+6 bcast+6 FMA per ci, init-probed): mv2 −2.6%,
       effnet/mv3 −1.5%. Day cumulative: mv2 2.48→1.95, effnet 3.76→3.10,
       mv3 1.60→1.05
+- [x] PwBlk6x16Tiles (tile loop in asm, AVX2/ZMM/NEON): mv2 −2.3%; CPU-share
+      ≠ wall-share lesson — remaining mv2 cost is bandwidth + region churn
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32
