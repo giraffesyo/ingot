@@ -1923,3 +1923,29 @@ bandwidth (activation re-streams per output pair) and per-node region
 churn (~70 regions/run, Adds cost ~10 µs where the math is ~3), not
 instructions. Day cumulative: mv2 2.48 → 1.92 (1.32× ORT-16T), effnet
 3.76 → 3.10, mv3_small 1.60 → 1.05.
+
+## Fused residual Adds + the pool-width finding (2026-09-01)
+
+Two structural items from breakthrough-hunting.
+
+**fuse-blk-res**: ConvPwBlk → Add(conv_out, skip) folds into the conv —
+the residual is added after the epilogue in the per-chunk post pass,
+reading the skip while the output chunk is cache-hot. Kills the Add's
+separate read-read-write pass AND its pool region (mv2: 10 nodes, all
+zoo residual Adds fold: mv2 10, effnet 9, mv3 6). Oracle test extended
+with a fused-residual case. Zen 5 @32w: mv2 1.92 → 1.84 (−4.5%),
+effnet −3%, mv3 −0.6%.
+
+**Pool width**: a GOMAXPROCS sweep on the 32-core pod shows EVERY zoo
+model is fastest at 8-16 workers: mv3_small 0.81@8 vs 1.07@32 (−24%),
+resnetish 0.20@8 vs 0.34@32 (−40%), effnet best @12 (−9%), mv2 @12
+(−4.6%), gptish @12 (−8.6%), bertish/llmblock flat. Region round-trips
+and cross-CCD coherence scale with pool width while the ops' chunkers
+scale task counts with it — small models are pure churn at 32. New
+OCR_WORKERS env pins the pool size (a knob, not yet an auto-default:
+one 4-CCD machine's data; Apple topology differs — validate before
+defaulting).
+
+Best-of combined on the pod: **mv2 1.79 ms @12w (1.23× ORT-16T),
+effnet 2.80 @12w (~3.2× faster than ORT's best), mv3_small 0.854 @8w**.
+Day cumulative: mv2 2.48 → 1.79, effnet 3.76 → 2.80, mv3 1.60 → 0.854.

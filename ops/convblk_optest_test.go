@@ -115,8 +115,13 @@ func TestConvPwBlkOracle(t *testing.T) {
 				for i := range bf {
 					bf[i] = r.Float32()
 				}
+				res := tensor.New(tensor.F32, 1, M/8, P, 1, 8)
+				rf := res.F32()
+				for i := range rf {
+					rf[i] = r.Float32() - 0.5
+				}
 				op := &convPwBlkOp{epi: epilogue{act: "relu", post: true, scale: 1.5, shift: -0.25}}
-				got, err := op.Run(&Ctx{}, []*tensor.Tensor{x, w, bias})
+				got, err := op.Run(&Ctx{}, []*tensor.Tensor{x, w, bias, res})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -128,6 +133,7 @@ func TestConvPwBlkOracle(t *testing.T) {
 							acc += float64(wf[m*C+ci]) * float64(xf[((ci/8)*P+p)*8+ci%8])
 						}
 						acc = math.Max(acc, 0)*1.5 - 0.25
+						acc += float64(rf[((m/8)*P+p)*8+m%8]) // fused residual, post-epilogue
 						g := gf[((m/8)*P+p)*8+m%8]
 						if d := math.Abs(float64(g) - acc); d > 1e-5*(1+math.Abs(acc)) {
 							t.Fatalf("C=%d M=%d P=%d out[%d,%d]: got %g want %g", C, M, P, m, p, g, acc)

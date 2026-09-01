@@ -82,8 +82,8 @@ func buildResidualStack() *Graph {
 func TestBlockedLayoutResidual(t *testing.T) {
 	graw, gopt := buildResidualStack(), buildResidualStack()
 	stats := Optimize(gopt)
-	if stats["blk-regions"] != 1 || stats["assign-blk"] != 7 || stats["blk-add"] != 2 || stats["blk-se"] != 1 {
-		t.Fatalf("stats = %v, want blk-regions:1 assign-blk:7 blk-add:2 blk-se:1", stats)
+	if stats["blk-regions"] != 1 || stats["assign-blk"] != 7 || stats["blk-add"] != 2 || stats["blk-se"] != 1 || stats["fuse-blk-res"] != 2 {
+		t.Fatalf("stats = %v, want blk-regions:1 assign-blk:7 blk-add:2 blk-se:1 fuse-blk-res:2", stats)
 	}
 	count := map[string]int{}
 	for _, n := range gopt.Nodes {
@@ -93,7 +93,8 @@ func TestBlockedLayoutResidual(t *testing.T) {
 	if count["ToBlk8"] != 1 || count["FromBlk8"] != 2 {
 		t.Fatalf("conversions = %v, want 1 ToBlk8, 2 FromBlk8", count)
 	}
-	if count["Conv"] != 0 || count["ConvDwBlk"] != 2 || count["ConvPwBlk"] != 5 || count["Add"] != 2 || count["SE"] != 1 {
+	// Both residual Adds fold into their project convs (fuse-blk-res).
+	if count["Conv"] != 0 || count["ConvDwBlk"] != 2 || count["ConvPwBlk"] != 5 || count["Add"] != 0 || count["SE"] != 1 {
 		t.Fatalf("node mix = %v", count)
 	}
 	// The Relu must read the NCHW copy of y1 (produced by a FromBlk8), while

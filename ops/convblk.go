@@ -235,6 +235,17 @@ func (o *convPwBlkOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	if len(in) > 2 && in[2] != nil {
 		bias = in[2].F32()
 	}
+	// Optional fused residual (fuse-blk-res): same-shape blocked tensor added
+	// after the epilogue, exactly Add(epilogued conv, r) — read while the
+	// output chunk is cache-hot instead of a separate pass and pool region.
+	var res []float32
+	if len(in) > 3 && in[3] != nil {
+		r := in[3]
+		if r.Numel() != N*M*P {
+			return nil, o.n.Errorf("ConvPwBlk: residual %v vs out [%d,%d,%d]", r.Shape(), N, M, P)
+		}
+		res = r.F32()
+	}
 	out := ctx.NewUninit(tensor.F32, N, M/blkC, H, W, blkC)
 	xf, of := x.F32(), out.F32()
 	if P < 6 {
@@ -255,7 +266,11 @@ func (o *convPwBlkOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 				}
 			}
 			for mb := 0; mb < M/blkC; mb++ {
-				o.epi.apply(of[(n*(M/blkC)+mb)*P*blkC : (n*(M/blkC)+mb+1)*P*blkC])
+				seg := of[(n*(M/blkC)+mb)*P*blkC : (n*(M/blkC)+mb+1)*P*blkC]
+				o.epi.apply(seg)
+				if res != nil {
+					vek.Add(seg, seg, res[(n*(M/blkC)+mb)*P*blkC:(n*(M/blkC)+mb+1)*P*blkC])
+				}
 			}
 		}
 		return ctx.Out(out), nil
@@ -277,7 +292,7 @@ func (o *convPwBlkOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	}
 	scratch := ctx.NewUninit(tensor.F32, workers, 6*blkC)
 	sf := scratch.F32()
-	doEpi := bias != nil || o.epi.active()
+	doEpi := bias != nil || o.epi.active() || res != nil
 	par.For(N*pairs*nChunks, 1, func(t, wk int) {
 		ch := t % nChunks
 		np := t / nChunks
@@ -345,6 +360,10 @@ func (o *convPwBlkOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 				}
 			}
 			o.epi.apply(seg)
+			if res != nil {
+				rp := res[(n*(M/blkC)+2*pr+half)*P*blkC:]
+				vek.Add(seg, seg, rp[p0*blkC:p1*blkC])
+			}
 		}
 	})
 	if ctx.Pool != nil {

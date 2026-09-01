@@ -148,6 +148,13 @@
       mv3 1.60→1.05
 - [x] PwBlk6x16Tiles (tile loop in asm, AVX2/ZMM/NEON): mv2 −2.3%; CPU-share
       ≠ wall-share lesson — remaining mv2 cost is bandwidth + region churn
+- [x] fuse-blk-res: residual Adds fold into ConvPwBlk (post-epilogue,
+      per-chunk): mv2 −4.5%, effnet −3%; all zoo residual Adds fold
+- [x] pool-width sweep + OCR_WORKERS knob: every model fastest at 8-16
+      workers on 32-core Zen 5 (mv3 −24%, resnetish −40% at 8w). Best-of:
+      mv2 1.79 (1.23× ORT-16T), effnet 2.80, mv3 0.854
+- [ ] topology-aware pool-width auto-default (needs Apple + more x86 boxes);
+      per-region fan-out by work size is the deeper fix
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32

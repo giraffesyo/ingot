@@ -25,15 +25,30 @@
 package par
 
 import (
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // MaxWorkers is the total number of workers (including the caller). It is read
-// once, when the pool starts on first use.
-var MaxWorkers = runtime.GOMAXPROCS(0)
+// once, when the pool starts on first use. OCR_WORKERS overrides: measured on
+// a 32-core Zen 5, EVERY zoo model is fastest at 8-16 workers (mv3_small −24%,
+// resnetish −40%, gptish −8.6% vs 32 — region round-trips and cross-CCD
+// traffic scale with pool width). See docs/PERF.md; a topology-aware default
+// needs more machines, so this stays a knob for now.
+var MaxWorkers = defaultWorkers()
+
+func defaultWorkers() int {
+	if v := os.Getenv("OCR_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return runtime.GOMAXPROCS(0)
+}
 
 // SpinNS is how long an idle helper spin-polls before parking.
 var SpinNS int64 = 50_000
