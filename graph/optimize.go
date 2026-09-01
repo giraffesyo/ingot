@@ -52,6 +52,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = fuseSDPA(g, stats) || changed
 	}
 	assignBlockedLayout(g, stats)
+	fuseBlkResidual(g, stats)
 	renumber(g)
 	return stats
 }
@@ -2445,4 +2446,78 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 	g.Nodes = nodes
 	g.Opsets[ingotDomain] = 1
 	stats["blk-regions"] += regions
+}
+
+// fuseBlkResidual folds a blocked residual Add into the preceding ConvPwBlk:
+// ConvPwBlk → Add(conv_out, r) becomes ConvPwBlk(x, w, bias, r) with the
+// residual added after the epilogue in the conv's per-chunk post pass — the
+// skip tensor is read while the output chunk is cache-hot, and the Add's
+// separate pass and pool region disappear. Runs after assignBlockedLayout
+// (both nodes are blocked forms). r must be produced before the conv and must
+// not be the conv's own output.
+func fuseBlkResidual(g *Graph, stats map[string]int) {
+	pos := map[*Node]int{}
+	for i, n := range g.Nodes {
+		pos[n] = i
+	}
+	dead := map[*Node]bool{}
+	for _, add := range g.Nodes {
+		if add.OpType != "Add" || add.Domain != "" || len(add.Inputs) != 2 {
+			continue
+		}
+		a, b := add.Inputs[0], add.Inputs[1]
+		var conv *Node
+		var r *Value
+		// Prefer the side whose producer is a sole-consumed ConvPwBlk.
+		for _, side := range [2][2]*Value{{a, b}, {b, a}} {
+			cv, rv := side[0], side[1]
+			p := cv.Producer
+			if p == nil || p.OpType != "ConvPwBlk" || p.Domain != ingotDomain || dead[p] {
+				continue
+			}
+			if g.soleConsumer(cv) != add || cv == rv {
+				continue
+			}
+			// r must be blocked (produced in-region) and precede the conv.
+			if rv.Producer == nil || pos[rv.Producer] >= pos[p] {
+				continue
+			}
+			// Only blocked values flow into blocked Adds by construction, but
+			// be defensive: the conv's output is blocked; require the Add to
+			// have been left in place by assignBlockedLayout (both inputs
+			// produced by ingot blocked forms or Adds between them).
+			conv, r = p, rv
+			break
+		}
+		if conv == nil {
+			continue
+		}
+		for len(conv.Inputs) < 3 {
+			conv.Inputs = append(conv.Inputs, nil)
+		}
+		if len(conv.Inputs) != 3 {
+			continue // already carries a residual
+		}
+		out := add.Outputs[0]
+		old := conv.Outputs[0]
+		conv.Outputs[0] = out
+		out.Producer = conv
+		conv.Inputs = append(conv.Inputs, r)
+		removeConsumer(r, add)
+		r.Consumers = append(r.Consumers, conv)
+		removeConsumer(old, add)
+		delete(g.Values, old.Name)
+		dead[add] = true
+		stats["fuse-blk-res"]++
+	}
+	if len(dead) == 0 {
+		return
+	}
+	nodes := g.Nodes[:0]
+	for _, n := range g.Nodes {
+		if !dead[n] {
+			nodes = append(nodes, n)
+		}
+	}
+	g.Nodes = nodes
 }
