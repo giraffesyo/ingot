@@ -26,10 +26,10 @@ Notable: LLM decoder blocks (RMSNorm/SwiGLU/causal attention) and BERT/ViT
 encoders run today because they decompose to supported primitives — no fused
 Attention/RMSNorm op is required.
 
-## Supported ops (93 + control flow)
+## Supported ops (94 + control flow)
 
 Abs Add And ArgMax ArgMin AveragePool BatchNormalization Cast Ceil Clip Concat
-Constant ConstantOfShape Conv ConvTranspose DequantizeLinear Div Dropout
+Constant ConstantOfShape Conv ConvTranspose CumSum DequantizeLinear Div Dropout
 DynamicQuantizeLinear Elu Equal Erf Exp Expand Flatten Floor Gather Gelu Gemm
 GlobalAveragePool GlobalMaxPool Greater GreaterOrEqual GridSample GRU HardSigmoid
 HardSwish Identity InstanceNormalization LayerNormalization LeakyRelu Less
@@ -76,7 +76,8 @@ hand-curated list here had drifted badly.
   peepholes, clip, custom activations, and plain RNN error loudly.
 - **Einsum.** Some attention/loss formulations export as Einsum.
 - **ScatterND / ScatterElements / GatherND / GatherElements.** Advanced indexing.
-- **CumSum, Trilu, DepthToSpace / SpaceToDepth, Mod, Sign, Round modes.**
+- **CumSum: supported** (2026-09-01; f32/int64, exclusive/reverse — PARSeq
+  needed it). Still open: DepthToSpace / SpaceToDepth, Mod, Sign, Round modes.
 - **Resize cubic mode** (nearest and linear are implemented).
 
 ### Types & shape

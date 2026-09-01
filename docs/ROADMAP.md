@@ -214,5 +214,11 @@
       NMS/TopK. Quantization (int8) and LSTM/GRU also open.
 
 ## Phase 5 — OCR + breadth
+- [x] PARSeq runs: NAR export (decode_ar=False, refine_iters=2; the AR loop
+      does not export) verified vs ORT at 1.1e-05, 663→483 nodes with 15
+      SDPA + 15 GELU fusions. Needed CumSum + rank-3 SDPA (dynamo bmm form).
+      tools/export/parseq.py exports model + training charset. NEXT: pipeline
+      recognizer (32×128 preproc, EOS-at-0 greedy decode, corpus accuracy A/B
+      vs PP-OCR rec)
 - [ ] layout analysis, reading order, tables, multilingual, handwriting
 - [ ] wasm target
