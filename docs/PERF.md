@@ -1949,3 +1949,37 @@ defaulting).
 Best-of combined on the pod: **mv2 1.79 ms @12w (1.23× ORT-16T),
 effnet 2.80 @12w (~3.2× faster than ORT's best), mv3_small 0.854 @8w**.
 Day cumulative: mv2 2.48 → 1.79, effnet 3.76 → 2.80, mv3 1.60 → 0.854.
+
+## Pool width is a machine property: amd64 default cap (2026-09-01)
+
+Chasing the width finding produced one negative and one positive result.
+
+**Negative — adaptive per-region width**: a spin-lease change (renew
+only on productive chunks, so persistent losers park and the spin set
+self-sizes) measured WORSE: tiny_conv +39%, gptish +8.6% — mixed-region
+models pay wake latency after every small-region stretch, and the
+intended winners never shrank because the chunkers hand every worker a
+chunk. Reverted. Fourth entry on the par do-not-retry list (PAUSE spin,
+two-phase spin, id-gating, adaptive lease). The width penalty is
+genuine wide PARTICIPATION — cross-CCD coherence, task-claim traffic,
+boost clocks — not idle spinners. Width is a machine property, not a
+region property.
+
+**Positive — the default**: rigorous sweeps (6-rep interleaved medians).
+Zen 5 pod, 12/16/32: w12 wins or ties EVERY model (mv2 1.80/1.97/1.84 —
+the w16 bump is real and reproducible; mv3 0.89/0.96/1.03; tiny_conv
+0.040/0.043/0.057; gptish 8.18/8.35/8.39; effnet 2.78/2.94/3.00), and a
+30-core Zen 4 independently showed the same CNN regression in August.
+Apple silicon measures the OPPOSITE: mv2/effnet/gptish scale
+monotonically to full width (big shared clusters, no CCD boundary);
+only tiny resnetish prefers few workers (0.156@6 vs 0.291@18 — region
+churn is universal for tiny models, the knob covers it). Default is now
+min(GOMAXPROCS, 12) on amd64, GOMAXPROCS elsewhere; OCR_WORKERS
+overrides in either direction.
+
+Out-of-box validation (pod, defaults vs defaults): effnet −6.7%,
+gptish −4.5%, mv2 −2.0%, mv3_small −10.9%, tiny_conv −29.6%. NOTE: the
+x86 OCR int8 numbers in earlier entries were taken at 32w and should
+improve at the new default; revalidate next OCR round. End-of-day
+(defaults, no knobs): **mv2 1.80 ms (1.24× ORT-16T), effnet 2.80
+(~3.2× faster than ORT), mv3_small 0.92, gptish 8.2**.

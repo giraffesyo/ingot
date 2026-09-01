@@ -34,11 +34,19 @@ import (
 )
 
 // MaxWorkers is the total number of workers (including the caller). It is read
-// once, when the pool starts on first use. OCR_WORKERS overrides: measured on
-// a 32-core Zen 5, EVERY zoo model is fastest at 8-16 workers (mv3_small −24%,
-// resnetish −40%, gptish −8.6% vs 32 — region round-trips and cross-CCD
-// traffic scale with pool width). See docs/PERF.md; a topology-aware default
-// needs more machines, so this stays a knob for now.
+// once, when the pool starts on first use. OCR_WORKERS overrides in either
+// direction.
+//
+// On many-core x86 the pool is capped at 12 by default: on a 32-core Zen 5
+// (6-rep interleaved medians) EVERY zoo model is fastest at or within noise
+// of 12 workers — mv2 1.80 vs 1.84 ms, mv3_small 0.89 vs 1.03 (−13%),
+// tiny_conv −30%, gptish −2.5%; a 30-core Zen 4 showed the same CNN
+// regression independently. Region round-trips, task-claim coherence, and
+// cross-CCD traffic scale with pool width while per-op work does not. Apple
+// silicon measures the OPPOSITE (mv2/effnet/gptish scale monotonically to
+// full width — big shared clusters, no CCD boundary), so arm64 keeps
+// GOMAXPROCS. An adaptive per-region width was built and measured WORSE
+// (wake latency on mixed models); width is a machine property. docs/PERF.md.
 var MaxWorkers = defaultWorkers()
 
 func defaultWorkers() int {
@@ -47,7 +55,11 @@ func defaultWorkers() int {
 			return n
 		}
 	}
-	return runtime.GOMAXPROCS(0)
+	n := runtime.GOMAXPROCS(0)
+	if runtime.GOARCH == "amd64" && n > 12 {
+		n = 12
+	}
+	return n
 }
 
 // SpinNS is how long an idle helper spin-polls before parking.

@@ -153,8 +153,12 @@
 - [x] pool-width sweep + OCR_WORKERS knob: every model fastest at 8-16
       workers on 32-core Zen 5 (mv3 −24%, resnetish −40% at 8w). Best-of:
       mv2 1.79 (1.23× ORT-16T), effnet 2.80, mv3 0.854
-- [ ] topology-aware pool-width auto-default (needs Apple + more x86 boxes);
-      per-region fan-out by work size is the deeper fix
+- [x] pool-width default: min(GOMAXPROCS, 12) on amd64 (Zen 5 rigorous sweep:
+      w12 wins/ties every model; Zen 4 agreed in Aug; Apple scales to full
+      width so arm64 keeps GOMAXPROCS) — out-of-box effnet −6.7%, gptish
+      −4.5%, mv3 −11%, tiny −30%. NEGATIVE: adaptive per-region width
+      (spin lease) measured worse — width is a machine property (4th entry
+      on the par do-not-retry list)
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32
