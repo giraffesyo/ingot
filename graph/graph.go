@@ -42,7 +42,13 @@ type Node struct {
 	Inputs  []*Value // nil for omitted optional inputs
 	Outputs []*Value // nil for omitted optional outputs
 	Attrs   ops.Attrs
-	id      int
+	// Sub holds subgraph attributes (If then/else_branch, Loop body). Values
+	// a subgraph captures from this scope are appended to Inputs after the
+	// ONNX-declared ones, named in Caps (same order) — explicit data edges,
+	// so the optimizer keeps captured values alive.
+	Sub  map[string]*Graph
+	Caps []string
+	id   int
 }
 
 func (n *Node) String() string {
@@ -57,6 +63,10 @@ type Graph struct {
 	Outputs []*Value
 	Values  map[string]*Value
 	Opsets  map[string]int // domain → version
+	// Captures names outer-scope values this (sub)graph reads; each has a
+	// producer-less leaf Value here that is also appended to Inputs, so a
+	// sub-Session is fed captures by name like ordinary inputs.
+	Captures []string
 }
 
 // OpsetVersion returns the opset version for a domain (default domain if

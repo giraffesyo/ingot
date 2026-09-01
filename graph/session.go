@@ -127,6 +127,28 @@ func CompileRaw(g *Graph) (*Session, error) {
 	var missing []string
 	seen := map[string]bool{}
 	for _, n := range g.Nodes {
+		// Control flow executes compiled sub-Sessions (graph/ctrl.go), not a
+		// registry op.
+		if n.Domain == "" && n.Sub != nil && (n.OpType == "If" || n.OpType == "Loop") {
+			op, err := compileCtrl(n)
+			if err != nil {
+				return nil, err
+			}
+			st := step{node: n, op: op}
+			for _, v := range n.Inputs {
+				if v == nil {
+					st.in = append(st.in, -1)
+				} else {
+					st.in = append(st.in, v.id)
+					s.uses[v.id]++
+				}
+			}
+			for _, v := range n.Outputs {
+				st.out = append(st.out, v.id)
+			}
+			s.steps = append(s.steps, st)
+			continue
+		}
 		ver := g.OpsetVersion(n.Domain)
 		b, err := ops.Lookup(n.Domain, n.OpType, ver)
 		if err != nil {

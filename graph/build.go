@@ -15,20 +15,69 @@ func FromONNX(m *onnx.Model) (*Graph, error) {
 	if m.Graph == nil {
 		return nil, fmt.Errorf("graph: model has no graph")
 	}
-	g := &Graph{
-		Name:   m.Graph.Name,
-		Values: map[string]*Value{},
-		Opsets: map[string]int{},
-	}
+	opsets := map[string]int{}
 	for _, o := range m.OpsetImport {
 		d := o.Domain
 		if d == "ai.onnx" {
 			d = ""
 		}
-		g.Opsets[d] = int(o.Version)
+		opsets[d] = int(o.Version)
 	}
-	if _, ok := g.Opsets[""]; !ok {
-		g.Opsets[""] = 9 // conservative default if the model omits it
+	if _, ok := opsets[""]; !ok {
+		opsets[""] = 9 // conservative default if the model omits it
+	}
+	return buildGraph(m.Graph, opsets, nil)
+}
+
+// buildScope chains value scopes for subgraph builds (If/Loop bodies read
+// outer values by name). lookup materialises capture leaves in every
+// intermediate scope, so nested subgraphs capture transitively.
+type buildScope struct {
+	g      *Graph
+	parent *buildScope
+}
+
+func (s *buildScope) lookup(name string) *Value {
+	if s == nil {
+		return nil
+	}
+	if v, ok := s.g.Values[name]; ok {
+		return v
+	}
+	if s.parent.lookup(name) == nil {
+		return nil
+	}
+	v := &Value{Name: name, id: len(s.g.Values)}
+	s.g.Values[name] = v
+	s.g.Captures = append(s.g.Captures, name)
+	s.g.Inputs = append(s.g.Inputs, v)
+	return v
+}
+
+// buildGraph converts one (sub)graph. outer is nil for the top level.
+func buildGraph(gp *onnx.Graph, opsets map[string]int, outer *buildScope) (*Graph, error) {
+	g := &Graph{
+		Name:   gp.Name,
+		Values: map[string]*Value{},
+		Opsets: map[string]int{},
+	}
+	for d, v := range opsets {
+		g.Opsets[d] = v
+	}
+	sc := &buildScope{g: g, parent: outer}
+	// Names defined inside this graph shadow the outer scope for the whole
+	// subgraph: only names never defined here may be captured.
+	internal := map[string]bool{}
+	for _, t := range gp.Initializer {
+		internal[t.Name] = true
+	}
+	for _, vi := range gp.Input {
+		internal[vi.Name] = true
+	}
+	for _, pn := range gp.Nodes {
+		for _, o := range pn.Output {
+			internal[o] = true
+		}
 	}
 
 	value := func(name string) *Value {
@@ -41,7 +90,7 @@ func FromONNX(m *onnx.Model) (*Graph, error) {
 	}
 
 	// Initializers → constants.
-	for _, t := range m.Graph.Initializer {
+	for _, t := range gp.Initializer {
 		tt, err := TensorFromONNX(t)
 		if err != nil {
 			return nil, fmt.Errorf("graph: initializer %q: %w", t.Name, err)
@@ -53,25 +102,25 @@ func FromONNX(m *onnx.Model) (*Graph, error) {
 		v.HasShape = true
 	}
 	// Inputs (skip those that are initializers — older exporters list both).
-	for _, vi := range m.Graph.Input {
+	for _, vi := range gp.Input {
 		v := value(vi.Name)
 		applyValueInfo(v, vi)
 		if v.Const == nil {
 			g.Inputs = append(g.Inputs, v)
 		}
 	}
-	for _, vi := range m.Graph.ValueInfo {
+	for _, vi := range gp.ValueInfo {
 		applyValueInfo(value(vi.Name), vi)
 	}
-	for _, vi := range m.Graph.Output {
+	for _, vi := range gp.Output {
 		v := value(vi.Name)
 		applyValueInfo(v, vi)
 		g.Outputs = append(g.Outputs, v)
 	}
 
 	// Nodes.
-	for i, pn := range m.Graph.Nodes {
-		attrs, err := convertAttrs(pn)
+	for i, pn := range gp.Nodes {
+		attrs, subAttrs, err := convertAttrs(pn)
 		if err != nil {
 			return nil, fmt.Errorf("graph: node %d %s(%s): %w", i, pn.OpType, pn.Name, err)
 		}
@@ -108,7 +157,13 @@ func FromONNX(m *onnx.Model) (*Graph, error) {
 				n.Inputs = append(n.Inputs, nil)
 				continue
 			}
-			v := value(name)
+			v := g.Values[name]
+			if v == nil && !internal[name] {
+				v = sc.lookup(name) // outer-scope read: becomes a capture
+			}
+			if v == nil {
+				v = value(name)
+			}
 			v.Consumers = append(v.Consumers, n)
 			n.Inputs = append(n.Inputs, v)
 		}
@@ -123,6 +178,39 @@ func FromONNX(m *onnx.Model) (*Graph, error) {
 			}
 			v.Producer = n
 			n.Outputs = append(n.Outputs, v)
+		}
+		// Subgraph attributes (If then/else_branch, Loop body): build each
+		// with this graph as the parent scope, then wire every captured name
+		// as an extra data input of the node (deduplicated; Caps names them,
+		// in the same order as the appended inputs).
+		for _, sa := range subAttrs {
+			sub, err := buildGraph(sa.G, opsets, sc)
+			if err != nil {
+				return nil, fmt.Errorf("graph: node %s attribute %q: %w", n, sa.Name, err)
+			}
+			if n.Sub == nil {
+				n.Sub = map[string]*Graph{}
+			}
+			n.Sub[sa.Name] = sub
+			for _, cap := range sub.Captures {
+				already := false
+				for _, c := range n.Caps {
+					if c == cap {
+						already = true
+						break
+					}
+				}
+				if already {
+					continue
+				}
+				v := sc.lookup(cap)
+				if v == nil {
+					return nil, fmt.Errorf("graph: node %s: subgraph %q captures undefined value %q", n, sa.Name, cap)
+				}
+				v.Consumers = append(v.Consumers, n)
+				n.Inputs = append(n.Inputs, v)
+				n.Caps = append(n.Caps, cap)
+			}
 		}
 		g.Nodes = append(g.Nodes, n)
 	}
@@ -263,10 +351,13 @@ func TensorFromONNX(t *onnx.Tensor) (*tensor.Tensor, error) {
 	return nil, fmt.Errorf("unsupported tensor data type %s", t.DataType)
 }
 
-func convertAttrs(pn *onnx.Node) (ops.Attrs, error) {
+// convertAttrs converts scalar/tensor attributes; graph-typed attributes
+// (If/Loop subgraphs) are returned separately for the caller to build.
+func convertAttrs(pn *onnx.Node) (ops.Attrs, []*onnx.Attribute, error) {
 	if len(pn.Attribute) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
+	var subs []*onnx.Attribute
 	out := make(ops.Attrs, len(pn.Attribute))
 	for _, a := range pn.Attribute {
 		var v ops.Attr
@@ -280,7 +371,7 @@ func convertAttrs(pn *onnx.Node) (ops.Attrs, error) {
 		case onnx.AttrTensor:
 			t, err := TensorFromONNX(a.T)
 			if err != nil {
-				return nil, fmt.Errorf("attribute %q: %w", a.Name, err)
+				return nil, nil, fmt.Errorf("attribute %q: %w", a.Name, err)
 			}
 			v = ops.Attr{Kind: ops.KindTensor, T: t}
 		case onnx.AttrFloats:
@@ -293,8 +384,11 @@ func convertAttrs(pn *onnx.Node) (ops.Attrs, error) {
 				ss[i] = string(s)
 			}
 			v = ops.Attr{Kind: ops.KindStrings, Strings: ss}
-		case onnx.AttrGraph, onnx.AttrGraphs:
-			return nil, fmt.Errorf("attribute %q: subgraph attributes (If/Loop/Scan) not supported", a.Name)
+		case onnx.AttrGraph:
+			subs = append(subs, a)
+			continue
+		case onnx.AttrGraphs:
+			return nil, nil, fmt.Errorf("attribute %q: GRAPHS attributes (Scan) not supported", a.Name)
 		default:
 			// Older exporters omit Type; infer from populated fields.
 			switch {
@@ -305,16 +399,16 @@ func convertAttrs(pn *onnx.Node) (ops.Attrs, error) {
 			case a.T != nil:
 				t, err := TensorFromONNX(a.T)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				v = ops.Attr{Kind: ops.KindTensor, T: t}
 			case a.S != nil:
 				v = ops.Attr{Kind: ops.KindString, S: string(a.S)}
 			default:
-				return nil, fmt.Errorf("attribute %q: unknown type %d", a.Name, a.Type)
+				return nil, nil, fmt.Errorf("attribute %q: unknown type %d", a.Name, a.Type)
 			}
 		}
 		out[a.Name] = v
 	}
-	return out, nil
+	return out, subs, nil
 }

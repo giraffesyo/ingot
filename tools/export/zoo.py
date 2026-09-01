@@ -290,6 +290,94 @@ def export_gridprobe():
     m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
     export_graph("gridprobe", m, {"x": x, "grid": grid})
 
+def export_ctrlprobe():
+    from onnx import helper, TensorProto
+    rng = np.random.RandomState(3)
+    x = rng.randn(2, 3).astype(np.float32)
+    cscale = helper.make_tensor("cscale", TensorProto.FLOAT, [1], [2.5])
+    # If: both branches capture x from the outer scope.
+    then_g = helper.make_graph(
+        [helper.make_node("Mul", ["x", "cs"], ["ty"])], "then", [],
+        [helper.make_tensor_value_info("ty", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor("cs", TensorProto.FLOAT, [1], [3.0])])
+    else_g = helper.make_graph(
+        [helper.make_node("Sub", ["x", "cs2"], ["ey"])], "else", [],
+        [helper.make_tensor_value_info("ey", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor("cs2", TensorProto.FLOAT, [1], [1.0])])
+    # Loop: M=4 trips, carried v starts at x, scans each intermediate.
+    body = helper.make_graph(
+        [helper.make_node("Mul", ["v_in", "cscale"], ["v_out"]),  # captures cscale
+         helper.make_node("Identity", ["cond_in"], ["cond_out"]),
+         helper.make_node("Identity", ["v_out"], ["scan0"])],
+        "body",
+        [helper.make_tensor_value_info("iter", TensorProto.INT64, []),
+         helper.make_tensor_value_info("cond_in", TensorProto.BOOL, []),
+         helper.make_tensor_value_info("v_in", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("cond_out", TensorProto.BOOL, []),
+         helper.make_tensor_value_info("v_out", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("scan0", TensorProto.FLOAT, [2, 3])])
+    nodes = [
+        helper.make_node("If", ["condT"], ["yt"], then_branch=then_g, else_branch=else_g),
+        helper.make_node("If", ["condF"], ["yf"], then_branch=then_g, else_branch=else_g),
+        helper.make_node("Loop", ["M", "lcond", "x"], ["vfinal", "vscan"], body=body),
+    ]
+    g = helper.make_graph(nodes, "ctrlprobe",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("yt", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("yf", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("vfinal", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("vscan", TensorProto.FLOAT, [4, 2, 3])],
+        [cscale,
+         helper.make_tensor("condT", TensorProto.BOOL, [], [True]),
+         helper.make_tensor("condF", TensorProto.BOOL, [], [False]),
+         helper.make_tensor("M", TensorProto.INT64, [], [4]),
+         helper.make_tensor("lcond", TensorProto.BOOL, [], [True])])
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
+    export_graph("ctrlprobe", m, {"x": x})
+
+def export_whileprobe():
+    from onnx import helper, TensorProto
+    rng = np.random.RandomState(5)
+    x = np.abs(rng.randn(2, 3)).astype(np.float32) + 0.1
+    # while sum(v) < 200: v *= 1.7   (data-dependent trip count)
+    body = helper.make_graph(
+        [helper.make_node("Mul", ["v_in", "growth"], ["v_out"]),
+         helper.make_node("ReduceSum", ["v_out"], ["vsum"], keepdims=0),
+         helper.make_node("Less", ["vsum", "limit"], ["cond_out"])],
+        "wbody",
+        [helper.make_tensor_value_info("iter", TensorProto.INT64, []),
+         helper.make_tensor_value_info("cond_in", TensorProto.BOOL, []),
+         helper.make_tensor_value_info("v_in", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("cond_out", TensorProto.BOOL, []),
+         helper.make_tensor_value_info("v_out", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor("growth", TensorProto.FLOAT, [1], [1.7]),
+         helper.make_tensor("limit", TensorProto.FLOAT, [], [200.0])])
+    # zero-trip: M=0 passes the carried value through untouched.
+    zbody = helper.make_graph(
+        [helper.make_node("Identity", ["cond_in"], ["cond_out"]),
+         helper.make_node("Mul", ["v_in", "v_in"], ["v_out"])],
+        "zbody",
+        [helper.make_tensor_value_info("iter", TensorProto.INT64, []),
+         helper.make_tensor_value_info("cond_in", TensorProto.BOOL, []),
+         helper.make_tensor_value_info("v_in", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("cond_out", TensorProto.BOOL, []),
+         helper.make_tensor_value_info("v_out", TensorProto.FLOAT, [2, 3])])
+    nodes = [
+        helper.make_node("Loop", ["", "wcond", "x"], ["wfinal"], body=body),
+        helper.make_node("Loop", ["zero", "wcond", "x"], ["zfinal"], body=zbody),
+    ]
+    g = helper.make_graph(nodes, "whileprobe",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("wfinal", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("zfinal", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor("wcond", TensorProto.BOOL, [], [True]),
+         helper.make_tensor("zero", TensorProto.INT64, [], [0])])
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
+    export_graph("whileprobe", m, {"x": x})
+
+MODELS["ctrlprobe"] = export_ctrlprobe
+MODELS["whileprobe"] = export_whileprobe
+
 MODELS["postprobe"] = export_postprobe
 MODELS["gridprobe"] = export_gridprobe
 
