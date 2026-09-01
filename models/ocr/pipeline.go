@@ -9,6 +9,9 @@ import (
 type Pipeline struct {
 	Det *Detector
 	Rec *Recognizer
+	// Cls, when set (EnableClassifier), runs the PP-OCR direction classifier
+	// on every detected box and flips upside-down crops before recognition.
+	Cls *Classifier
 	// RecBatch is the maximum number of boxes recognised per forward pass
 	// (boxes are grouped by width so padding stays small). ≤1 disables batching.
 	RecBatch int
@@ -60,6 +63,17 @@ func (p *Pipeline) Run(img image.Image) ([]Result, error) {
 		}
 		return boxes[i].Pts[0].X < boxes[j].Pts[0].X
 	})
+	if p.Cls != nil {
+		rots, err := p.Cls.Rot180(img, boxes)
+		if err != nil {
+			return nil, err
+		}
+		for i, r := range rots {
+			if r {
+				boxes[i] = rot180(boxes[i])
+			}
+		}
+	}
 	texts, confs, err := p.RecognizeBoxes(img, boxes)
 	if err != nil {
 		return nil, err
@@ -109,4 +123,15 @@ func (p *Pipeline) RecognizeBoxes(img image.Image, boxes []Box) ([]string, []flo
 		lo = hi
 	}
 	return texts, confs, nil
+}
+
+// EnableClassifier loads the direction classifier and enables 180° crop
+// correction in Run.
+func (p *Pipeline) EnableClassifier(path string) error {
+	c, err := NewClassifier(path)
+	if err != nil {
+		return err
+	}
+	p.Cls = c
+	return nil
 }
