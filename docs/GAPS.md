@@ -26,14 +26,14 @@ Notable: LLM decoder blocks (RMSNorm/SwiGLU/causal attention) and BERT/ViT
 encoders run today because they decompose to supported primitives — no fused
 Attention/RMSNorm op is required.
 
-## Supported ops (91 + control flow)
+## Supported ops (93 + control flow)
 
 Abs Add And ArgMax ArgMin AveragePool BatchNormalization Cast Ceil Clip Concat
 Constant ConstantOfShape Conv ConvTranspose DequantizeLinear Div Dropout
 DynamicQuantizeLinear Elu Equal Erf Exp Expand Flatten Floor Gather Gelu Gemm
-GlobalAveragePool GlobalMaxPool Greater GreaterOrEqual GridSample HardSigmoid
+GlobalAveragePool GlobalMaxPool Greater GreaterOrEqual GridSample GRU HardSigmoid
 HardSwish Identity InstanceNormalization LayerNormalization LeakyRelu Less
-LessOrEqual Log LogSoftmax MatMul MatMulInteger Max MaxPool Min Mish Mul Neg
+LessOrEqual Log LogSoftmax LSTM MatMul MatMulInteger Max MaxPool Min Mish Mul Neg
 NonMaxSuppression Not Or Pad Pow QLinearConv QLinearMatMul QuantizeLinear Range
 Reciprocal ReduceL1 ReduceL2 ReduceMax ReduceMean ReduceMin ReduceProd ReduceSum
 ReduceSumSquare Relu Reshape Resize Round Shape Sigmoid Slice Softmax Softplus
@@ -68,8 +68,12 @@ hand-curated list here had drifted badly.
   per-channel weight scales (loud errors outside the subset). ConvInteger and
   the com.microsoft QOperator contrib ops (QLinearAdd, QLinearGlobalAveragePool,
   …) remain open, as does making int8 *fast* (PERF.md int8 phase 2).
-- **Recurrent: LSTM / GRU / RNN.** Older OCR recognizers (CRNN) use BiLSTM. A CRNN
-  recognizer would need LSTM; SVTR/PARSeq (attention-based) do not.
+- **Recurrent: LSTM / GRU supported** (2026-09-01) — layout 0, forward/
+  reverse/bidirectional, biases, initial states, both GRU
+  linear_before_reset settings; input projection batched into one GEMM
+  across timesteps. Verified vs ORT: rnnprobe (torch BiLSTM→GRU stack,
+  7.5e-08) and gruprobe (lbr=0 + reverse, 1.8e-07). sequence_lens,
+  peepholes, clip, custom activations, and plain RNN error loudly.
 - **Einsum.** Some attention/loss formulations export as Einsum.
 - **ScatterND / ScatterElements / GatherND / GatherElements.** Advanced indexing.
 - **CumSum, Trilu, DepthToSpace / SpaceToDepth, Mod, Sign, Round modes.**

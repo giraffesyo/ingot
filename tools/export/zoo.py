@@ -375,6 +375,44 @@ def export_whileprobe():
     m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
     export_graph("whileprobe", m, {"x": x})
 
+class RNNProbe(nn.Module):
+    """CRNN-style recurrent stack: BiLSTM -> GRU over a feature sequence."""
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(24, 32, bidirectional=True)
+        self.gru = nn.GRU(64, 16)
+        self.fc = nn.Linear(16, 10)
+    def forward(self, x):
+        y, _ = self.lstm(x)
+        y, _ = self.gru(y)
+        return self.fc(y)
+
+def export_gruprobe():
+    # linear_before_reset=0 (the ONNX default; torch always exports 1) plus a
+    # reverse direction — the paths rnnprobe cannot reach.
+    from onnx import helper, TensorProto
+    rng = np.random.RandomState(9)
+    T, B, I, H = 7, 2, 5, 4
+    x = rng.randn(T, B, I).astype(np.float32)
+    mk = lambda name, arr: helper.make_tensor(name, TensorProto.FLOAT, list(arr.shape), arr.flatten().tolist())
+    w = (rng.randn(1, 3 * H, I) * 0.5).astype(np.float32)
+    r = (rng.randn(1, 3 * H, H) * 0.5).astype(np.float32)
+    b = (rng.randn(1, 6 * H) * 0.5).astype(np.float32)
+    nodes = [
+        helper.make_node("GRU", ["x", "w", "r", "b"], ["y0", ""], hidden_size=H, linear_before_reset=0),
+        helper.make_node("GRU", ["x", "w", "r", "b"], ["y1", ""], hidden_size=H, linear_before_reset=1, direction="reverse"),
+    ]
+    g = helper.make_graph(nodes, "gruprobe",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [T, B, I])],
+        [helper.make_tensor_value_info("y0", TensorProto.FLOAT, [T, 1, B, H]),
+         helper.make_tensor_value_info("y1", TensorProto.FLOAT, [T, 1, B, H])],
+        [mk("w", w), mk("r", r), mk("b", b)])
+    m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
+    export_graph("gruprobe", m, {"x": x})
+
+MODELS["gruprobe"] = export_gruprobe
+MODELS["rnnprobe"] = lambda: export("rnnprobe", RNNProbe(), [torch.randn(12, 2, 24)], ["x"])
+
 MODELS["ctrlprobe"] = export_ctrlprobe
 MODELS["whileprobe"] = export_whileprobe
 
