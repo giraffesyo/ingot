@@ -238,6 +238,18 @@ func TestZoo(t *testing.T) {
 				if got == nil || !got.Shape().Equal(want.Shape()) {
 					t.Fatalf("output %q shape mismatch", o.Name)
 				}
+				if want.DType() == tensor.I64 {
+					// Index-typed outputs (TopK indices, NMS selections)
+					// compare exactly.
+					gi, wi := got.I64(), want.I64()
+					for i := range wi {
+						if gi[i] != wi[i] {
+							t.Fatalf("output %q: [%d] = %d, want %d", o.Name, i, gi[i], wi[i])
+						}
+					}
+					t.Logf("%s OK: output %q int64 exact", name, o.Name)
+					continue
+				}
 				gf, wf := got.F32(), want.F32()
 				var maxAbs float64
 				for i := range wf {

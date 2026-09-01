@@ -1,6 +1,6 @@
 # Known gaps
 
-What the runtime does and does not support, as of 2026-08-21. Coverage is driven
+What the runtime does and does not support, as of 2026-09-01. Coverage is driven
 by a model zoo run through the conformance harness (`graph.TestZoo`) against ONNX
 Runtime. **Everything below "Verified" matches ORT to the noted tolerance; a model
 that hits a gap is *skipped*, never silently wrong.**
@@ -26,9 +26,9 @@ Notable: LLM decoder blocks (RMSNorm/SwiGLU/causal attention) and BERT/ViT
 encoders run today because they decompose to supported primitives — no fused
 Attention/RMSNorm op is required.
 
-## Supported ops (41)
+## Supported ops (45)
 
-AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv ConvTranspose Dropout Elu Expand Flatten Gather Gelu Gemm GlobalAveragePool GlobalMaxPool HardSigmoid HardSwish Identity InstanceNormalization LayerNormalization LeakyRelu MatMul MaxPool Not Pad Range Relu Reshape Resize Shape Sigmoid Slice Split Squeeze Tile Transpose Unsqueeze Where 
+AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv ConvTranspose Dropout Elu Expand Flatten Gather Gelu Gemm GlobalAveragePool GlobalMaxPool GridSample HardSigmoid HardSwish Identity InstanceNormalization LayerNormalization LeakyRelu MatMul MaxPool NonMaxSuppression Not Pad Range Relu Reshape Resize Shape Sigmoid Slice Split Squeeze Tile TopK Transpose Trilu Unsqueeze Where 
 
 ## Gaps, by priority
 
@@ -36,9 +36,12 @@ AveragePool BatchNormalization Cast Clip Concat Constant ConstantOfShape Conv Co
 - **Control flow: If / Loop / Scan.** Subgraph attributes error at graph-build.
   Needed for autoregressive decoding with dynamic length (PARSeq, TrOCR, Nougat).
   Fixed-length AR can be unrolled without these; truly dynamic loops cannot.
-- **GridSample.** Perspective/affine rectification of detected text boxes. (Can
-  also be done outside the graph in Go pre/post-processing.)
-- **NonMaxSuppression, TopK.** Detection post-processing and beam search.
+- **GridSample: supported** (2026-09-01) — bilinear/nearest, zeros/border/
+  reflection padding, align_corners both; verified vs ORT (gridprobe, 6
+  attribute combinations, ≤1.1e-6). Bicubic errors loudly.
+- **NonMaxSuppression, TopK: supported** (2026-09-01) — greedy per-class NMS
+  (corner + center box formats, score/IoU thresholds) and TopK along any
+  axis with ORT tie-breaking; both bit-exact vs ORT (postprobe).
 
 ### Common, not yet needed by the zoo
 - **Quantization: supported** (2026-08-24) for the onnxruntime-quantizer
