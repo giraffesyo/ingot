@@ -90,6 +90,10 @@ hand-curated list here had drifted badly.
 - **Sequence, Map, and Optional types are unsupported** (rare outside NLP pipelines).
 
 ### Platform
+- **wasm: works** (2026-09-01) — js/wasm and wasip1/wasm build; kernels, ops,
+  graph conformance, and the OCR pipeline all pass under node on the scalar
+  fallbacks (CI runs them). No wasm SIMD path (Go does not expose SIMD128);
+  expect scalar speed.
 - **amd64 has AVX2 kernels for the whole hot path**: GEMM (6×16), elementwise, and
   3×3/5×5 depthwise. Selected at init by CPU detection (falls back to scalar Go on
   pre-Haswell x86). Correctness-verified under Rosetta; native x86 perf unmeasured

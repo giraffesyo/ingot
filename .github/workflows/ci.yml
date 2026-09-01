@@ -50,10 +50,25 @@ jobs:
         with:
           go-version: "1.26.x"
       - run: |
-          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64; do
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64 js/wasm wasip1/wasm; do
             echo "== $t =="
             GOOS=${t%/*} GOARCH=${t#*/} go build ./...
           done
+
+  # wasm actually RUNS (scalar fallbacks; node ships on the runner). The
+  # kernel/op suites execute in full; the zoo needs testdata not present in CI.
+  wasm-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - run: |
+          EXEC="$(go env GOROOT)/lib/wasm/go_js_wasm_exec"
+          [ -f "$EXEC" ] || EXEC="$(go env GOROOT)/misc/wasm/go_js_wasm_exec"
+          GOOS=js GOARCH=wasm go test -exec="$EXEC" -count=1 \
+            ./tensor/ ./kernels/... ./ops/ ./graph/
 
   # Native x86 benchmarks — INFORMATIONAL, never a gate. Shared runners are
   # noisy and the CPU model varies, so this is for ballpark GFLOPS and catching

@@ -221,4 +221,9 @@
       recognizer (32×128 preproc, EOS-at-0 greedy decode, corpus accuracy A/B
       vs PP-OCR rec)
 - [ ] layout analysis, reading order, tables, multilingual, handwriting
-- [ ] wasm target
+- [x] wasm target: js/wasm and wasip1/wasm build; the FULL test surface runs
+      under node — kernels, ops, graph (zoo conformance vs ORT refs), and the
+      OCR pipeline incl. corpus accuracy gates — on the scalar fallbacks. CI
+      cross-builds both and runs the js/wasm suites. Perf is scalar (mv2
+      272 ms vs 1.4 native; bertish 2.1 vs 0.09): Go exposes no wasm SIMD128,
+      so speed there is compiler-bound for now
