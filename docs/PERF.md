@@ -2026,3 +2026,30 @@ x86 rounds left the arm64 paths untouched or arch-gated, and the OCR
 pipeline numbers (det ~8-9 ms, rec ~2.9-3.0 ms) match the pre-arc
 records within noise. Rerun on a quiet box before drawing conclusions
 finer than that.
+
+## Batch invariance: one accumulation grouping per GEMM (2026-09-01)
+
+The amd64 rec_batch failure root-caused to per-element summation GROUPING
+differing by how a row was routed: (1) the paired 6×32 AVX-512 kernel
+accumulated single-bank sequential-k while the single 6×16 kernel uses
+dual k-parity banks — and pair/single routing shifts with m; (2) every
+asm kernel PRELOADED C into the accumulators when accumulating
+((C+Σ)-chain), while edge tiles compute Σ into a scratch tile and
+post-add (C+Σ) — so an m%MR edge row differed bitwise from the same row
+inside a full panel, i.e. results depended on batch size. arm64 only
+dodged the second class because KC=512 made common shapes single-block.
+
+Fix: the paired kernel now mirrors the single kernel's dual-bank
+structure exactly, and ALL kernels (AVX2, AVX-512 ×2, NEON; generic
+already did) defer the C-add to the store — sums always build from
+zeroed accumulators, C joins last, matching the edge-spill grouping.
+New TestMInvariance pins this (m routing classes bit-compared; k=512
+spans two KC blocks on amd64). KNOWN EXEMPTION, documented in the test:
+m==1 takes the GEMV path with its own accumulation order — no product
+requirement compares single-row and batched calls.
+
+The full OCR suite now passes on amd64 for the first time (rec_batch
+included). Perf: GEMM benches and mv2/gptish flat on the Zen 5 pod
+(the deferred add reads C at the store instead of the load — same
+traffic). The "padding changes result" lines in rec_batch_test remain
+informational logs, unchanged by design.

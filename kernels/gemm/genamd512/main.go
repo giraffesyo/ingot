@@ -45,18 +45,13 @@ func main() {
 	w("\tLEAQ (R11)(DI*1), R12")
 	w("\tLEAQ (R12)(DI*1), R13")
 	rows := []string{"R8", "R9", "R10", "R11", "R12", "R13"}
-	// Bank A starts from C (or zero); bank B always starts at zero.
-	w("\tTESTQ SI, SI")
-	w("\tJZ zeroA")
-	for r := 0; r < MR; r++ {
-		w("\tVMOVUPS (%s), %s", rows[r], a0(r))
-	}
-	w("\tJMP zeroB")
-	w("zeroA:")
+	// Both banks start at zero; when accumulating, C is added at the store
+	// (C + (even+tail) + odd folded first) — the same grouping as the
+	// edge-tile spill and the other kernels, so bits cannot depend on the
+	// row's routing (full panel vs edge tile vs pair vs single).
 	for r := 0; r < MR; r++ {
 		w("\tVXORPS %s, %s, %s", a0(r), a0(r), a0(r))
 	}
-	w("zeroB:")
 	for r := 0; r < MR; r++ {
 		w("\tVXORPS %s, %s, %s", a1(r), a1(r), a1(r))
 	}
@@ -90,6 +85,14 @@ func main() {
 	w("combine:")
 	for r := 0; r < MR; r++ {
 		w("\tVADDPS %s, %s, %s", a1(r), a0(r), a0(r))
+	}
+	w("\tTESTQ SI, SI")
+	w("\tJZ storeraw")
+	for r := 0; r < MR; r++ {
+		w("\tVADDPS (%s), %s, %s", rows[r], a0(r), a0(r))
+	}
+	w("storeraw:")
+	for r := 0; r < MR; r++ {
 		w("\tVMOVUPS %s, (%s)", a0(r), rows[r])
 	}
 	w("\tVZEROUPPER")
@@ -97,7 +100,17 @@ func main() {
 
 	// Paired-panel kernel: 6×32 (two adjacent NR=16 panels). Each A broadcast
 	// feeds two FMAs, cutting the load:FMA ratio from 14:12 (the banked 6×16
-	// kernel's ceiling — broadcasts are loads) to 8:12.
+	// kernel's ceiling — broadcasts are loads) to 16:24.
+	//
+	// The accumulation structure MIRRORS the single kernel exactly — even-k
+	// bank (preloaded with C when accumulating), odd-k bank (zeroed), odd
+	// tail into the even bank, banks folded at the end — so a row computed by
+	// the paired kernel is BIT-IDENTICAL to two single-kernel calls. The
+	// scheduling layer routes rows through pairs or singles depending on m
+	// and worker feed; without matching grouping that made results depend on
+	// batch size (the OCR rec batch test caught it end to end).
+	// Register plan: even accs Z0..Z11 (row-major, panel pairs), odd accs
+	// Z12..Z23, B vectors Z24..Z27 (p0/p1 × even/odd), broadcasts Z28/Z29.
 	w("")
 	w("// func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool)")
 	w("// 6x32 tile over two adjacent packed panels; c covers 32 columns.")
@@ -117,36 +130,62 @@ func main() {
 	w("\tLEAQ (R11)(DI*1), R12")
 	w("\tLEAQ (R12)(DI*1), R13")
 	rows2 := []string{"R8", "R9", "R10", "R11", "R12", "R13"}
-	w("\tTESTQ R14, R14")
-	w("\tJZ p2zero")
+	ev := func(r, p int) string { return fmt.Sprintf("Z%d", 2*r+p) }    // even-k bank
+	od := func(r, p int) string { return fmt.Sprintf("Z%d", 12+2*r+p) } // odd-k bank
 	for r := 0; r < MR; r++ {
-		w("\tVMOVUPS (%s), Z%d", rows2[r], 2*r)
-		w("\tVMOVUPS 64(%s), Z%d", rows2[r], 2*r+1)
+		w("\tVXORPS %s, %s, %s", ev(r, 0), ev(r, 0), ev(r, 0))
+		w("\tVXORPS %s, %s, %s", ev(r, 1), ev(r, 1), ev(r, 1))
+		w("\tVXORPS %s, %s, %s", od(r, 0), od(r, 0), od(r, 0))
+		w("\tVXORPS %s, %s, %s", od(r, 1), od(r, 1), od(r, 1))
 	}
-	w("\tJMP p2loop")
-	w("p2zero:")
-	for r := 0; r < 2*MR; r++ {
-		w("\tVXORPS Z%d, Z%d, Z%d", r, r, r)
+	w("p2pair:")
+	w("\tCMPQ DX, $2")
+	w("\tJL p2tail")
+	w("\tVMOVUPS (BX), Z24      // B0[k]")
+	w("\tVMOVUPS (SI), Z25      // B1[k]")
+	w("\tVMOVUPS 64(BX), Z26    // B0[k+1]")
+	w("\tVMOVUPS 64(SI), Z27    // B1[k+1]")
+	w("\tADDQ $128, BX")
+	w("\tADDQ $128, SI")
+	for r := 0; r < MR; r++ {
+		w("\tVBROADCASTSS %d(AX), Z28", r*4)
+		w("\tVBROADCASTSS %d(AX), Z29", 24+r*4)
+		w("\tVFMADD231PS Z28, Z24, %s", ev(r, 0))
+		w("\tVFMADD231PS Z28, Z25, %s", ev(r, 1))
+		w("\tVFMADD231PS Z29, Z26, %s", od(r, 0))
+		w("\tVFMADD231PS Z29, Z27, %s", od(r, 1))
 	}
-	w("p2loop:")
+	w("\tADDQ $48, AX")
+	w("\tSUBQ $2, DX")
+	w("\tJMP p2pair")
+	w("p2tail:")
 	w("\tTESTQ DX, DX")
-	w("\tJZ p2done")
-	w("\tVMOVUPS (BX), Z16")
-	w("\tVMOVUPS (SI), Z17")
+	w("\tJZ p2combine")
+	w("\tVMOVUPS (BX), Z24")
+	w("\tVMOVUPS (SI), Z25")
 	w("\tADDQ $64, BX")
 	w("\tADDQ $64, SI")
 	for r := 0; r < MR; r++ {
-		w("\tVBROADCASTSS %d(AX), Z18", r*4)
-		w("\tVFMADD231PS Z18, Z16, Z%d", 2*r)
-		w("\tVFMADD231PS Z18, Z17, Z%d", 2*r+1)
+		w("\tVBROADCASTSS %d(AX), Z28", r*4)
+		w("\tVFMADD231PS Z28, Z24, %s", ev(r, 0))
+		w("\tVFMADD231PS Z28, Z25, %s", ev(r, 1))
 	}
 	w("\tADDQ $24, AX")
-	w("\tDECQ DX")
-	w("\tJMP p2loop")
-	w("p2done:")
+	w("p2combine:")
 	for r := 0; r < MR; r++ {
-		w("\tVMOVUPS Z%d, (%s)", 2*r, rows2[r])
-		w("\tVMOVUPS Z%d, 64(%s)", 2*r+1, rows2[r])
+		w("\tVADDPS %s, %s, %s", od(r, 0), ev(r, 0), ev(r, 0))
+		w("\tVADDPS %s, %s, %s", od(r, 1), ev(r, 1), ev(r, 1))
+	}
+	w("\tTESTQ R14, R14")
+	w("\tJZ p2storeraw")
+	for r := 0; r < MR; r++ {
+		w("\tVADDPS (%s), %s, %s", rows2[r], ev(r, 0), ev(r, 0))
+		w("\tVADDPS 64(%s), %s, %s", rows2[r], ev(r, 1), ev(r, 1))
+	}
+	w("p2storeraw:")
+	for r := 0; r < MR; r++ {
+		w("\tVMOVUPS %s, (%s)", ev(r, 0), rows2[r])
+		w("\tVMOVUPS %s, 64(%s)", ev(r, 1), rows2[r])
 	}
 	w("\tVZEROUPPER")
 	w("\tRET")

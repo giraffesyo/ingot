@@ -20,6 +20,11 @@ const (
 
 // fmlaElem encodes FMLA <Vd>.4S, <Vn>.4S, <Vm>.S[idx]  (Vd += Vn * Vm[idx]).
 // ARM ARM: 0 Q 0 01111 1 sz L M Rm 0001 H 0 Rn Rd ; Q=1, sz=0, index=H:L, Vm=M:Rm.
+// fadd encodes FADD <Vd>.4S, <Vn>.4S, <Vm>.4S.
+func fadd(d, n, m int) uint32 {
+	return 0x4E20D400 | uint32(m)<<16 | uint32(n)<<5 | uint32(d)
+}
+
 func fmlaElem(rd, rn, rm, idx int) uint32 {
 	l := uint32(idx & 1)
 	h := uint32(idx >> 1)
@@ -55,12 +60,10 @@ func main() {
 	for r := 1; r < MR; r++ {
 		w("\tADD R4, %s, %s", rowReg(r-1), rowReg(r))
 	}
-	w("\tCBZ R5, zero")
-	for r := 0; r < MR; r++ {
-		w("\tVLD1 (%s), [V%d.S4, V%d.S4, V%d.S4]", rowReg(r), acc(r, 0), acc(r, 1), acc(r, 2))
-	}
-	w("\tB kloop")
-	w("zero:")
+	// Accumulators always start at zero; when accumulating, C is added at
+	// the store (C + sum) — the same grouping as the edge-tile spill and the
+	// other kernels, so a row's bits cannot depend on whether it went through
+	// a full panel or an edge tile (batch invariance).
 	for r := 0; r < MR; r++ {
 		for cc := 0; cc < 3; cc++ {
 			v := acc(r, cc)
@@ -81,6 +84,15 @@ func main() {
 	w("\tSUB $1, R0, R0")
 	w("\tB ktail")
 	w("store:")
+	w("\tCBZ R5, storeraw")
+	for r := 0; r < MR; r++ {
+		w("\tVLD1 (%s), [V0.S4, V1.S4, V2.S4]", rowReg(r))
+		for cc := 0; cc < 3; cc++ {
+			v := acc(r, cc)
+			w("\tWORD $0x%08X // FADD V%d.4S, V%d.4S, V%d.4S", fadd(v, v, cc), v, v, cc)
+		}
+	}
+	w("storeraw:")
 	for r := 0; r < MR; r++ {
 		w("\tVST1 [V%d.S4, V%d.S4, V%d.S4], (%s)", acc(r, 0), acc(r, 1), acc(r, 2), rowReg(r))
 	}

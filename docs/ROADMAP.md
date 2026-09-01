@@ -157,9 +157,10 @@
       rec declared on amd64 (rec_b8 −15% Zen 5; Apple +11% → arm64 stays
       pipeline); det measured +4-8% blocked → stays pipeline. SE pooling
       chunks now deterministic (batch bit-exactness)
-- [ ] rec_batch_test fails on amd64 (PRE-EXISTING, discovered when the OCR
-      suite first ran on x86): single-vs-batch low-bit drift + padding
-      flips borderline chars; arm64 passes
+- [x] rec_batch amd64 fixed: GEMM accumulation grouping unified — paired
+      kernel mirrors the single kernel's dual banks; all kernels defer the
+      C-add to the store (edge tiles ≡ full panels bitwise). TestMInvariance
+      pins it; m==1 GEMV documented as exempt. Full OCR suite green on x86
 - [x] pool-width default: min(GOMAXPROCS, 12) on amd64 (Zen 5 rigorous sweep:
       w12 wins/ties every model; Zen 4 agreed in Aug; Apple scales to full
       width so arm64 keeps GOMAXPROCS) — out-of-box effnet −6.7%, gptish
