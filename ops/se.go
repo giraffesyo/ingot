@@ -97,9 +97,12 @@ func (o *seOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		// sm[n*C+cb*8+l] is channel cb*8+l — natural order, so the FC chain
 		// below is layout-blind. Pool in two phases with spatial chunks:
 		// N*C/8 plane tasks starve a wide pool at small C / large planes
-		// (effnet's early SE: 4 tasks on 32 workers).
+		// (effnet's early SE: 4 tasks on 32 workers). The chunk count is a
+		// FIXED function of P — never of the worker count or batch size —
+		// so partial-sum grouping (and thus low-bit results) is deterministic:
+		// rec's batch test requires single-vs-batched bit-exactness.
 		NCB := N * C / blkC
-		chunks := max(1, min(P/2048, 2*par.Workers()/max(1, NCB)))
+		chunks := max(1, min(P/2048, 16))
 		var part []float32
 		var pscr *tensor.Tensor
 		if chunks > 1 {

@@ -51,6 +51,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = fuseAttention(g, stats) || changed
 		changed = fuseSDPA(g, stats) || changed
 	}
+	propagateShapes(g)
 	assignBlockedLayout(g, stats)
 	fuseBlkResidual(g, stats)
 	renumber(g)

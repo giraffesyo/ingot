@@ -6,6 +6,7 @@ import (
 	"image"
 	"math"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/giraffesyo/ingot/graph"
@@ -33,6 +34,14 @@ func NewRecognizer(modelPath, dictPath string) (*Recognizer, error) {
 	g, err := graph.FromONNX(m)
 	if err != nil {
 		return nil, err
+	}
+	if len(g.Inputs) == 1 && runtime.GOARCH == "amd64" {
+		// Typical line-crop extent (48-high, ~320 wide): steers layout
+		// placement only; batched and wider runs stay correct. amd64 only —
+		// blocked rec measured rec_b8 −15% on Zen 5 but rec_320 +11% on
+		// Apple silicon (the blocked-conv advantage is an x86 story; NEON
+		// pipeline GEMM wins there).
+		_ = g.SetInputShape(g.Inputs[0].Name, 1, 3, 48, 320)
 	}
 	s, err := graph.Compile(g)
 	if err != nil {

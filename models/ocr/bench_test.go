@@ -40,7 +40,7 @@ func init() {
 	}
 }
 
-func loadOCRSession(tb testing.TB, model string) (*graph.Session, string) {
+func loadOCRSession(tb testing.TB, model string, shape ...int) (*graph.Session, string) {
 	tb.Helper()
 	path := "../../testdata/ocr/" + model
 	if _, err := os.Stat(path); err != nil {
@@ -54,6 +54,11 @@ func loadOCRSession(tb testing.TB, model string) (*graph.Session, string) {
 	if err != nil {
 		tb.Fatal(err)
 	}
+	if len(shape) > 0 && len(g.Inputs) == 1 {
+		if err := g.SetInputShape(g.Inputs[0].Name, shape...); err != nil {
+			tb.Fatal(err)
+		}
+	}
 	s, err := graph.Compile(g)
 	if err != nil {
 		tb.Fatal(err)
@@ -64,7 +69,7 @@ func loadOCRSession(tb testing.TB, model string) (*graph.Session, string) {
 func BenchmarkOCRModels(b *testing.B) {
 	for _, c := range ocrBenchShapes {
 		b.Run(c.name, func(b *testing.B) {
-			s, in := loadOCRSession(b, c.model)
+			s, in := loadOCRSession(b, c.model, c.shape...)
 			x := tensor.New(tensor.F32, c.shape...)
 			for i := range x.F32() {
 				x.F32()[i] = float32(i%97)/97 - 0.5
@@ -96,7 +101,7 @@ func TestOCRProfile(t *testing.T) {
 		if c.name != want {
 			continue
 		}
-		s, in := loadOCRSession(t, c.model)
+		s, in := loadOCRSession(t, c.model, c.shape...)
 		x := tensor.New(tensor.F32, c.shape...)
 		feeds := map[string]*tensor.Tensor{in: x}
 		for i := 0; i < 3; i++ {
