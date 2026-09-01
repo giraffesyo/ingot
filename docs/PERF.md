@@ -1881,3 +1881,26 @@ mv2 is now 1.38× ORT-16T (~1.45); **mv3_small is FASTER than ORT's best
 (−19%), mv3 1.60 → 1.09 (−32%), effnet 3.76 → 3.38 (−10%). Remaining
 mv2 nodes: stem im2col conv (~192 µs), thin-cin pw kernel width
 (AVX-512 6×32 candidate), scalar ToBlk8 interleave.
+
+## Blocked SE chunking + ZMM pointwise tile (2026-09-01)
+
+Re-profiling after the epilogue fusion put effnet's fused SE at 955 µs
+(27% of the model): the blocked SE pool/scale stages had the same
+N·C/8 plane granularity as everything else that starved (4 tasks at
+112²×32). Pooling now runs two-phase (spatial-chunk partial sums, tiny
+serial reduce) and scaling chunks like the conversions: **effnet
+3.44 → 3.15 ms (−8.5%)**; mv2/mv3 unaffected as expected.
+
+Second item: pwblk6x16z — the ZMM variant of the blocked pointwise
+tile. The packed weight pair [ci][16] is exactly one 512-bit load, so
+each ci costs 1 wload + 6 broadcasts + 6 FMAs vs the AVX2 form's
+2 + 6 + 12. Same layouts, drop-in signature; selected by an init-time
+micro-probe (>5% relative win required — gemm's µkernel-pick policy;
+OCR_PWBLK=avx2|avx512 pins), concrete calls behind a bool so noescape
+survives. Verified on Zen 5 + CI Ice Lake; Rosetta skips. On top of SE
+chunking: **mv2 2.00 → 1.95 (−2.6%), effnet → 3.10, mv3 → 1.05** —
+small at model level because the pointwise op is now bandwidth-bound,
+not issue-bound.
+
+Round total: effnet 3.44 → 3.10 (−10%), mv2 −3%, mv3 −3%. Today's
+cumulative: mv2 2.48 → 1.95, effnet 3.76 → 3.10, mv3_small 1.60 → 1.05.
