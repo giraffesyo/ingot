@@ -2014,3 +2014,15 @@ DISCOVERED, pre-existing: models/ocr rec_batch_test FAILS on amd64
 (old and new binaries identically) — single-vs-batch low-bit drift and
 padding flipping borderline chars. It had never run on x86 (CI skips
 gitignored testdata). Open item; arm64 passes.
+
+## Apple M-series re-baseline (2026-09-01)
+
+Full zoo on the dev box (load 2.5-7 — treat as ±10-20% envelopes; medians
+of 6, minima in parens): mv2 2.72 (2.24), effnet 3.86 (3.18), mv3_small
+1.64 (1.49), resnetish 0.34 (0.32), gptish 11.6 (9.5), vit 0.13,
+bertish 0.086, llmblock 0.029, tiny_conv 0.051, tiny_transformer 0.024.
+First recorded Apple numbers since the NCHWc/region arc — the week's
+x86 rounds left the arm64 paths untouched or arch-gated, and the OCR
+pipeline numbers (det ~8-9 ms, rec ~2.9-3.0 ms) match the pre-arc
+records within noise. Rerun on a quiet box before drawing conclusions
+finer than that.
