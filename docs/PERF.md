@@ -1831,3 +1831,30 @@ mv2 ~1.45-1.51, mv3 ~1.2-1.9; 32T thrashes (effnet 10.8-18, mv2
 3.0-5.9). ingot effnet 3.74 is now ~2.4× faster than ORT's best config;
 mv2 2.48 trails ORT-16T ~1.7× (was 3× at the start of the CNN arc);
 mv3 1.60 ≈ parity. Conformance and optimizer A/B identical.
+
+## NCHWc task starvation: strips and chunks (2026-09-01)
+
+Per-node profile of mv2 (2.48 ms) put 45% of the model in its first ten
+nodes, and the reason wasn't kernels: ConvDwBlk ran one task per channel
+block — mv2's early dw convs are C=32, i.e. FOUR tasks on 32 workers —
+and each task first copied the whole padded plane (416 KB at 112²)
+behind those four streams. ToBlk8/FromBlk8 had the same N·C/8
+granularity (the region-entry conversion at 112²×32: 4 tasks, 146 µs —
+as expensive as the stem conv).
+
+Fixes, all pure Go: ConvDwBlk now splits planes into row strips
+(~2 tasks/worker, each strip copies only its input window, K−1 halo
+rows), and the conversions chunk over spatial ranges (contiguous dst per
+block/range). Zen 5 pod, interleaved medians of 6: **mv2 2.48 → 2.20 ms
+(−11.3%), mv3_small 1.60 → 1.48 (−7.3%), effnet 3.76 → 3.57 (−5.2%)**.
+ToBlk8 146→72 µs, dw@112² 123→87, dw-s2@112² 166→83.
+
+A gate sweep (OCR_BLK_GATE env, new) with the fixes in place settles the
+large-plane question: seeding at ≤56² or ≤28² is WORSE everywhere
+(mv2 2.20 → 2.44 → 2.61) — the "+39% at det-scale planes" verdict was
+partly starvation, and blocked now wins at 112² too. Default gate stays
+224²; det/rec remain excluded by dynamic shapes, so the knob is for
+sweeps, not policy. Remaining mv2 top nodes: thin-cin blocked pointwise
+(pw 16→96 @112² = 183 µs; cin=16 reloads the 16-wide weight pair every 6
+positions), the im2col stem (192 µs), scalar ToBlk8 interleave (72 µs).
+mv2 2.20 vs ORT-16T ~1.45 → 1.5× (arc start: 3×).

@@ -133,6 +133,10 @@
       inferred shapes (mv3 had no value_info → no seeds). effnet −19.6%
       (3.74 ms, ~2.4× faster than ORT's best), mv3_small −19% vs shipped;
       wins on Apple too (effnet −11%, mv3 −15%)
+- [x] NCHWc task starvation: ConvDwBlk row strips (was 1 task/channel-block
+      → 4 tasks at C=32 on 32 workers), ToBlk8/FromBlk8 spatial chunks —
+      mv2 −11%, mv3 −7%, effnet −5% (Zen 5); gate sweep with fixes says
+      224² stays right (56²/28² worse). Next: thin-cin pw kernel, stem
 - [x] SE islands fused (ingot.SE: det 10, mv3 9, effnet 16 — effnet −9%,
       mv3 −8% on Zen 5); sigmoid subnormal flush (amd64, preventive)
 - [x] amd64 bf16 kernel (VDPBF16PS, BYTE-encoded): Zen 5 peak probe 1.45× f32
