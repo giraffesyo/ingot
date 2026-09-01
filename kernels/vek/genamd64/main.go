@@ -929,32 +929,78 @@ func (g *gen) dwblkgen(K, S int) {
 // + 6 broadcasts feed 12 FMAs (the paired-panel load ratio, applied from
 // day one).
 func (g *gen) pwblk() {
-	g.w("// func pwblk6x16_asm(dst0, dst1, x, w []float32, cin, xbstride int)")
-	g.w("// dst0/dst1: 6 positions x 8 each; x: base at position 0 of block 0;")
-	g.w("// xbstride: bytes between input channel blocks; w: [cin][16].")
-	g.w("TEXT ·pwblk6x16_asm(SB), NOSPLIT, $0-112")
+	g.pwblkKernel(false, false)
+	g.pwblkKernel(false, true)
+}
+
+// pwblkKernel emits one blocked-pointwise tile kernel.
+// zmm: the weight pair [ci][16] is one 512-bit load (1 wload + 6 broadcasts +
+// 6 FMAs per ci vs AVX2's 2+6+12); selection is probed in pwblk_amd64.go.
+// looped: process `tiles` consecutive 6-position tiles in asm (dst/x advance
+// 192 B per tile, weights rewind) — the per-tile Go call and its bounds
+// checks were 13% of mv2's CPU profile.
+// dst0/dst1: 6 positions x 8 each; x: base at position 0 of block 0;
+// xbstride: bytes between input channel blocks; w: [cin][16].
+func (g *gen) pwblkKernel(zmm, looped bool) {
+	name := "pwblk6x16"
+	if zmm {
+		name += "z"
+	}
+	if looped {
+		name += "t"
+	}
+	frame, sig := 112, "(dst0, dst1, x, w []float32, cin, xbstride int)"
+	if looped {
+		frame, sig = 120, "(dst0, dst1, x, w []float32, cin, xbstride, tiles int)"
+	}
+	g.w("// func %s_asm%s", name, sig)
+	g.w("TEXT ·%s_asm(SB), NOSPLIT, $0-%d", name, frame)
 	g.w("\tMOVQ dst0_base+0(FP), DI")
 	g.w("\tMOVQ dst1_base+24(FP), SI")
 	g.w("\tMOVQ x_base+48(FP), DX")
 	g.w("\tMOVQ w_base+72(FP), BX")
 	g.w("\tMOVQ cin+96(FP), CX")
 	g.w("\tMOVQ xbstride+104(FP), R10")
-	for r := 0; r < 12; r++ {
-		g.w("\tVXORPS Y%d, Y%d, Y%d", r, r, r)
+	if looped {
+		g.w("\tMOVQ tiles+112(FP), R12")
+		g.w("\tMOVQ BX, R13 // w base (rewinds per tile)")
+		g.w("\tMOVQ CX, R15 // cin (reloaded per tile)")
+		g.w("tileloop:")
+		g.w("\tTESTQ R12, R12")
+		g.w("\tJE alldone")
+		g.w("\tMOVQ R13, BX")
+		g.w("\tMOVQ R15, CX")
+	}
+	nacc := 12
+	if zmm {
+		nacc = 6
+	}
+	for r := 0; r < nacc; r++ {
+		g.w("\tVXORPS X%d, X%d, X%d", r, r, r) // VEX zeroing clears the full register
 	}
 	g.w("\tMOVQ DX, R8  // current block base")
 	g.w("\tXORQ R9, R9  // ci within block")
 	g.w("pwloop:")
 	g.w("\tTESTQ CX, CX")
 	g.w("\tJE pwdone")
-	g.w("\tVMOVUPS (BX), Y12")
-	g.w("\tVMOVUPS 32(BX), Y13")
-	g.w("\tADDQ $64, BX")
+	if zmm {
+		g.w("\tVMOVUPS (BX), Z6")
+		g.w("\tADDQ $64, BX")
+	} else {
+		g.w("\tVMOVUPS (BX), Y12")
+		g.w("\tVMOVUPS 32(BX), Y13")
+		g.w("\tADDQ $64, BX")
+	}
 	g.w("\tLEAQ (R8)(R9*4), R11 // &x[block][0][ci]")
 	for p := 0; p < 6; p++ {
-		g.w("\tVBROADCASTSS %d(R11), Y14", p*32)
-		g.w("\tVFMADD231PS Y14, Y12, Y%d", 2*p)
-		g.w("\tVFMADD231PS Y14, Y13, Y%d", 2*p+1)
+		if zmm {
+			g.w("\tVBROADCASTSS %d(R11), Z7", p*32)
+			g.w("\tVFMADD231PS Z7, Z6, Z%d", p)
+		} else {
+			g.w("\tVBROADCASTSS %d(R11), Y14", p*32)
+			g.w("\tVFMADD231PS Y14, Y12, Y%d", 2*p)
+			g.w("\tVFMADD231PS Y14, Y13, Y%d", 2*p+1)
+		}
 	}
 	g.w("\tINCQ R9")
 	g.w("\tCMPQ R9, $8")
@@ -966,12 +1012,31 @@ func (g *gen) pwblk() {
 	g.w("\tJMP pwloop")
 	g.w("pwdone:")
 	for p := 0; p < 6; p++ {
-		g.w("\tVMOVUPS Y%d, %d(DI)", 2*p, p*32)
-		g.w("\tVMOVUPS Y%d, %d(SI)", 2*p+1, p*32)
+		if zmm {
+			g.w("\tVMOVUPS Y%d, %d(DI)", p, p*32)
+			g.w("\tVEXTRACTF64X4 $1, Z%d, Y7", p)
+			g.w("\tVMOVUPS Y7, %d(SI)", p*32)
+		} else {
+			g.w("\tVMOVUPS Y%d, %d(DI)", 2*p, p*32)
+			g.w("\tVMOVUPS Y%d, %d(SI)", 2*p+1, p*32)
+		}
+	}
+	if looped {
+		g.w("\tADDQ $192, DI")
+		g.w("\tADDQ $192, SI")
+		g.w("\tADDQ $192, DX")
+		g.w("\tDECQ R12")
+		g.w("\tJMP tileloop")
+		g.w("alldone:")
 	}
 	g.w("\tVZEROUPPER")
 	g.w("\tRET")
 	g.w("")
+}
+
+func (g *gen) pwblkZ() {
+	g.pwblkKernel(true, false)
+	g.pwblkKernel(true, true)
 }
 
 // mulblk8: dst = src * s with the 8-lane channel pattern s repeated across an
@@ -1046,53 +1111,6 @@ func (g *gen) sumblk8() {
 	g.w("\tVADDPS Y3, Y2, Y2")
 	g.w("\tVADDPS Y2, Y0, Y0")
 	g.w("\tVMOVUPS Y0, (DI)")
-	g.w("\tVZEROUPPER")
-	g.w("\tRET")
-	g.w("")
-}
-
-// pwblkZ: ZMM variant of the blocked pointwise tile — the packed weight pair
-// [ci][16] is exactly one 512-bit load, so each ci costs 1 wload + 6
-// broadcasts + 6 FMAs (the AVX2 form needs 2 + 6 + 12). Same signature and
-// layouts; selection is probed at init in pwblk_amd64.go.
-func (g *gen) pwblkZ() {
-	g.w("// func pwblk6x16z_asm(dst0, dst1, x, w []float32, cin, xbstride int)")
-	g.w("TEXT ·pwblk6x16z_asm(SB), NOSPLIT, $0-112")
-	g.w("\tMOVQ dst0_base+0(FP), DI")
-	g.w("\tMOVQ dst1_base+24(FP), SI")
-	g.w("\tMOVQ x_base+48(FP), DX")
-	g.w("\tMOVQ w_base+72(FP), BX")
-	g.w("\tMOVQ cin+96(FP), CX")
-	g.w("\tMOVQ xbstride+104(FP), R10")
-	for r := 0; r < 6; r++ {
-		g.w("\tVXORPS X%d, X%d, X%d", r, r, r) // VEX zeroing clears the full ZMM
-	}
-	g.w("\tMOVQ DX, R8  // current block base")
-	g.w("\tXORQ R9, R9  // ci within block")
-	g.w("pwzloop:")
-	g.w("\tTESTQ CX, CX")
-	g.w("\tJE pwzdone")
-	g.w("\tVMOVUPS (BX), Z6")
-	g.w("\tADDQ $64, BX")
-	g.w("\tLEAQ (R8)(R9*4), R11 // &x[block][0][ci]")
-	for p := 0; p < 6; p++ {
-		g.w("\tVBROADCASTSS %d(R11), Z7", p*32)
-		g.w("\tVFMADD231PS Z7, Z6, Z%d", p)
-	}
-	g.w("\tINCQ R9")
-	g.w("\tCMPQ R9, $8")
-	g.w("\tJL pwznext")
-	g.w("\tXORQ R9, R9")
-	g.w("\tADDQ R10, R8")
-	g.w("pwznext:")
-	g.w("\tDECQ CX")
-	g.w("\tJMP pwzloop")
-	g.w("pwzdone:")
-	for p := 0; p < 6; p++ {
-		g.w("\tVMOVUPS Y%d, %d(DI)", p, p*32)
-		g.w("\tVEXTRACTF64X4 $1, Z%d, Y7", p)
-		g.w("\tVMOVUPS Y7, %d(SI)", p*32)
-	}
 	g.w("\tVZEROUPPER")
 	g.w("\tRET")
 	g.w("")

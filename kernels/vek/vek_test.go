@@ -564,3 +564,38 @@ func TestSumBlk8(t *testing.T) {
 		}
 	}
 }
+
+// TestPwBlk6x16Tiles checks the asm-looped multi-tile entry against
+// per-tile reference calls.
+func TestPwBlk6x16Tiles(t *testing.T) {
+	for _, cin := range []int{8, 16, 96} {
+		for _, tiles := range []int{1, 2, 3, 7} {
+			nb := cin / 8
+			P := tiles * 6
+			x := make([]float32, nb*P*8)
+			w := make([]float32, cin*16)
+			for i := range x {
+				x[i] = float32(i%19)*0.05 - 0.4
+			}
+			for i := range w {
+				w[i] = float32(i%23)*0.04 - 0.5
+			}
+			g0 := make([]float32, P*8)
+			g1 := make([]float32, P*8)
+			w0 := make([]float32, P*8)
+			w1 := make([]float32, P*8)
+			PwBlk6x16Tiles(g0, g1, x, w, cin, P*8*4, tiles)
+			for ti := 0; ti < tiles; ti++ {
+				pwBlkRef(w0[ti*48:], w1[ti*48:], x[ti*48:], w, cin, P*8*4)
+			}
+			for i := range w0 {
+				if d := g0[i] - w0[i]; d > 1e-3 || d < -1e-3 {
+					t.Fatalf("cin=%d tiles=%d dst0[%d]: got %g want %g", cin, tiles, i, g0[i], w0[i])
+				}
+				if d := g1[i] - w1[i]; d > 1e-3 || d < -1e-3 {
+					t.Fatalf("cin=%d tiles=%d dst1[%d]: got %g want %g", cin, tiles, i, g1[i], w1[i])
+				}
+			}
+		}
+	}
+}
