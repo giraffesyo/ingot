@@ -203,6 +203,10 @@
       Default-on (auto): SME when the pool is single-threaded, NEON at MT.
       TODO: hybrid SME+NEON MT scheduling, linux detection (HWCAP2_SME)
 - [x] rec batching in the OCR pipeline (width-grouped, padding-bounded)
+- [x] angle classifier: Pipeline.EnableClassifier runs the PP-OCR direction
+      model per box batch; 180° correction = box-corner relabelling (no pixel
+      work). Upright corpus untouched, flipped crops 3/3 caught, thresh 0.9.
+      Still open in rec: beam search / LM decode (CTC greedy today)
 
 ## Coverage (breadth)
 - [x] model zoo conformance harness (graph.TestZoo, auto-discovers manifests)
