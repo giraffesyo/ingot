@@ -20,3 +20,4 @@ det_boxes.png
 
 # Private local notes (benchmarking environment, machine specifics) — never commit
 /docs/private.md
+__pycache__/
