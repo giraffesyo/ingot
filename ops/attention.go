@@ -155,6 +155,16 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	a, bm, v := in[0], in[1], in[2]
 	var mask []float32
 	as, bs, vs := a.Shape(), bm.Shape(), v.Shape()
+	// Rank-3 operands (batch and heads pre-flattened — dynamo bmm exports,
+	// e.g. PARSeq): identical math as [1, B·H, T, dh]. Default layouts only;
+	// the layout/stride variants are rank-4 exporter patterns.
+	rank3 := len(as) == 3 && len(bs) == 3 && len(vs) == 3 &&
+		o.aLay == 0 && o.bLay == 0 && o.vLay == 0 && !o.strideOut
+	if rank3 {
+		as = append([]int{1}, as...)
+		bs = append([]int{1}, bs...)
+		vs = append([]int{1}, vs...)
+	}
 	if a.DType() != tensor.F32 || len(as) != 4 || len(bs) != 4 || len(vs) != 4 {
 		return nil, o.n.Errorf("SDPA: want 4-D f32, got %v %v %v", as, bs, vs)
 	}
@@ -199,6 +209,8 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	var out *tensor.Tensor
 	if o.strideOut {
 		out = ctx.NewUninit(tensor.F32, B, T, H, dh)
+	} else if rank3 {
+		out = ctx.NewUninit(tensor.F32, H, T, dh) // same flat layout, B == 1
 	} else {
 		out = ctx.NewUninit(tensor.F32, B, H, T, dh)
 	}
