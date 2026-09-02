@@ -2165,3 +2165,41 @@ crop and read as a 12-point loss before the shift was found). The
 sampling cost is invisible next to the forward (IIIT5K ms/word moved
 with machine load, not with the mode).
 
+## fuse-mha-packed: attention reads the qkv Linear in place (2026-09-02)
+
+After fuse-sdpa, PARSeq still ran two permute copies per encoder layer:
+the dynamo exporter's `view [B,T,3,H,dh] → Transpose(2,0,3,1,4) → unbind`
+(3·B·T·H·dh floats materialised, 4.7 MB at batch 8) and the key's
+`Reshape([-1,T,dh]) → Transpose(0,2,1) → Reshape([B,H,dh,T])` chain
+(another B·H·T·dh) — 12 layers × ~12 MB of traffic per run, 11% of the
+batch-8 profile. The new pass matches an SDPA node whose three inputs
+unpack from one such permute and rewrites it to ingot.MHA layout 1: the
+op reads q/k/v strided straight from the view (row stride 3·H·dh) and
+writes [B,T,H,dh]. The key chain's Reshape targets are runtime
+Shape/Slice/Concat plumbing, so the pass evaluates them symbolically
+(symShape: literals, Shape(x) dims, Slice/Concat/Gather) and checks
+[-1, T, dh] then [B, H, dh, T] against the squeezed key's dims; the
+plumbing dies with the chain (shapeSinks), which is also where most of
+the model's ~1000 small per-run allocations went (1019 → 611).
+
+Zen 5 pod, 12 workers, medians of 6 interleaved:
+
+| model | before | after | Δ | ORT-16T |
+|---|---|---|---|---|
+| parseq_128 | 10.89 ms | 9.54 | −12.4% | 12.21 (0.78×) |
+| parseq_b8_128 | 70.1 | 59.8 | −14.8% | 61.4 (0.97×) |
+| parseq_nar (zoo) | 11.55 | 9.89 | −14.3% | |
+| parseq_nar_b3 | 31.0 | 25.8 | −16.8% | |
+| bertish | 58.4 µs | 58.3 | flat (legacy MHA form) | |
+
+Apple (loaded): parseq_b8 88 → 58 ms, parseq_128 ~14 → ~10.6.
+Conformance 1.2e-5 / 2.3e-5 unchanged; TestOptimizeAB now pins the fusion
+counts on parseq (fuse-sdpa 16, fuse-mha-packed 12, fuse-gelu 15).
+
+Day arc for PARSeq on the pod: 13.7 → 9.5 ms (B=1), 100 → 60 ms (B=8).
+Remaining profile at B=1: MatMul 57%, Add 14% (105 nodes — bias adds and
+residuals at ~13 µs each where the math is ~3 µs: region churn), MHA 11%,
+LayerNorm 6.5%. The next transformer lever is a GEMM epilogue (bias,
+GELU, residual applied cache-hot per tile, as conv already does) so the
+Add/Gelu passes disappear.
+

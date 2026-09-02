@@ -237,6 +237,11 @@
       were leaving the pool idle). Open: preprocessing is nearest-sampled
       (PARSeq trains with bicubic), dynamic-shape plumbing costs ~1k small
       allocs/run (Shape/Concat/Slice on shape tensors), AR decode export.
+- [x] fuse-mha-packed: the dynamo exporter's attention block (qkv view →
+      5-D permute → unbind, key Reshape/Transpose/Reshape chain verified with
+      a symbolic shape evaluator) folds into ingot.MHA layout 1 reading the
+      packed [B,T,3,H,dh] tensor strided. PARSeq −12/−15% (B=1/8), 618→426
+      nodes, allocs/run 1019→611; now 0.78×/0.97× ORT-16T on Zen 5.
 - [x] IIIT5K-Word eval (tools/export/iiit5k.py → testdata/iiit5k, gitignored;
       models/ocr TestIIIT5K, case-insensitive alnum protocol): PARSeq 97.6%
       (paper 97.0), PP-OCRv4 rec 89.5%. Crop sampling is now bilinear (PARSeq

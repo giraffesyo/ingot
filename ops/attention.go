@@ -11,13 +11,17 @@ import (
 )
 
 // mhaOp is the fused multi-head attention produced by the graph optimizer's
-// fuse-attention pass: input is packed QKV [3, B, H, T, dh]; the op computes
-// softmax(scale·Q·Kᵀ)·V per (batch, head) and writes the result directly in
-// [B, T, H, dh] order (the final transpose of the exported pattern folds into
-// the output GEMM's leading dimension).
+// fuse-attention passes: input is packed QKV — layout 0 [3, B, H, T, dh]
+// (legacy exporter: head-split permute then unbind) or layout 1
+// [B, T, 3, H, dh] (dynamo exporter: the qkv Linear's output viewed 5-D, read
+// strided so the permute never runs); the op computes softmax(scale·Q·Kᵀ)·V
+// per (batch, head) and writes the result directly in [B, T, H, dh] order
+// (the final transpose of the exported pattern folds into the output GEMM's
+// leading dimension).
 type mhaOp struct {
-	n     NodeInfo
-	scale float32
+	n      NodeInfo
+	scale  float32
+	packed bool // layout 1
 }
 
 func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
@@ -26,14 +30,32 @@ func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	x := in[0]
 	xs := x.Shape()
-	if x.DType() != tensor.F32 || len(xs) != 5 || xs[0] != 3 {
-		return nil, o.n.Errorf("MHA: want f32 [3,B,H,T,dh], got %s %v", x.DType(), xs)
+	var B, H, T, dh int
+	// Per-(b,h) operand addressing: q/k/v row t at base + t*ld.
+	var qOff, kOff, vOff func(b, h int) int
+	var ld int
+	if o.packed {
+		if x.DType() != tensor.F32 || len(xs) != 5 || xs[2] != 3 {
+			return nil, o.n.Errorf("MHA: want f32 [B,T,3,H,dh], got %s %v", x.DType(), xs)
+		}
+		B, T, H, dh = xs[0], xs[1], xs[3], xs[4]
+		ld = 3 * H * dh
+		qOff = func(b, h int) int { return b*T*ld + h*dh }
+		kOff = func(b, h int) int { return b*T*ld + H*dh + h*dh }
+		vOff = func(b, h int) int { return b*T*ld + 2*H*dh + h*dh }
+	} else {
+		if x.DType() != tensor.F32 || len(xs) != 5 || xs[0] != 3 {
+			return nil, o.n.Errorf("MHA: want f32 [3,B,H,T,dh], got %s %v", x.DType(), xs)
+		}
+		B, H, T, dh = xs[1], xs[2], xs[3], xs[4]
+		ld = dh
+		plane := T * dh
+		qOff = func(b, h int) int { return (b*H + h) * plane }
+		kOff = func(b, h int) int { return B*H*plane + (b*H+h)*plane }
+		vOff = func(b, h int) int { return 2*B*H*plane + (b*H+h)*plane }
 	}
-	B, H, T, dh := xs[1], xs[2], xs[3], xs[4]
 	out := ctx.NewUninit(tensor.F32, B, T, H, dh)
 	xf, of := x.F32(), out.F32()
-	plane := T * dh
-	qBase, kBase, vBase := 0, B*H*plane, 2*B*H*plane
 	workers := par.Workers()
 	rows, nRow := attnRows(B, H, T, T, dh, workers)
 	gemmT := gemm.SgemmTSerial // see sdpaOp: nested per-head fan-out never pays
@@ -47,18 +69,17 @@ func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		b, h := bh/H, bh%H
 		t0 := rc * rows
 		tc := min(rows, T-t0)
-		off := (b*H + h) * plane
-		q := xf[qBase+off+t0*dh:]
-		k := xf[kBase+off : kBase+off+plane]
-		v := xf[vBase+off : vBase+off+plane]
+		q := xf[qOff(b, h)+t0*ld:]
+		k := xf[kOff(b, h):]
+		v := xf[vOff(b, h):]
 		s := sAll[wk*rows*T:]
 		// scores = scale · Q·Kᵀ (K stays row-major: the transposed-B GEMM).
-		gemmT(false, true, tc, T, dh, o.scale, q, dh, k, dh, 0, s, T)
+		gemmT(false, true, tc, T, dh, o.scale, q, ld, k, ld, 0, s, T)
 		for t := 0; t < tc; t++ {
 			softmaxRow(s[t*T:(t+1)*T], s[t*T:(t+1)*T], false)
 		}
 		// out[b, t0:, h, :] = probs·V, written straight into [B,T,H,dh] via ldc.
-		gemmT(false, false, tc, dh, T, 1, s, T, v, dh, 0, of[((b*T+t0)*H+h)*dh:], H*dh)
+		gemmT(false, false, tc, dh, T, 1, s, T, v, ld, 0, of[((b*T+t0)*H+h)*dh:], H*dh)
 	})
 	if ctx.Pool != nil {
 		ctx.Pool.Put(sT)
@@ -405,7 +426,7 @@ func attnGrain(rows, tk, dh int) int {
 
 func init() {
 	Register("ingot", "MHA", 1, func(n NodeInfo) (Op, error) {
-		return &mhaOp{n: n, scale: n.Attrs.Float("scale", 1)}, nil
+		return &mhaOp{n: n, scale: n.Attrs.Float("scale", 1), packed: n.Attrs.Int("layout", 0) == 1}, nil
 	})
 	Register("ingot", "SDPA", 1, func(n NodeInfo) (Op, error) {
 		return &sdpaOp{n: n, scale: n.Attrs.Float("scale", 1), strideOut: n.Attrs.Int("stride_out", 0) != 0,
