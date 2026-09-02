@@ -5,10 +5,22 @@ import (
 	"sort"
 )
 
+// BoxRecognizer recognises the text inside image crops. Recognizer (PP-OCR
+// CTC line recogniser) and Parseq (scene-text word recogniser) implement it.
+type BoxRecognizer interface {
+	// RecognizeBatch recognises boxes in one forward pass, returning text and
+	// confidence per box in order.
+	RecognizeBatch(img image.Image, boxes []Box) ([]string, []float64, error)
+	// CropWidth is the model-input width the box's crop takes. Pipeline groups
+	// boxes of similar width into a batch to bound padding; fixed-size models
+	// return a constant.
+	CropWidth(box Box) int
+}
+
 // Pipeline bundles detection and recognition into an end-to-end OCR.
 type Pipeline struct {
 	Det *Detector
-	Rec *Recognizer
+	Rec BoxRecognizer
 	// Cls, when set (EnableClassifier), runs the PP-OCR direction classifier
 	// on every detected box and flips upside-down crops before recognition.
 	Cls *Classifier
@@ -95,8 +107,12 @@ func (p *Pipeline) RecognizeBoxes(img image.Image, boxes []Box) ([]string, []flo
 	for i := range order {
 		order[i] = i
 	}
+	widths := make([]int, len(boxes))
+	for i, b := range boxes {
+		widths[i] = p.Rec.CropWidth(b)
+	}
 	sort.SliceStable(order, func(a, b int) bool {
-		return cropWidth(boxes[order[a]], p.Rec.height) < cropWidth(boxes[order[b]], p.Rec.height)
+		return widths[order[a]] < widths[order[b]]
 	})
 	bs := max(1, p.RecBatch)
 	ratio := p.RecPadRatio
@@ -104,9 +120,9 @@ func (p *Pipeline) RecognizeBoxes(img image.Image, boxes []Box) ([]string, []flo
 		ratio = 1
 	}
 	for lo := 0; lo < len(order); {
-		w0 := float64(cropWidth(boxes[order[lo]], p.Rec.height))
+		w0 := float64(widths[order[lo]])
 		hi := lo + 1
-		for hi < len(order) && hi-lo < bs && float64(cropWidth(boxes[order[hi]], p.Rec.height)) <= w0*ratio {
+		for hi < len(order) && hi-lo < bs && float64(widths[order[hi]]) <= w0*ratio {
 			hi++
 		}
 		batch := make([]Box, 0, hi-lo)

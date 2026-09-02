@@ -28,6 +28,8 @@ var ocrBenchShapes = []struct {
 	{"rec_b8_320", "rec.onnx", tensor.Shape{8, 3, 48, 320}},
 	{"det_int8_640", "det_int8.onnx", tensor.Shape{1, 3, 640, 640}},
 	{"rec_int8_320", "rec_int8.onnx", tensor.Shape{1, 3, 48, 320}},
+	{"parseq_128", "../models/parseq_nar.onnx", tensor.Shape{1, 3, 32, 128}},
+	{"parseq_b8_128", "../models/parseq_nar.onnx", tensor.Shape{8, 3, 32, 128}},
 }
 
 func init() {
@@ -44,7 +46,7 @@ func loadOCRSession(tb testing.TB, model string, shape ...int) (*graph.Session, 
 	tb.Helper()
 	path := "../../testdata/ocr/" + model
 	if _, err := os.Stat(path); err != nil {
-		tb.Skip("PP-OCR models not present")
+		tb.Skipf("%s not present", model)
 	}
 	m, err := onnx.DecodeFile(path)
 	if err != nil {

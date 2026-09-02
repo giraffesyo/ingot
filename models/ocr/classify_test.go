@@ -93,9 +93,10 @@ func TestClassifier(t *testing.T) {
 	// And a flipped crop recognised through rot180 should match the upright
 	// recognition for at least most boxes (exercises the full correction path).
 	match := 0
+	rec := p.Rec.(*Recognizer)
 	for i, b := range boxes {
-		s1, _, _ := p.Rec.Recognize(img, b)
-		s2, _, _ := p.Rec.Recognize(img, rot180(rot180(b)))
+		s1, _, _ := rec.Recognize(img, b)
+		s2, _, _ := rec.Recognize(img, rot180(rot180(b)))
 		if s1 == s2 {
 			match++
 		}

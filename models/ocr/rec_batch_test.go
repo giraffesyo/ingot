@@ -33,9 +33,10 @@ func TestRecognizeBatchConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rec := p.Rec.(*Recognizer)
 	for _, b := range boxes {
-		s1, c1, _ := p.Rec.Recognize(img, b)
-		ts, cs, err := p.Rec.RecognizeBatch(img, []Box{b, b, b})
+		s1, c1, _ := rec.Recognize(img, b)
+		ts, cs, err := rec.RecognizeBatch(img, []Box{b, b, b})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,8 +55,8 @@ func TestRecognizeBatchConsistency(t *testing.T) {
 		}
 	}
 	for _, b := range boxes {
-		s1, _, _ := p.Rec.Recognize(img, b)
-		ts, _, _ := p.Rec.RecognizeBatch(img, []Box{b, wide})
+		s1, _, _ := rec.Recognize(img, b)
+		ts, _, _ := rec.RecognizeBatch(img, []Box{b, wide})
 		if ts[0] != s1 {
 			t.Logf("padding changes result: W=%d→%d: %q vs %q", cropWidth(b, 48), wmax, s1, ts[0])
 		}

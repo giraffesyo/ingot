@@ -15,22 +15,30 @@ torch.manual_seed(0); np.random.seed(0)
 
 def try_export(name, model, x):
     path = os.path.join(OUT, name + ".onnx")
-    torch.onnx.export(model, (x,), path, input_names=["x"], output_names=["logits"],
-                      opset_version=18, do_constant_folding=True)
+    # Dynamic batch: the pipeline recognises several crops per forward pass.
+    # The example input must have batch > 1 — torch.export specialises a
+    # dimension whose example extent is 1 (0/1 specialisation) and then
+    # refuses the dynamic hint.
+    xe = torch.cat([x, x])
+    torch.onnx.export(model, (xe,), path, input_names=["x"], output_names=["logits"],
+                      opset_version=18, do_constant_folding=True,
+                      dynamic_axes={"x": {0: "B"}, "logits": {0: "B"}})
     m = onnx.load(path); onnx.checker.check_model(m)
     sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-    outs = sess.run(None, {"x": x.numpy()})
-    man = {"model": name + ".onnx", "opset": 18, "inputs": [], "outputs": []}
-    xa = x.numpy(); f = f"{name}.in.0.bin"; xa.tofile(os.path.join(OUT, f))
-    man["inputs"].append({"name": "x", "dtype": str(xa.dtype), "shape": list(xa.shape), "file": f})
-    for i, (o, y) in enumerate(zip(sess.get_outputs(), outs)):
-        f = f"{name}.out.{i}.bin"; np.ascontiguousarray(y).tofile(os.path.join(OUT, f))
-        man["outputs"].append({"name": o.name, "dtype": str(y.dtype), "shape": list(y.shape), "file": f})
-    json.dump(man, open(os.path.join(OUT, name + ".json"), "w"), indent=1)
-    with torch.no_grad():
-        ref = model(x).numpy()
-    err = np.abs(outs[0] - ref).max()
-    print(f"{name}: {len(m.graph.node)} nodes, ORT-vs-torch max err {err:.2e}")
+    # Two manifests share the model: batch 1 and batch 3 (batch parity).
+    for tag, xb in ((name, x), (name + "_b3", torch.cat([x, x * 0.5, torch.randn_like(x)]))):
+        outs = sess.run(None, {"x": xb.numpy()})
+        man = {"model": name + ".onnx", "opset": 18, "inputs": [], "outputs": []}
+        xa = xb.numpy(); f = f"{tag}.in.0.bin"; xa.tofile(os.path.join(OUT, f))
+        man["inputs"].append({"name": "x", "dtype": str(xa.dtype), "shape": list(xa.shape), "file": f})
+        for i, (o, y) in enumerate(zip(sess.get_outputs(), outs)):
+            f = f"{tag}.out.{i}.bin"; np.ascontiguousarray(y).tofile(os.path.join(OUT, f))
+            man["outputs"].append({"name": o.name, "dtype": str(y.dtype), "shape": list(y.shape), "file": f})
+        json.dump(man, open(os.path.join(OUT, tag + ".json"), "w"), indent=1)
+        with torch.no_grad():
+            ref = model(xb).numpy()
+        err = np.abs(outs[0] - ref).max()
+        print(f"{tag}: {len(m.graph.node)} nodes, ORT-vs-torch max err {err:.2e}")
     ops = sorted({n.op_type for n in m.graph.node})
     print("ops:", ops)
     return name
@@ -49,5 +57,5 @@ except Exception as e:
 
 chars = m.hparams.charset_train if hasattr(m.hparams, "charset_train") else None
 if chars:
-    open(os.path.join(OUT, "charset.txt"), "w").write(chars)
+    open(os.path.join(OUT, "parseq_charset.txt"), "w").write(chars)
     print("charset:", len(chars), "chars")
