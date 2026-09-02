@@ -210,6 +210,17 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	out := ctx.NewUninit(tensor.F32, oshape...)
 	af, bf, of := a.F32(), b.F32(), out.F32()
 	nb := batch.Numel()
+	if nb > 1 && len(batchB) == 0 && nb*M*N*K >= 1<<18 {
+		// 2-D rhs shared by every batch: A's batch dims are contiguous leading
+		// dims of the row-major [.., M, K] buffer, so the product is one GEMM
+		// with M' = nb·M rows (same output layout). Sequence-first Linear
+		// exports ([T, B, K] · [K, N]) otherwise degrade to T GEMVs, each
+		// re-streaming the weight: PARSeq's decoder K/V projection took 2.2 ms
+		// as 128 GEMVs vs 0.15 ms flattened. Tiny products stay on the batched
+		// path below, which runs inline — a 110K-MAC GEMM opens a 2-worker
+		// region and bertish paid +13% for it.
+		M, nb = nb*M, 1
+	}
 	if nb == 1 {
 		if pb := o.bCache.get(false, K, N, bf, N); pb != nil {
 			if bp16 := o.bCache.getBF16(bf); bp16 != nil {

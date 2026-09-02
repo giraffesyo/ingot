@@ -36,9 +36,9 @@ func (o *mhaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	qBase, kBase, vBase := 0, B*H*plane, 2*B*H*plane
 	workers := par.Workers()
 	rows, nRow := attnRows(B, H, T, T, dh, workers)
-	gemmT := gemm.SgemmTSerial
-	if nRow == 1 {
-		gemmT = gemm.SgemmT // untiled: let big per-head GEMMs fan out
+	gemmT := gemm.SgemmTSerial // see sdpaOp: nested per-head fan-out never pays
+	if nRow == 1 && B*H < workers && T*T*dh >= 1<<22 {
+		gemmT = gemm.SgemmT
 	}
 	sT := ctx.NewUninit(tensor.F32, workers, rows*T)
 	sAll := sT.F32()
@@ -217,9 +217,14 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	af, bf, vf, of := a.F32(), bm.F32(), v.F32(), out.F32()
 	workers := par.Workers()
 	rows, nRow := attnRows(B, H, T, Tk, dh, workers)
+	// Per-tile GEMMs run serially inside the parallel region. A head only
+	// fans out its own GEMMs when it is both huge and alone: B·H·nRow tasks
+	// already fill the pool otherwise, and a nested region per head just adds
+	// claim traffic — PARSeq at batch 8 (48 heads of 1M MACs on 12 workers)
+	// spent 2.3 ms per SDPA that way vs 0.25 ms serial.
 	gemmT := gemm.SgemmTSerial
-	if nRow == 1 {
-		gemmT = gemm.SgemmT // untiled: let big per-head GEMMs fan out
+	if nRow == 1 && B*H < workers && T*Tk*dh >= 1<<22 {
+		gemmT = gemm.SgemmT
 	}
 	// Flash path: masked attention at long Tk streams key blocks with an
 	// online softmax — fully-masked blocks (the causal upper triangle,
@@ -377,8 +382,10 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 func attnRows(b, h, t, tk, dh, workers int) (rows, nRow int) {
 	rows = t
 	// Split a head into row tiles only when the per-tile GEMM stays big
-	// enough to amortise re-packing K each tile (~2M MACs before halving).
-	for b*h*((t+rows-1)/rows) < 2*workers && rows > 32 && rows*tk*dh >= 1<<21 {
+	// enough to amortise re-packing K each tile (≥512K MACs after halving:
+	// a 128×128×64 head split to 32-row tiles ran −45%, ViT-B's 197-token
+	// heads −21%; the old 2M floor left B·H=6 tasks on an 18-wide pool).
+	for b*h*((t+rows-1)/rows) < 2*workers && rows > 32 && rows*tk*dh >= 1<<19 {
 		rows = (rows + 1) / 2
 	}
 	return rows, (t + rows - 1) / rows
