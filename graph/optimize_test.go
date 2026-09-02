@@ -134,6 +134,8 @@ func TestOptimizeAB(t *testing.T) {
 // written for (a silent pattern miss is a perf regression, not a test
 // failure, so it is asserted here).
 var wantFusions = map[string]map[string]int{
-	"parseq_nar":    {"fuse-sdpa": 16, "fuse-mha-packed": 12, "fuse-gelu": 15},
-	"parseq_nar_b3": {"fuse-sdpa": 16, "fuse-mha-packed": 12, "fuse-gelu": 15},
+	"parseq_nar":    {"fuse-sdpa": 16, "fuse-mha-packed": 12, "fuse-gelu": 15, "fuse-matmul-bias": 65},
+	"parseq_nar_b3": {"fuse-sdpa": 16, "fuse-mha-packed": 12, "fuse-gelu": 15, "fuse-matmul-bias": 65},
+	"bertish":       {"fuse-sdpa": 2, "fuse-gelu": 2, "fuse-matmul-bias": 6},
+	"vit":           {"fuse-sdpa": 2, "fuse-gelu": 2, "fuse-matmul-bias": 6},
 }

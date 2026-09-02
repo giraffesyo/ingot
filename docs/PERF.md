@@ -2203,3 +2203,48 @@ LayerNorm 6.5%. The next transformer lever is a GEMM epilogue (bias,
 GELU, residual applied cache-hot per tile, as conv already does) so the
 Add/Gelu passes disappear.
 
+## GEMM bias epilogue: fuse-matmul-bias (2026-09-02)
+
+After fuse-mha-packed, Add was 14% of PARSeq at B=1: 105 nodes at ~13 µs
+each where the arithmetic is ~3 µs — bias adds after every Linear plus
+the residuals. New pass fuse-matmul-bias folds `MatMul(x, W) → Add(bias)`
+(constant 2-D W, bias broadcast as a trailing [N]) into the MatMul; the
+op passes the bias to the packed-B GEMM (`gemm.SgemmPackedBEpi`).
+
+Two implementations were measured. The first seeded each column strip
+with the bias before its k sweep and let the kernels' deferred C-add
+absorb it — free on Apple silicon but +8 µs on a 70 µs Zen 5 GEMM (the
+seed is a separate scattered write pass plus a load-modify-store in the
+kernel), and the model A/B came out net zero at B=1 and +3-5% at B=8.
+The shipped form gives every micro-kernel a bias argument: at the store
+of the last k block each row's accumulators get one vector add from the
+bias pointer (memory operand on AVX2/AVX-512, one VLD1 + FADDs on NEON),
+in the same (C + sum) + bias order as the edge-tile spill so batch
+invariance holds. Cost: ~0 on Apple, +2-3 µs per 128×1152×384 GEMM on
+Zen 5 versus the 13 µs Add it replaces. Epilogue also carries a residual
+seed and an activation hook (oracle-tested through SgemmPackedBEpi);
+at the 16-column strip width each costs about what its own pass does,
+so the pass fuses bias only. Kernel oracle tests cover bias on every
+kernel (generic vs asm, AVX-512 vs generic on the pod under
+OCR_GEMM_KERNEL=auto/avx512/avx2/generic).
+
+Zen 5 pod, 12 workers, medians of 6 interleaved (before = fuse-mha-packed
+state):
+
+| model | before | after | Δ | ORT-16T |
+|---|---|---|---|---|
+| parseq_128 | 9.56 ms | 9.05 | −5.3% | 12.21 (0.74×) |
+| parseq_b8_128 | 60.2 | 54.4 | −9.7% | 61.4 (0.89×) |
+| parseq_nar_b3 (zoo) | 25.4 | 24.3 | −4.0% | |
+| bertish | 58.4 µs | 56.8 | −2.7% | |
+| rec_320 | 3.60 | 3.54 | −1.9% | |
+| gptish / llmblock | flat | (no bias adds) | | |
+
+Apple (loaded): bertish 68 → 55 µs, vit 93 → 78 µs, parseq_128 ~10.6 →
+9.6, parseq_b8 58 → 55. Fusion counts pinned in TestOptimizeAB
+(parseq 65, bertish 6, vit 6).
+
+PARSeq day arc on the pod: 13.7 → 9.05 ms at B=1 (1.12× → 0.74× ORT),
+100 → 54 ms at B=8 (1.63× → 0.89×). Profile now: MatMul 62%, MHA 12%,
+LayerNorm 7%, Add 6% (40 residual/pos-embed adds), Gelu 4%.
+
