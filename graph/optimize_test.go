@@ -88,6 +88,14 @@ func TestOptimizeAB(t *testing.T) {
 				t.Fatalf("compile optimised: %v", err)
 			}
 			t.Logf("%s: %d → %d nodes, %v", c.name, nRaw, len(gopt.Nodes), stats)
+			// Pattern coverage pins: a model's known fusions must keep firing.
+			if want, ok := wantFusions[c.name]; ok {
+				for k, n := range want {
+					if stats[k] != n {
+						t.Errorf("%s: %s fired %d times, want %d", c.name, k, stats[k], n)
+					}
+				}
+			}
 			a, err := raw.Run(feeds)
 			if err != nil {
 				t.Fatal(err)
@@ -120,4 +128,12 @@ func TestOptimizeAB(t *testing.T) {
 			}
 		})
 	}
+}
+
+// wantFusions pins fusion counts on zoo models whose export form a pass was
+// written for (a silent pattern miss is a perf regression, not a test
+// failure, so it is asserted here).
+var wantFusions = map[string]map[string]int{
+	"parseq_nar":    {"fuse-sdpa": 16, "fuse-mha-packed": 12, "fuse-gelu": 15},
+	"parseq_nar_b3": {"fuse-sdpa": 16, "fuse-mha-packed": 12, "fuse-gelu": 15},
 }

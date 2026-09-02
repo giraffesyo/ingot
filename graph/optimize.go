@@ -50,6 +50,7 @@ func Optimize(g *Graph) map[string]int {
 		changed = fuseLayerNorm(g, stats) || changed
 		changed = fuseAttention(g, stats) || changed
 		changed = fuseSDPA(g, stats) || changed
+		changed = fuseMHAPacked(g, stats) || changed
 	}
 	propagateShapes(g)
 	assignBlockedLayout(g, stats)
