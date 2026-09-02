@@ -2248,3 +2248,40 @@ PARSeq day arc on the pod: 13.7 → 9.05 ms at B=1 (1.12× → 0.74× ORT),
 100 → 54 ms at B=8 (1.63× → 0.89×). Profile now: MatMul 62%, MHA 12%,
 LayerNorm 7%, Add 6% (40 residual/pos-embed adds), Gelu 4%.
 
+## LayerNorm vectorised + residual fused (2026-09-02)
+
+LayerNorm was a scalar float64 loop per row (three passes) and PARSeq's
+33 pre-norm blocks each paid a full Add pass before it. Two changes:
+
+- `layerNormRow` composes vek passes over the L1-resident row: mean as a
+  dot with a ones vector, centred row into dst, variance as its self-dot,
+  then scale/bias in place. 1024×384 rows: 65 → 34 µs (Apple), 128×384
+  10 → 6.4 µs. Rows shorter than 128 keep the scalar loop — six kernel
+  calls cost more than 48 scalar iterations. (A first cut took a mutex per
+  row for the ones vector and ran 10× slower; it is an atomic pointer now.)
+- fuse-add-layernorm: `Add(a, b) → LayerNorm` becomes ingot.AddLayerNorm
+  producing both the sum (the next residual — other consumers re-point)
+  and the normalised row in one pass. Gated on the normalised size ≥ 128:
+  at bertish's D=48 the fused form measured +7% on Zen 5 (per-row call
+  overhead), at D=384 it is the win below.
+
+Zen 5 pod, 12 workers, 10 interleaved reps (before = bias-epilogue state):
+
+| model | before | after | Δ | ORT-16T |
+|---|---|---|---|---|
+| parseq_128 | 8.94 ms (min 8.48) | 8.42 (min 7.98) | −5.8% | 12.21 (0.69×) |
+| parseq_nar (zoo) | 9.91 | 8.86 | −10.6% | |
+| parseq_nar_b3 | 24.5 | 23.1 | −5.7% | |
+| parseq_b8_128 | 54.6 | 55.7 | +2% (noise; minima equal) | 61.4 |
+| bertish / rec_320 | flat | | | |
+
+Apple (loaded): parseq_128 9.6 → 7.8, parseq_b8 55 → 49. Conformance
+unchanged (the vek two-pass variance keeps the float64 loop's behaviour
+to 1e-5). Profile at B=1 now: MatMul 66%, MHA 12%, AddLayerNorm 7%,
+Gelu 4%, Transpose 3%. bf16 weights (INGOT_BF16=1) were measured on the
+side: only −6-9% on PARSeq — its M=128 GEMMs are overhead-bound, not
+compute-bound, so the remaining lever is GEMM scheduling at small M.
+
+PARSeq day arc on the pod: 13.7 → 8.4 ms at B=1 (1.12× → 0.69× ORT),
+100 → 54 ms at B=8 (1.63× → 0.89×).
+

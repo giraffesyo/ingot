@@ -249,6 +249,11 @@
       hooks (oracle-tested; measured no better than their own pass at the
       16-column strip width, so not fused). PARSeq −5/−10% (B=1/8), bertish
       −3%: 0.74×/0.89× ORT-16T on Zen 5.
+- [x] LayerNorm on vek passes (D ≥ 128; scalar float64 row below) and
+      fuse-add-layernorm: residual Add + LayerNorm in one pass per row
+      (ingot.AddLayerNorm emits the sum and the normalised sum). Gated at
+      D ≥ 128 — bertish's 48-wide rows lost 7% fused. PARSeq −6/−11% at
+      B=1 (0.67× ORT-16T), neutral at B=8.
 - [x] IIIT5K-Word eval (tools/export/iiit5k.py → testdata/iiit5k, gitignored;
       models/ocr TestIIIT5K, case-insensitive alnum protocol): PARSeq 97.6%
       (paper 97.0), PP-OCRv4 rec 89.5%. Crop sampling is now bilinear (PARSeq
