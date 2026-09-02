@@ -366,3 +366,35 @@ func TestMatMulBias(t *testing.T) {
 		}
 	}
 }
+
+// TestAddLayerNorm: the fused residual+LayerNorm against Add followed by
+// LayerNormalization, both outputs.
+func TestAddLayerNorm(t *testing.T) {
+	rng := rand.New(rand.NewPCG(21, 22))
+	for _, sh := range [][]int{{1, 5, 384}, {3, 7, 48}, {2, 3, 4, 33}} {
+		D := sh[len(sh)-1]
+		a := tensor.New(tensor.F32, sh...)
+		b := tensor.New(tensor.F32, sh...)
+		sc := tensor.New(tensor.F32, D)
+		bs := tensor.New(tensor.F32, D)
+		for _, tt := range []*tensor.Tensor{a, b, sc, bs} {
+			for i := range tt.F32() {
+				tt.F32()[i] = rng.Float32()*4 - 2
+			}
+		}
+		attrs := Attrs{"axis": {Kind: KindInt, I: -1}, "epsilon": {Kind: KindFloat, F: 1e-5}}
+		bld, err := Lookup("ingot", "AddLayerNorm", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fused, err := bld(NodeInfo{Name: "aln", OpType: "AddLayerNorm", Domain: "ingot", Version: 1, Attrs: attrs, NumIn: 4, NumOut: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		outs := run(t, fused, a, b, sc, bs)
+		sum := run(t, mkOp(t, "Add", 14, nil, 2, 1), a, b)[0]
+		want := run(t, mkOp(t, "LayerNormalization", 17, attrs, 3, 1), sum, sc, bs)[0]
+		eqF32(t, "sum", outs[0], sh, sum.F32())
+		eqF32(t, "normed", outs[1], sh, want.F32())
+	}
+}
