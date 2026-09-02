@@ -2053,3 +2053,62 @@ included). Perf: GEMM benches and mv2/gptish flat on the Zen 5 pod
 (the deferred add reads C at the store instead of the load — same
 traffic). The "padding changes result" lines in rec_batch_test remain
 informational logs, unchanged by design.
+
+## PARSeq recognizer: two attention-era runtime fixes (2026-09-02)
+
+Wiring PARSeq (ViT-S encoder, 12 layers × 6 heads of 128 tokens, NAR
+decoder) as a pipeline recognizer (`ocr.Parseq`) put a small-batch
+transformer on the profiler for the first time. Two things fell out of
+the first profile; both are general.
+
+**MatMul with a 2-D rhs collapses the batch into M.** The export is
+sequence-first in the decoder: `[128, B, 384] · [384, 768]` for the
+cross-attention K/V projection. The batched path ran that as 128 GEMVs
+with M = B = 1, each re-streaming the 1.2 MB weight — 2.2 ms for one
+node, 11% of the model. A 2-D rhs shared across contiguous leading dims
+is one GEMM with M' = 128·B (same output layout). Gated at 256K MACs:
+below that the batched path runs inline while the flattened GEMM opens
+a 2-worker region, and bertish (`[16,1,48]·[48,144]`) paid +13% for the
+ungated version. Oracle test covers rank-3/4 batches incl. M=1.
+
+**Attention: row tiles at 512K MACs, serial per-tile GEMMs.** Two
+changes in `sdpaOp`: (1) the row-split floor drops 2M → 512K MACs per
+tile, so B·H = 6 heads of 128×128×64 tile to 32 rows (24 tasks) instead
+of leaving 12-18 workers idle; (2) per-tile GEMMs are always serial
+unless a head is alone (B·H < workers) AND huge (≥4M MACs). The old rule
+(`nRow == 1 → parallel SgemmT`) nested a region per head: at batch 8
+that is 48 heads each opening a GEMM region inside the SDPA region —
+2.3 ms per SDPA in-model (0.25 ms serial), 37% of the batch-8 run.
+
+Zen 5 pod, 12 workers, medians of 5-6 interleaved (old = 63fde1a):
+
+| model | old | new | Δ |
+|---|---|---|---|
+| parseq_nar (zoo, B=1) | 13.73 ms | 11.67 | −15% |
+| parseq_nar_b3 | 45.5 | 31.1 | −32% |
+| parseq_128 (ocr bench) | — | 11.08 | ORT-16T 12.21 → 0.91× |
+| parseq_b8_128 | 100.3 (pre-serial fix) | 71.4 | ORT-16T 61.4 → 1.16× |
+| bertish | 55.9 µs | 58.2 | +4% (was +13.8% ungated) |
+| gptish / llmblock / rec_320 | flat | | |
+| SDPA bench B=1 H=6 T=128 | — | 78 µs | (B=8: 333 µs) |
+
+Apple (loaded box, envelopes): parseq_128 ~14-15 ms vs ORT 12.3;
+parseq_b8 121 → 88; vit 108 → 93 µs; SDPA B=1/H=6/T=128 230 → 127 µs,
+ViT-B head shape 450 → 355 µs.
+
+ORT at 32T is 2× slower than 16T on parseq (21.5 vs 12.2 ms) — the
+same thrash pattern as CNNs; compare at 16T.
+
+Batch-8 profile after the fix: MatMul 56%, Transpose 11% (61 nodes,
+~130 µs per 1.5 MB permute — ~12 GB/s, well under memory speed), Add
+10% (105 nodes), SDPA 8%, LayerNorm 4%. The Transpose tail is the next
+lever for batched transformers. Also on record: PARSeq's dynamic-batch
+export carries ~1000 small allocations per run through Shape/Concat/
+Slice/Squeeze on shape tensors (bertish: 79, gptish: 123) — ~4% of the
+run, a compile-time symbolic-shape fold would remove them.
+
+Accuracy (corpus, PARSeq as the pipeline recognizer): lines its 94-char
+ASCII charset can express — 38/40 exact, CER 0.012 (PP-OCR rec: CER
+0.013 over all 99 lines). Over all lines it is 0.384 exact / CER 0.266
+because the corpus has spaces and CJK: PARSeq is a word recognizer, and
+PP-OCR stays the line default.
