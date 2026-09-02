@@ -220,6 +220,9 @@ func TestCorpus(t *testing.T) {
 	if v := os.Getenv("OCR_REC_PAD_RATIO"); v != "" {
 		fmt.Sscan(v, &p.RecPadRatio)
 	}
+	if v := os.Getenv("OCR_REC_BEAM"); v != "" {
+		fmt.Sscan(v, &p.Rec.(*Recognizer).BeamWidth)
+	}
 
 	m := evalCorpus(t, p, corpus, nil)
 	m.log(t, "")

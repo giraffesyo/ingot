@@ -2112,3 +2112,20 @@ ASCII charset can express — 38/40 exact, CER 0.012 (PP-OCR rec: CER
 0.013 over all 99 lines). Over all lines it is 0.384 exact / CER 0.266
 because the corpus has spaces and CJK: PARSeq is a word recognizer, and
 PP-OCR stays the line default.
+
+## CTC prefix beam search: measured neutral (2026-09-02)
+
+`Recognizer.BeamWidth > 1` runs a prefix beam search (blank/non-blank mass
+per prefix, merged across alignments, ≤16 candidate chars ≥1e-3 per
+frame). Verified against a brute-force CTC forward oracle over every label
+of a tiny alphabet (wide beam returns the max-probability label with its
+exact probability; narrow beam's reported mass is a lower bound). Corpus
+A/B, PP-OCRv4 rec: greedy 14 edits / 1102 chars; beam 4 and 16 both 14
+edits — identical output. PP-OCR's posterior is near-one-hot on this
+text; beam search only pays off with an external scorer (lexicon / char
+LM), which is the hook to add if a noisy-text corpus ever needs it.
+Decode cost per 40×6625 crop: greedy 281 µs, beam-4 268 µs, beam-16
+453 µs (the candidate scan is O(T·C) like the argmax). Greedy's 281 µs
+is itself ~8% of a rec forward — the argmax over 6625 classes is scalar
+Go; a vectorised argmax is a cheap follow-up.
+
