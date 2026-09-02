@@ -58,7 +58,7 @@ func TestPipelineStages(t *testing.T) {
 		w := cropWidth(b, 48)
 		t0 := time.Now()
 		x := tensor.New(tensor.F32, 1, 3, 48, w)
-		cropInto(x.F32(), img, b, 48, w, w)
+		cropInto(x.F32(), img, b, 48, w, w, cropUpMax)
 		t1 := time.Now()
 		rec.sess.Run(map[string]*tensor.Tensor{rec.inName: x})
 		t2 := time.Now()

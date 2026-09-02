@@ -59,7 +59,7 @@ func (c *Classifier) Rot180(img image.Image, boxes []Box) ([]bool, error) {
 	for i, b := range boxes {
 		w := min(cropWidth(b, clsH), clsW)
 		// Padding stays 0 = normalised mid-grey, as in recognition batching.
-		cropInto(xf[i*3*clsH*clsW:], img, b, clsH, w, clsW)
+		cropInto(xf[i*3*clsH*clsW:], img, b, clsH, w, clsW, cropUpMax)
 	}
 	outs, err := c.sess.Run(map[string]*tensor.Tensor{c.inName: x})
 	if err != nil {

@@ -2129,3 +2129,39 @@ Decode cost per 40×6625 crop: greedy 281 µs, beam-4 268 µs, beam-16
 is itself ~8% of a rec forward — the argmax over 6625 classes is scalar
 Go; a vectorised argmax is a cheap follow-up.
 
+## IIIT5K eval + crop sampling A/B (2026-09-02)
+
+First real-photo recognition benchmark in the tree: IIIT5K-Word test split
+(3000 crops, `tools/export/iiit5k.py`, gitignored), scored case-insensitive
+alphanumeric by `TestIIIT5K`, each crop a whole-image box. Crops were
+sampled nearest-pixel until now; PARSeq trains with bicubic and PP-OCR's
+own pipeline warps with INTER_CUBIC + resizes INTER_LINEAR, so bilinear
+was the obvious A/B. The two data sets disagree for PP-OCR:
+
+| crop sampling | corpus exact (PP-OCR) | IIIT5K PARSeq | IIIT5K PP-OCR |
+|---|---|---|---|
+| nearest (before) | 0.919 | 96.77 | 89.23 |
+| bilinear everywhere | 0.798 | 97.63 | 90.60 |
+| bilinear ≤2× magnification, else nearest | 0.899 | 97.57 | 89.70 |
+| bilinear ≤1.5×, else nearest | 0.919 | 97.37 | 89.53 |
+
+The corpus is synthetic 10-20 px text enlarged 2.5-5× to the 48 px rec
+height: interpolating 1-px strokes across that turns them grey and the
+CTC head drops spaces and edge characters ("Customer Number Mod" →
+"CustomerNumberMod", "Customer" → "ustomer"); the crops themselves are
+correct (dumped and eyeballed via TestDumpCrop). IIIT5K is photographic
+and already band-limited, so interpolation only helps — 1239 of its
+words are enlarged >1.5× for the 48 px model and they carry PP-OCR's
+remaining +1.1 points.
+
+Shipped: bilinear with a per-caller magnification cap — PARSeq always
+interpolates (97.63, its training transform at every scale, corpus
+subset unchanged at 3 edits), PP-OCR rec and cls fall back to nearest
+above 1.5× (corpus 0.919 kept, IIIT5K +0.3). `OCR_CROP_UPMAX=inf` gives
+the all-bilinear PP-OCR behaviour for photographic inputs;
+`OCR_CROP_NEAREST=1` restores the old path. Pixel-centre convention is
+integer coordinates (a half-pixel-shifted first cut blurred every 1:1
+crop and read as a 12-point loss before the shift was found). The
+sampling cost is invisible next to the forward (IIIT5K ms/word moved
+with machine load, not with the mode).
+

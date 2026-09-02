@@ -107,7 +107,7 @@ func (p *Parseq) RecognizeBatch(img image.Image, boxes []Box) ([]string, []float
 	in := tensor.New(tensor.F32, len(boxes), 3, parseqH, parseqW)
 	f := in.F32()
 	for i, b := range boxes {
-		cropInto(f[i*plane:(i+1)*plane], img, b, parseqH, parseqW, parseqW)
+		cropInto(f[i*plane:(i+1)*plane], img, b, parseqH, parseqW, parseqW, math.Inf(1))
 	}
 	outs, err := p.sess.Run(map[string]*tensor.Tensor{p.inName: in})
 	if err != nil {
