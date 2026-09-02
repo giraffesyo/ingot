@@ -6,10 +6,26 @@ package gemm
 func packAPanel(kc, rows int, a []float32, lda int, dst []float32) {
 	dst = dst[:kc*MR]
 	if rows == MR {
-		for p := 0; p < kc; p++ {
+		// Full panel: MR sequential row streams interleaved into dst. Each row
+		// is sliced to exactly kc up front so the inner loads carry no bounds
+		// checks (this pack was 11% of a small-M transformer's CPU when it
+		// gathered a[r*lda+p] per element).
+		var rs [MR][]float32
+		for r := 0; r < MR; r++ {
+			rs[r] = a[r*lda : r*lda+kc : r*lda+kc]
+		}
+		p := 0
+		for ; p+4 <= kc; p += 4 {
+			d := dst[p*MR : p*MR+4*MR : p*MR+4*MR]
+			for r := 0; r < MR; r++ {
+				row := rs[r][p : p+4 : p+4]
+				d[r], d[MR+r], d[2*MR+r], d[3*MR+r] = row[0], row[1], row[2], row[3]
+			}
+		}
+		for ; p < kc; p++ {
 			d := dst[p*MR : p*MR+MR : p*MR+MR]
 			for r := 0; r < MR; r++ {
-				d[r] = a[r*lda+p]
+				d[r] = rs[r][p]
 			}
 		}
 		return

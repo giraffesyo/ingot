@@ -2285,3 +2285,20 @@ compute-bound, so the remaining lever is GEMM scheduling at small M.
 PARSeq day arc on the pod: 13.7 → 8.4 ms at B=1 (1.12× → 0.69× ORT),
 100 → 54 ms at B=8 (1.63× → 0.89×).
 
+## A-panel pack: row streams, 4-wide (2026-09-02)
+
+A CPU profile of PARSeq at B=1 on the pod put packAPanel at 11% of CPU
+(kernels 45%, idle spin 20%): the small-M path packs all of A before every
+sweep, and the pack gathered a[r*lda+p] per element with a bounds check
+each. Rewritten as MR row streams sliced to kc up front, four k-columns
+per step. Pod microbench (MR=6): kc=27 79 → 48 ns, kc=64 170 → 95,
+kc=384 972 → 520 (1.6-1.9×); Apple (MR=8, kc=512) 1132 → 613 ns.
+
+Models, pod, 8 interleaved reps: parseq_128 −2 to −5% (8.56 → 8.37 ms
+in the deciding run), parseq_nar −4.5%, bertish −5.6%, rec_320 −2%,
+det_640 and gptish flat. A first A/B read det +4.9% / rec +3.8%; a
+three-way rerun (old, 4-wide, plain stream) put both at ±1% — the first
+read was pod load from the preceding back-to-back runs. Rule of thumb
+reaffirmed: a surprising regression in an unrelated model gets a rerun
+before it gets a theory.
+
