@@ -168,11 +168,25 @@ func (c *bCache) getBF16(b []float32) *gemm.BPackedB {
 
 // matmulOp: NumPy-style matmul with batch broadcasting. An optional third
 // input (attached by the optimizer's fuse-matmul-bias pass) is a bias [N]
-// added to every output row — folded into the packed-B GEMM's C seed, so
-// the Add pass disappears; other paths add it afterwards.
+// added to every output row, and the ingot_act attribute ("gelu") a fused
+// activation; on the packed-weight path both run inside the GEMM (bias at
+// the kernel store, the activation over each task's finished strip), other
+// paths apply them afterwards. No optimizer pass sets ingot_act today: the
+// fused GELU measured ~−1% on PARSeq at batch 1 and +3-4% at batch 8 (the
+// grouped sweep tasks coarsen the schedule) — see docs/PERF.md.
 type matmulOp struct {
-	n NodeInfo
+	n   NodeInfo
+	act string
 	bCache
+}
+
+// matmulAct returns the row activation for ingot_act.
+func matmulAct(name string) func([]float32) {
+	switch name {
+	case "gelu":
+		return func(row []float32) { vek.Gelu(row, row) }
+	}
+	return nil
 }
 
 func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
@@ -220,6 +234,7 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	out := ctx.NewUninit(tensor.F32, oshape...)
 	af, bf, of := a.F32(), b.F32(), out.F32()
 	nb := batch.Numel()
+	act := o.act
 	if nb > 1 && len(batchB) == 0 && nb*M*N*K >= 1<<18 {
 		// 2-D rhs shared by every batch: A's batch dims are contiguous leading
 		// dims of the row-major [.., M, K] buffer, so the product is one GEMM
@@ -235,9 +250,9 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		if pb := o.bCache.get(false, K, N, bf, N); pb != nil {
 			if bp16 := o.bCache.getBF16(bf); bp16 != nil {
 				gemm.BgemmWeights(M, af, K, bp16, of, N, true)
-			} else if bias != nil {
-				gemm.SgemmPackedBEpi(M, af, K, pb, of, N, &gemm.Epilogue{Bias: bias})
-				bias = nil
+			} else if bias != nil || o.act != "" {
+				gemm.SgemmPackedBEpi(M, af, K, pb, of, N, &gemm.Epilogue{Bias: bias, Act: matmulAct(act)})
+				bias, act = nil, ""
 			} else {
 				gemm.SgemmPackedB(M, 1, af, K, pb, 0, of, N)
 			}
@@ -292,6 +307,9 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 			vek.Add(of[r*N:(r+1)*N], of[r*N:(r+1)*N], bias)
 		}
 	}
+	if act != "" {
+		matmulAct(act)(of)
+	}
 	if squeezeM || squeezeN {
 		var fbuf [10]int
 		fs := append(tensor.Shape(fbuf[:0]), batch...)
@@ -330,5 +348,11 @@ func init() {
 			transB: n.Attrs.Int("transB", 0) != 0,
 		}, nil
 	})
-	Register("", "MatMul", 1, func(n NodeInfo) (Op, error) { return &matmulOp{n: n}, nil })
+	Register("", "MatMul", 1, func(n NodeInfo) (Op, error) {
+		act := n.Attrs.String("ingot_act", "")
+		if act != "" && matmulAct(act) == nil {
+			return nil, n.Errorf("unknown ingot_act %q", act)
+		}
+		return &matmulOp{n: n, act: act}, nil
+	})
 }

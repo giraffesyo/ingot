@@ -41,7 +41,7 @@ func TestSgemmPackedBEpi(t *testing.T) {
 	sqF := func(v float64) float64 { return v * v }
 	for _, c := range []struct{ m, n, k int }{
 		{7, 13, 5}, {1, 64, 32}, {6, 16, 384}, {128, 1152, 384}, {145, 1024, 64},
-		{300, 384, 1536}, {17, 47, 700}, {2, 1536, 384},
+		{300, 384, 1536}, {17, 47, 700}, {2, 1536, 384}, {64, 4096, 64}, {9, 2000, 40},
 	} {
 		for variant := 0; variant < 4; variant++ {
 			withBias, withRes, withAct := variant != 1, variant >= 2, variant%2 == 1

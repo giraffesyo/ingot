@@ -2302,3 +2302,19 @@ read was pod load from the preceding back-to-back runs. Rule of thumb
 reaffirmed: a surprising regression in an unrelated model gets a rerun
 before it gets a theory.
 
+## NEGATIVE: GELU in the GEMM epilogue (2026-09-02)
+
+Tried folding fc1's GELU into the packed-B GEMM: sweep tasks group up to
+4 units (panels or pairs, keeping ≥2 tasks per worker) so the activation
+kernel runs over 64+ columns per row call on the finished, cache-hot
+strip. Op level it is a clear win (fc1 128×1536×384 + GELU: 206 → 150 µs
+on Zen 5, 265 → 177 on Apple). In the model it is not: parseq_128 −0.8%,
+parseq_nar −1.9%, bertish flat, but parseq_b8 +3.1% and parseq_nar_b3
++4.5% — at M > MC the sweep runs once per 144-row block and the grouped
+tasks coarsen each block's schedule (24 tasks on 12 workers, tail wait
+per block) for a GELU that the separate op already runs at full width.
+A runtime gate (fuse only for M ≤ MC, else post-pass) was worse still
+(+35% at batch 8: the post-pass was serial). Verdict: not fused. The
+op-level support (MatMul ingot_act, gemm group epilogue) stays, tested,
+for a future schedule that does not trade task granularity for it.
+

@@ -46,8 +46,11 @@ func fuseMatMulBias(g *Graph, stats map[string]int) bool {
 		bias.Consumers = append(bias.Consumers, mm)
 		removeConsumer(mm.Outputs[0], add)
 		g.dropNode(add)
-		g.Values[out.Name] = out
 		delete(g.Values, mm.Outputs[0].Name)
+		// A following ingot.Gelu is deliberately NOT absorbed (matmulOp can
+		// run it as ingot_act): the fused form measured a wash at batch 1 and
+		// +3-4% at batch 8 on Zen 5 — docs/PERF.md.
+		g.Values[out.Name] = out
 		mm.Inputs = append(mm.Inputs, bias)
 		mm.Outputs = []*Value{out}
 		out.Producer = mm
