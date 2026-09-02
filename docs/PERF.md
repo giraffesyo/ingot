@@ -2318,3 +2318,22 @@ A runtime gate (fuse only for M ≤ MC, else post-pass) was worse still
 op-level support (MatMul ingot_act, gemm group epilogue) stays, tested,
 for a future schedule that does not trade task granularity for it.
 
+## Attention row-tile floor: 512K → 1M MACs (2026-09-02)
+
+Per row tile the attention op re-packs K (transposed) and V for its
+serial GEMMs, so tile count is a pack-count knob. Zen 5, 12 workers,
+BenchmarkSDPA medians of 3 and models over 8 interleaved reps:
+
+| shape | 4 tiles/head (512K floor) | 2 tiles/head (1M floor) |
+|---|---|---|
+| B=1 H=6 T=128 dh=64 (PARSeq) | 78 µs | 58 (−25%) |
+| B=1 H=12 T=197 (ViT-B) | 271 | 243 (−10%) |
+| B=8 H=6 T=128 | 320 | 316 |
+| parseq_128 | 8.86 ms | 7.93 (−10%) |
+| gptish / bertish | flat | |
+
+Splitting to fewer than 2·workers tiles instead (target = workers) was
+−17% on the PARSeq head but +45% on the ViT and causal-1024 shapes —
+big heads need the task count for balance; the floor is the right knob.
+PARSeq at batch 1 is now 7.9 ms on the pod, 0.65× ORT-16T.
+
