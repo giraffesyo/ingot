@@ -166,17 +166,27 @@ func (c *bCache) getBF16(b []float32) *gemm.BPackedB {
 	return c.bf
 }
 
-// matmulOp: NumPy-style matmul with batch broadcasting.
+// matmulOp: NumPy-style matmul with batch broadcasting. An optional third
+// input (attached by the optimizer's fuse-matmul-bias pass) is a bias [N]
+// added to every output row — folded into the packed-B GEMM's C seed, so
+// the Add pass disappears; other paths add it afterwards.
 type matmulOp struct {
 	n NodeInfo
 	bCache
 }
 
 func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
-	if len(in) != 2 || in[0] == nil || in[1] == nil {
-		return nil, o.n.Errorf("need 2 inputs")
+	if len(in) < 2 || len(in) > 3 || in[0] == nil || in[1] == nil {
+		return nil, o.n.Errorf("need 2 inputs (+ optional bias)")
 	}
 	a, b := in[0], in[1]
+	var bias []float32
+	if len(in) == 3 && in[2] != nil {
+		if in[2].DType() != tensor.F32 || in[2].Numel() != b.Shape()[len(b.Shape())-1] {
+			return nil, o.n.Errorf("bias must be f32 [N], got %s %v", in[2].DType(), in[2].Shape())
+		}
+		bias = in[2].F32()
+	}
 	if a.DType() != tensor.F32 || b.DType() != tensor.F32 {
 		return nil, o.n.Errorf("only f32")
 	}
@@ -225,6 +235,9 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		if pb := o.bCache.get(false, K, N, bf, N); pb != nil {
 			if bp16 := o.bCache.getBF16(bf); bp16 != nil {
 				gemm.BgemmWeights(M, af, K, bp16, of, N, true)
+			} else if bias != nil {
+				gemm.SgemmPackedBEpi(M, af, K, pb, of, N, &gemm.Epilogue{Bias: bias})
+				bias = nil
 			} else {
 				gemm.SgemmPackedB(M, 1, af, K, pb, 0, of, N)
 			}
@@ -272,6 +285,12 @@ func (o *matmulOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 			}
 		}
 		mmScratchPool.Put(sc)
+	}
+	if bias != nil { // paths without a fused seed
+		rows := len(of) / N
+		for r := 0; r < rows; r++ {
+			vek.Add(of[r*N:(r+1)*N], of[r*N:(r+1)*N], bias)
+		}
 	}
 	if squeezeM || squeezeN {
 		var fbuf [10]int

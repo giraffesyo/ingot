@@ -242,6 +242,13 @@
       a symbolic shape evaluator) folds into ingot.MHA layout 1 reading the
       packed [B,T,3,H,dh] tensor strided. PARSeq −12/−15% (B=1/8), 618→426
       nodes, allocs/run 1019→611; now 0.78×/0.97× ORT-16T on Zen 5.
+- [x] fuse-matmul-bias: MatMul(x, W) → Add(bias) folds the bias into the
+      GEMM — every micro-kernel (AVX2, AVX-512 ×2, NEON, generic) adds a
+      bias vector at its store, next to the deferred C-add, so the Linear
+      bias costs nothing. gemm.Epilogue also carries residual/activation
+      hooks (oracle-tested; measured no better than their own pass at the
+      16-column strip width, so not fused). PARSeq −5/−10% (B=1/8), bertish
+      −3%: 0.74×/0.89× ORT-16T on Zen 5.
 - [x] IIIT5K-Word eval (tools/export/iiit5k.py → testdata/iiit5k, gitignored;
       models/ocr TestIIIT5K, case-insensitive alnum protocol): PARSeq 97.6%
       (paper 97.0), PP-OCRv4 rec 89.5%. Crop sampling is now bilinear (PARSeq

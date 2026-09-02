@@ -319,3 +319,50 @@ func TestArgMax(t *testing.T) {
 	out := run(t, op, x)[0]
 	eqI64(t, "argmax", out, []int{2}, []int64{1, 0})
 }
+
+// TestMatMulBias: the optimizer-attached bias input, on the packed-B path
+// (constant weight, nb == 1 and the flattened batch) and the fallback
+// (broadcast batch on B), against a float64 oracle.
+func TestMatMulBias(t *testing.T) {
+	rng := rand.New(rand.NewPCG(9, 10))
+	for _, c := range []struct{ as, bs []int }{
+		{[]int{128, 384}, []int{384, 1152}},
+		{[]int{1, 16, 48}, []int{48, 144}},
+		{[]int{7, 1, 384}, []int{384, 96}},
+		{[]int{5, 13}, []int{13, 7}},
+		{[]int{2, 3, 4, 33}, []int{33, 5}},
+		{[]int{2, 8, 32}, []int{2, 32, 96}}, // batched rhs: fallback add
+	} {
+		a := tensor.New(tensor.F32, c.as...)
+		b := tensor.New(tensor.F32, c.bs...)
+		N := c.bs[len(c.bs)-1]
+		bias := tensor.New(tensor.F32, N)
+		for i := range a.F32() {
+			a.F32()[i] = rng.Float32()*2 - 1
+		}
+		for i := range b.F32() {
+			b.F32()[i] = rng.Float32()*2 - 1
+		}
+		for i := range bias.F32() {
+			bias.F32()[i] = rng.Float32()*2 - 1
+		}
+		op := mkOp(t, "MatMul", 1, nil, 3, 1)
+		out := run(t, op, a, b, bias)[0]
+		plain := run(t, mkOp(t, "MatMul", 1, nil, 2, 1), a, b)[0]
+		pf, of := plain.F32(), out.F32()
+		K := c.bs[len(c.bs)-2]
+		for i := range of {
+			want := float64(pf[i]) + float64(bias.F32()[i%N])
+			if math.Abs(float64(of[i])-want) > 1e-5*math.Sqrt(float64(K))*(1+math.Abs(want)) {
+				t.Fatalf("%v·%v+bias[%d] = %g, want %g", c.as, c.bs, i, of[i], want)
+			}
+		}
+		// Second run reuses the packed weight and must be identical.
+		again := run(t, op, a, b, bias)[0]
+		for i := range of {
+			if again.F32()[i] != of[i] {
+				t.Fatalf("run 2 differs at %d", i)
+			}
+		}
+	}
+}
