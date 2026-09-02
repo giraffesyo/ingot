@@ -29,9 +29,9 @@ func main() {
 	w("")
 	w(`#include "textflag.h"`)
 	w("")
-	w("// func microKernelAVX2(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)")
+	w("// func microKernelAVX2(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)")
 	w("// 6x16 tile: acc[r] (Y%d..) += broadcast(ap[r]) * bp[0:16].", 0)
-	w("TEXT ·microKernelAVX2(SB), NOSPLIT, $0-89")
+	w("TEXT ·microKernelAVX2(SB), NOSPLIT, $0-120")
 	w("\tMOVQ kc+0(FP), DX")
 	w("\tMOVQ ap_base+8(FP), AX")
 	w("\tMOVQ bp_base+32(FP), BX")
@@ -39,6 +39,7 @@ func main() {
 	w("\tMOVQ ldc+80(FP), DI")
 	w("\tSHLQ $2, DI          // ldc in bytes")
 	w("\tMOVBQZX accumulate+88(FP), SI")
+	w("\tMOVQ bias_base+96(FP), R14")
 	// Row pointers R8..R13 = c + r*ldc.
 	w("\tMOVQ CX, R8")
 	w("\tLEAQ (R8)(DI*1), R9")
@@ -78,6 +79,15 @@ func main() {
 		w("\tVADDPS 32(%s), %s, %s", rows[r], acc(r, 1), acc(r, 1))
 	}
 	w("storeraw:")
+	// Optional bias (nil = none): added after C, the same order as the
+	// edge-tile spill (row = (C + sum) + bias).
+	w("\tTESTQ R14, R14")
+	w("\tJZ storenb")
+	for r := 0; r < MR; r++ {
+		w("\tVADDPS (R14), %s, %s", acc(r, 0), acc(r, 0))
+		w("\tVADDPS 32(R14), %s, %s", acc(r, 1), acc(r, 1))
+	}
+	w("storenb:")
 	for r := 0; r < MR; r++ {
 		w("\tVMOVUPS %s, (%s)", acc(r, 0), rows[r])
 		w("\tVMOVUPS %s, 32(%s)", acc(r, 1), rows[r])

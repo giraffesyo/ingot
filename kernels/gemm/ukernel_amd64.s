@@ -4,9 +4,9 @@
 
 #include "textflag.h"
 
-// func microKernelAVX2(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)
+// func microKernelAVX2(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)
 // 6x16 tile: acc[r] (Y0..) += broadcast(ap[r]) * bp[0:16].
-TEXT ·microKernelAVX2(SB), NOSPLIT, $0-89
+TEXT ·microKernelAVX2(SB), NOSPLIT, $0-120
 	MOVQ kc+0(FP), DX
 	MOVQ ap_base+8(FP), AX
 	MOVQ bp_base+32(FP), BX
@@ -14,6 +14,7 @@ TEXT ·microKernelAVX2(SB), NOSPLIT, $0-89
 	MOVQ ldc+80(FP), DI
 	SHLQ $2, DI          // ldc in bytes
 	MOVBQZX accumulate+88(FP), SI
+	MOVQ bias_base+96(FP), R14
 	MOVQ CX, R8
 	LEAQ (R8)(DI*1), R9
 	LEAQ (R9)(DI*1), R10
@@ -193,6 +194,21 @@ store:
 	VADDPS (R13), Y10, Y10
 	VADDPS 32(R13), Y11, Y11
 storeraw:
+	TESTQ R14, R14
+	JZ storenb
+	VADDPS (R14), Y0, Y0
+	VADDPS 32(R14), Y1, Y1
+	VADDPS (R14), Y2, Y2
+	VADDPS 32(R14), Y3, Y3
+	VADDPS (R14), Y4, Y4
+	VADDPS 32(R14), Y5, Y5
+	VADDPS (R14), Y6, Y6
+	VADDPS 32(R14), Y7, Y7
+	VADDPS (R14), Y8, Y8
+	VADDPS 32(R14), Y9, Y9
+	VADDPS (R14), Y10, Y10
+	VADDPS 32(R14), Y11, Y11
+storenb:
 	VMOVUPS Y0, (R8)
 	VMOVUPS Y1, 32(R8)
 	VMOVUPS Y2, (R9)

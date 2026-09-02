@@ -30,7 +30,7 @@ var (
 // ActiveKernel names the selected micro-kernel ("avx512"|"avx2"|"generic").
 var ActiveKernel string
 
-func pickMicroKernel() func(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool) {
+func pickMicroKernel() func(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32) {
 	switch os.Getenv("OCR_GEMM_KERNEL") {
 	case "avx512":
 		if HasAVX512 {
@@ -73,13 +73,13 @@ func avx512Faster() bool {
 	for i := range bp {
 		bp[i] = float32(i%5) * 0.25
 	}
-	bench := func(k func(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)) time.Duration {
-		k(kc, ap, bp, c, NR, false) // warm (page-in, decode)
+	bench := func(k func(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)) time.Duration {
+		k(kc, ap, bp, c, NR, false, nil) // warm (page-in, decode)
 		best := time.Duration(1 << 62)
 		for r := 0; r < 3; r++ {
 			t0 := time.Now()
 			for i := 0; i < 24; i++ {
-				k(kc, ap, bp, c, NR, false)
+				k(kc, ap, bp, c, NR, false, nil)
 			}
 			if d := time.Since(t0); d < best {
 				best = d
@@ -93,13 +93,13 @@ func avx512Faster() bool {
 }
 
 //go:noescape
-func microKernelAVX2(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)
+func microKernelAVX2(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)
 
 //go:noescape
-func microKernelAVX512(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)
+func microKernelAVX512(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)
 
 //go:noescape
-func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool)
+func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool, bias []float32)
 
 // pairKernel reports whether the paired-panel 6x32 kernel should be used
 // (adjacent full panels, avx512 active).

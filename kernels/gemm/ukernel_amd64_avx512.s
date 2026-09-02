@@ -4,9 +4,9 @@
 
 #include "textflag.h"
 
-// func microKernelAVX512(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)
+// func microKernelAVX512(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)
 // 6x16 tile, NR=16 in one ZMM, two accumulator banks for ILP.
-TEXT ·microKernelAVX512(SB), NOSPLIT, $0-89
+TEXT ·microKernelAVX512(SB), NOSPLIT, $0-120
 	MOVQ kc+0(FP), DX
 	MOVQ ap_base+8(FP), AX
 	MOVQ bp_base+32(FP), BX
@@ -14,6 +14,7 @@ TEXT ·microKernelAVX512(SB), NOSPLIT, $0-89
 	MOVQ ldc+80(FP), DI
 	SHLQ $2, DI
 	MOVBQZX accumulate+88(FP), SI
+	MOVQ bias_base+96(FP), R14
 	MOVQ CX, R8
 	LEAQ (R8)(DI*1), R9
 	LEAQ (R9)(DI*1), R10
@@ -99,6 +100,15 @@ combine:
 	VADDPS (R12), Z4, Z4
 	VADDPS (R13), Z5, Z5
 storeraw:
+	TESTQ R14, R14
+	JZ storenb
+	VADDPS (R14), Z0, Z0
+	VADDPS (R14), Z1, Z1
+	VADDPS (R14), Z2, Z2
+	VADDPS (R14), Z3, Z3
+	VADDPS (R14), Z4, Z4
+	VADDPS (R14), Z5, Z5
+storenb:
 	VMOVUPS Z0, (R8)
 	VMOVUPS Z1, (R9)
 	VMOVUPS Z2, (R10)
@@ -108,9 +118,9 @@ storeraw:
 	VZEROUPPER
 	RET
 
-// func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool)
+// func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool, bias []float32)
 // 6x32 tile over two adjacent packed panels; c covers 32 columns.
-TEXT ·microKernel2AVX512(SB), NOSPLIT, $0-113
+TEXT ·microKernel2AVX512(SB), NOSPLIT, $0-144
 	MOVQ kc+0(FP), DX
 	MOVQ ap_base+8(FP), AX
 	MOVQ bp0_base+32(FP), BX
@@ -119,6 +129,7 @@ TEXT ·microKernel2AVX512(SB), NOSPLIT, $0-113
 	MOVQ ldc+104(FP), DI
 	SHLQ $2, DI
 	MOVBQZX accumulate+112(FP), R14
+	MOVQ bias_base+120(FP), R15
 	MOVQ CX, R8
 	LEAQ (R8)(DI*1), R9
 	LEAQ (R9)(DI*1), R10
@@ -251,6 +262,21 @@ p2combine:
 	VADDPS (R13), Z10, Z10
 	VADDPS 64(R13), Z11, Z11
 p2storeraw:
+	TESTQ R15, R15
+	JZ p2storenb
+	VADDPS (R15), Z0, Z0
+	VADDPS 64(R15), Z1, Z1
+	VADDPS (R15), Z2, Z2
+	VADDPS 64(R15), Z3, Z3
+	VADDPS (R15), Z4, Z4
+	VADDPS 64(R15), Z5, Z5
+	VADDPS (R15), Z6, Z6
+	VADDPS 64(R15), Z7, Z7
+	VADDPS (R15), Z8, Z8
+	VADDPS 64(R15), Z9, Z9
+	VADDPS (R15), Z10, Z10
+	VADDPS 64(R15), Z11, Z11
+p2storenb:
 	VMOVUPS Z0, (R8)
 	VMOVUPS Z1, 64(R8)
 	VMOVUPS Z2, (R9)

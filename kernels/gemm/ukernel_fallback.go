@@ -7,6 +7,6 @@ var microKernel = microKernelGeneric
 
 func pairKernel() bool { return false }
 
-func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool) {
+func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool, bias []float32) {
 	panic("gemm: paired kernel not available")
 }

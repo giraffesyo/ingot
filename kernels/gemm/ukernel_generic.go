@@ -7,11 +7,12 @@ package gemm
 // where Ap is packed so that for each p, Ap[p*MR : p*MR+MR] are the MR values of
 // column p of the A panel, and Bp[p*NR : p*NR+NR] are the NR values of row p of
 // the B panel. c is row-major with leading dimension ldc. If accumulate is false,
-// C is overwritten.
+// C is overwritten. bias (nil = none) holds NR values added to every row after
+// C — the fused Linear bias; order (C + sum) + bias everywhere.
 //
 // This is the portable fallback and the oracle for the asm kernels. It is
 // written over the arch's MR/NR constants so it stays in sync.
-func microKernelGeneric(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool) {
+func microKernelGeneric(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32) {
 	var acc [MR][NR]float32
 	ap = ap[:kc*MR]
 	bp = bp[:kc*NR]
@@ -34,6 +35,12 @@ func microKernelGeneric(kc int, ap, bp []float32, c []float32, ldc int, accumula
 			}
 		} else {
 			copy(row, acc[i][:])
+		}
+		if bias != nil {
+			b := bias[:NR]
+			for j := range row {
+				row[j] += b[j]
+			}
 		}
 	}
 }
