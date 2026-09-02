@@ -22,6 +22,11 @@ type gemmCtx struct {
 
 	phase int // phasePackB, phasePackA, phaseMacro, phaseSmallPackA, phaseSmallM
 
+	// Fused epilogue for the packed-B small-M path (nil: none); eres is the
+	// residual's rows for the current M block.
+	epi  *Epilogue
+	eres []float32
+
 	// current block geometry
 	kc, nc, mc       int
 	nPanels, mPanels int
@@ -350,28 +355,44 @@ func (g *gemmCtx) smallMTask(t, w int) {
 	// count); an odd final panel or narrow edge falls through to singles.
 	if g.pairMode && jp+1 < g.nPanels && min(NR, g.nc-(jp+1)*NR) == NR {
 		ldc := g.ldc
+		acc0 := g.acc
+		if g.epiPreload(jp*NR, 2*NR) {
+			acc0 = true
+		}
 		for kb := 0; kb < nkb; kb++ {
 			p0 := kb * KC
 			kc := min(KC, g.kc-p0)
 			bp0 := g.pb.data[(kb*g.pb.np+jp)*KC*NR:]
 			bp1 := g.pb.data[(kb*g.pb.np+jp+1)*KC*NR:]
-			acc := g.acc || kb > 0
+			acc := acc0 || kb > 0
+			var bias []float32
+			if kb == nkb-1 {
+				bias = g.biasAt(jp*NR, 2*NR)
+			}
 			for ip := 0; ip < g.mPanels; ip++ {
 				mr := min(MR, g.mc-ip*MR)
 				apan := g.asm[(kb*g.mPanels+ip)*KC*MR:]
 				cptr := g.cblk[ip*MR*ldc+jp*NR:]
 				if mr == MR {
-					microKernel2AVX512(kc, apan, bp0, bp1, cptr, ldc, acc)
+					microKernel2AVX512(kc, apan, bp0, bp1, cptr, ldc, acc, bias)
 					continue
 				}
 				tile := g.tiles[w]
-				microKernel(kc, apan, bp0, tile, NR, false)
+				microKernel(kc, apan, bp0, tile, NR, false, nil)
 				g.spill(tile, cptr, mr, NR, acc)
-				microKernel(kc, apan, bp1, tile, NR, false)
+				microKernel(kc, apan, bp1, tile, NR, false, nil)
 				g.spill(tile, cptr[NR:], mr, NR, acc)
+				if bias != nil {
+					g.spillBias(cptr, mr, 2*NR, bias)
+				}
 			}
 		}
+		g.epiAct(jp*NR, 2*NR)
 		return
+	}
+	acc0 := g.acc
+	if g.epiPreload(jp*NR, nr) {
+		acc0 = true
 	}
 	for kb := 0; kb < nkb; kb++ {
 		p0 := kb * KC
@@ -383,17 +404,21 @@ func (g *gemmCtx) smallMTask(t, w int) {
 		} else {
 			packBPanel(kc, nr, g.bsrc[p0*g.ldb+jp*NR:], g.ldb, bp)
 		}
-		acc := g.acc || kb > 0
+		acc := acc0 || kb > 0
+		var bias []float32
+		if kb == nkb-1 {
+			bias = g.biasAt(jp*NR, nr)
+		}
 		for ip := 0; ip < g.mPanels; ip++ {
 			mr := min(MR, g.mc-ip*MR)
 			apan := g.asm[(kb*g.mPanels+ip)*KC*MR:]
 			cptr := g.cblk[ip*MR*ldc+jp*NR:]
 			if mr == MR && nr == NR && g.alpha == 1 {
-				microKernel(kc, apan, bp, cptr, ldc, acc)
+				microKernel(kc, apan, bp, cptr, ldc, acc, bias)
 				continue
 			}
 			tile := g.tiles[w]
-			microKernel(kc, apan, bp, tile, NR, false)
+			microKernel(kc, apan, bp, tile, NR, false, nil)
 			for r := 0; r < mr; r++ {
 				row := cptr[r*ldc : r*ldc+nr]
 				tr := tile[r*NR : r*NR+nr]
@@ -407,7 +432,118 @@ func (g *gemmCtx) smallMTask(t, w int) {
 					}
 				}
 			}
+			if bias != nil {
+				g.spillBias(cptr, mr, nr, bias)
+			}
 		}
+	}
+	g.epiAct(jp*NR, nr)
+}
+
+// biasAt returns the fused bias for columns [j0, j0+n) (nil when none).
+func (g *gemmCtx) biasAt(j0, n int) []float32 {
+	if g.epi == nil || g.epi.Bias == nil {
+		return nil
+	}
+	n = min(n, g.nc-j0)
+	return g.epi.Bias[j0 : j0+n]
+}
+
+// spillBias adds the bias to an edge tile written by spill — after the
+// (C + sum) store, the same order as the kernels' fused add.
+func (g *gemmCtx) spillBias(cptr []float32, mr, nr int, bias []float32) {
+	nr = min(nr, len(bias))
+	for r := 0; r < mr; r++ {
+		row := cptr[r*g.ldc : r*g.ldc+nr]
+		for q := range row {
+			row[q] += bias[q]
+		}
+	}
+}
+
+// Epilogue is the fused tail of SgemmPackedBEpi: C = act(A·B + Bias + Res),
+// Bias broadcast over rows ([n], may be nil) and Res an [m×n] matrix with
+// row stride LdRes (may be nil). Bias is free: the micro-kernels add it at
+// the store of the last k block. Res seeds the column strip just before its
+// k sweep (the deferred C-add does the rest) and Act runs over the finished
+// strip while it is cache-resident; both cost about what their own pass
+// would at this strip width, so callers fuse them only when the pass count
+// matters. Act must be safe to call concurrently from the worker pool.
+type Epilogue struct {
+	Bias  []float32
+	Res   []float32
+	LdRes int
+	Act   func(row []float32)
+}
+
+// epiPreload seeds C[0:mc, j0:j0+nc] with the residual ahead of the panel's
+// k sweep and reports whether it did (the sweep then accumulates onto it).
+func (g *gemmCtx) epiPreload(j0, nc int) bool {
+	if g.epi == nil || g.eres == nil {
+		return false
+	}
+	nc = min(nc, g.nc-j0)
+	e := g.epi
+	for r := 0; r < g.mc; r++ {
+		copy(g.cblk[r*g.ldc+j0:r*g.ldc+j0+nc], g.eres[r*e.LdRes+j0:r*e.LdRes+j0+nc])
+	}
+	return true
+}
+
+// epiAct applies the epilogue's activation over the finished strip.
+func (g *gemmCtx) epiAct(j0, nc int) {
+	if g.epi == nil || g.epi.Act == nil {
+		return
+	}
+	nc = min(nc, g.nc-j0)
+	for r := 0; r < g.mc; r++ {
+		g.epi.Act(g.cblk[r*g.ldc+j0 : r*g.ldc+j0+nc])
+	}
+}
+
+// SgemmPackedBEpi computes C = act(A·B + bias + res) against a pre-packed B
+// (see Epilogue), blocked over M like SgemmPackedB. The seeding and the
+// activation happen per column strip inside the worker that computes it.
+func SgemmPackedBEpi(m int, a []float32, lda int, pb *PackedB, c []float32, ldc int, e *Epilogue) {
+	k, n := pb.k, pb.n
+	if m == 0 || n == 0 {
+		return
+	}
+	if k == 0 {
+		// Degenerate: C = act(bias + res).
+		for r := 0; r < m; r++ {
+			row := c[r*ldc : r*ldc+n]
+			if e.Bias != nil {
+				copy(row, e.Bias[:n])
+			} else {
+				clear(row)
+			}
+			if e.Res != nil {
+				for q := range row {
+					row[q] += e.Res[r*e.LdRes+q]
+				}
+			}
+			if e.Act != nil {
+				e.Act(row)
+			}
+		}
+		return
+	}
+	workers := par.Workers()
+	if w := int(int64(m) * int64(n) * int64(k) / minTaskMACs); w < workers {
+		workers = max(w, 1)
+	}
+	g := getCtx()
+	defer putCtx(g)
+	g.alpha, g.lda, g.ldb, g.ldc = 1, lda, 0, ldc
+	g.transA, g.transB = false, false
+	g.pb, g.epi = pb, e
+	defer func() { g.pb, g.epi, g.eres = nil, nil, nil }()
+	for i0 := 0; i0 < m; i0 += MC {
+		if e.Res != nil {
+			g.eres = e.Res[i0*e.LdRes:]
+		}
+		g.smallM(min(MC, m-i0), n, k, a[i0*lda:], nil, c[i0*ldc:], true, workers)
 	}
 }
 
@@ -424,12 +560,12 @@ func (g *gemmCtx) macroTask(t, w int) {
 		apan := g.a[ip*kc*MR:]
 		cptr := g.cblk[ip*MR*ldc+jp*NR:]
 		if mr == MR && nr == NR && g.alpha == 1 {
-			microKernel(kc, apan, bpan, cptr, ldc, g.acc)
+			microKernel(kc, apan, bpan, cptr, ldc, g.acc, nil)
 			continue
 		}
 		// Edge tile or alpha != 1: compute into a scratch tile, then scatter.
 		tile := g.tiles[w]
-		microKernel(kc, apan, bpan, tile, NR, false)
+		microKernel(kc, apan, bpan, tile, NR, false, nil)
 		for r := 0; r < mr; r++ {
 			row := cptr[r*ldc : r*ldc+nr]
 			tr := tile[r*NR : r*NR+nr]
@@ -639,7 +775,7 @@ func gemv(transA, transB bool, n, k int, alpha float32, a []float32, lda int, b 
 // layout) against one packed B panel (kc steps × NR columns). C row stride ldc
 // must accommodate MR rows and NR columns — callers own full tiles.
 func PanelKernel(kc int, apanel, bpanel, c []float32, ldc int, acc bool) {
-	microKernel(kc, apanel, bpanel, c, ldc, acc)
+	microKernel(kc, apanel, bpanel, c, ldc, acc, nil)
 }
 
 // PackAPanels packs row-major A[m×k] (k ≤ KC) into packAPanel layout —

@@ -28,9 +28,9 @@ func main() {
 	w("")
 	w(`#include "textflag.h"`)
 	w("")
-	w("// func microKernelAVX512(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)")
+	w("// func microKernelAVX512(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)")
 	w("// 6x16 tile, NR=16 in one ZMM, two accumulator banks for ILP.")
-	w("TEXT ·microKernelAVX512(SB), NOSPLIT, $0-89")
+	w("TEXT ·microKernelAVX512(SB), NOSPLIT, $0-120")
 	w("\tMOVQ kc+0(FP), DX")
 	w("\tMOVQ ap_base+8(FP), AX")
 	w("\tMOVQ bp_base+32(FP), BX")
@@ -38,6 +38,7 @@ func main() {
 	w("\tMOVQ ldc+80(FP), DI")
 	w("\tSHLQ $2, DI")
 	w("\tMOVBQZX accumulate+88(FP), SI")
+	w("\tMOVQ bias_base+96(FP), R14")
 	w("\tMOVQ CX, R8")
 	w("\tLEAQ (R8)(DI*1), R9")
 	w("\tLEAQ (R9)(DI*1), R10")
@@ -92,6 +93,13 @@ func main() {
 		w("\tVADDPS (%s), %s, %s", rows[r], a0(r), a0(r))
 	}
 	w("storeraw:")
+	// Optional bias (nil = none), added after C like the edge-tile spill.
+	w("\tTESTQ R14, R14")
+	w("\tJZ storenb")
+	for r := 0; r < MR; r++ {
+		w("\tVADDPS (R14), %s, %s", a0(r), a0(r))
+	}
+	w("storenb:")
 	for r := 0; r < MR; r++ {
 		w("\tVMOVUPS %s, (%s)", a0(r), rows[r])
 	}
@@ -112,9 +120,9 @@ func main() {
 	// Register plan: even accs Z0..Z11 (row-major, panel pairs), odd accs
 	// Z12..Z23, B vectors Z24..Z27 (p0/p1 × even/odd), broadcasts Z28/Z29.
 	w("")
-	w("// func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool)")
+	w("// func microKernel2AVX512(kc int, ap, bp0, bp1 []float32, c []float32, ldc int, accumulate bool, bias []float32)")
 	w("// 6x32 tile over two adjacent packed panels; c covers 32 columns.")
-	w("TEXT ·microKernel2AVX512(SB), NOSPLIT, $0-113")
+	w("TEXT ·microKernel2AVX512(SB), NOSPLIT, $0-144")
 	w("\tMOVQ kc+0(FP), DX")
 	w("\tMOVQ ap_base+8(FP), AX")
 	w("\tMOVQ bp0_base+32(FP), BX")
@@ -123,6 +131,7 @@ func main() {
 	w("\tMOVQ ldc+104(FP), DI")
 	w("\tSHLQ $2, DI")
 	w("\tMOVBQZX accumulate+112(FP), R14")
+	w("\tMOVQ bias_base+120(FP), R15")
 	w("\tMOVQ CX, R8")
 	w("\tLEAQ (R8)(DI*1), R9")
 	w("\tLEAQ (R9)(DI*1), R10")
@@ -183,6 +192,13 @@ func main() {
 		w("\tVADDPS 64(%s), %s, %s", rows2[r], ev(r, 1), ev(r, 1))
 	}
 	w("p2storeraw:")
+	w("\tTESTQ R15, R15")
+	w("\tJZ p2storenb")
+	for r := 0; r < MR; r++ {
+		w("\tVADDPS (R15), %s, %s", ev(r, 0), ev(r, 0))
+		w("\tVADDPS 64(R15), %s, %s", ev(r, 1), ev(r, 1))
+	}
+	w("p2storenb:")
 	for r := 0; r < MR; r++ {
 		w("\tVMOVUPS %s, (%s)", ev(r, 0), rows2[r])
 		w("\tVMOVUPS %s, 64(%s)", ev(r, 1), rows2[r])

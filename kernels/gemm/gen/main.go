@@ -46,15 +46,16 @@ func main() {
 	w("")
 	w(`#include "textflag.h"`)
 	w("")
-	w("// func microKernelARM64(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool)")
+	w("// func microKernelARM64(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32)")
 	w("// 8x12 tile. A panel: kc groups of 8 floats. B panel: kc groups of 12 floats.")
-	w("TEXT ·microKernelARM64(SB), NOSPLIT, $0-89")
+	w("TEXT ·microKernelARM64(SB), NOSPLIT, $0-120")
 	w("\tMOVD kc+0(FP), R0")
 	w("\tMOVD ap_base+8(FP), R1")
 	w("\tMOVD bp_base+32(FP), R2")
 	w("\tMOVD c_base+56(FP), R3")
 	w("\tMOVD ldc+80(FP), R4")
 	w("\tMOVBU accumulate+88(FP), R5")
+	w("\tMOVD bias_base+96(FP), R14")
 	w("\tLSL $2, R4, R4 // ldc in bytes")
 	w("\tMOVD R3, %s", rowReg(0))
 	for r := 1; r < MR; r++ {
@@ -93,6 +94,17 @@ func main() {
 		}
 	}
 	w("storeraw:")
+	// Optional bias (nil = none): one 12-float vector added to every row after
+	// C, the same order as the edge-tile spill.
+	w("\tCBZ R14, storenb")
+	w("\tVLD1 (R14), [V0.S4, V1.S4, V2.S4]")
+	for r := 0; r < MR; r++ {
+		for cc := 0; cc < 3; cc++ {
+			v := acc(r, cc)
+			w("\tWORD $0x%08X // FADD V%d.4S, V%d.4S, V%d.4S", fadd(v, v, cc), v, v, cc)
+		}
+	}
+	w("storenb:")
 	for r := 0; r < MR; r++ {
 		w("\tVST1 [V%d.S4, V%d.S4, V%d.S4], (%s)", acc(r, 0), acc(r, 1), acc(r, 2), rowReg(r))
 	}
