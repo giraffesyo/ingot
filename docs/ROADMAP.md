@@ -237,6 +237,13 @@
       were leaving the pool idle). Open: preprocessing is nearest-sampled
       (PARSeq trains with bicubic), dynamic-shape plumbing costs ~1k small
       allocs/run (Shape/Concat/Slice on shape tensors), AR decode export.
+- [x] IIIT5K-Word eval (tools/export/iiit5k.py → testdata/iiit5k, gitignored;
+      models/ocr TestIIIT5K, case-insensitive alnum protocol): PARSeq 97.6%
+      (paper 97.0), PP-OCRv4 rec 89.5%. Crop sampling is now bilinear (PARSeq
+      always; PP-OCR rec/cls up to 1.5× magnification, nearest beyond — the
+      synthetic 10-20 px corpus loses 12 points exact-match when 1-px strokes
+      are interpolated across 3-4×; OCR_CROP_UPMAX / OCR_CROP_NEAREST knobs).
+      Still open: ICDAR15 / TotalText (detection e2e), Union14M.
 - [ ] layout analysis, reading order, tables, multilingual, handwriting
 - [x] wasm target: js/wasm and wasip1/wasm build; the FULL test surface runs
       under node — kernels, ops, graph (zoo conformance vs ORT refs), and the

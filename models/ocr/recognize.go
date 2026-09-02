@@ -107,7 +107,7 @@ func (r *Recognizer) RecognizeBatch(img image.Image, boxes []Box) ([]string, []f
 	in := tensor.New(tensor.F32, len(boxes), 3, H, Wmax) // zeroed: padding is 0
 	f := in.F32()
 	for i, b := range boxes {
-		cropInto(f[i*3*H*Wmax:(i+1)*3*H*Wmax], img, b, H, widths[i], Wmax)
+		cropInto(f[i*3*H*Wmax:(i+1)*3*H*Wmax], img, b, H, widths[i], Wmax, cropUpMax)
 	}
 	outs, err := r.sess.Run(map[string]*tensor.Tensor{r.inName: in})
 	if err != nil {
@@ -180,7 +180,7 @@ func cropWidth(box Box, H int) int {
 // zeroes them for padding). Pixels are sampled with a bilinear corner blend
 // (exact for parallelograms) and nearest-pixel lookup, reading *image.RGBA /
 // *image.NRGBA pixel buffers directly when possible.
-func cropInto(dst []float32, img image.Image, box Box, H, W, Wstride int) {
+func cropInto(dst []float32, img image.Image, box Box, H, W, Wstride int, upMax float64) {
 	p := box.Pts
 	plane := H * Wstride
 	b := img.Bounds()
@@ -193,15 +193,48 @@ func cropInto(dst []float32, img image.Image, box Box, H, W, Wstride int) {
 	case *image.NRGBA:
 		pix, stride = im.Pix, im.Stride
 	}
-	sample := func(x, y float64) (float64, float64, float64) {
-		xi := clampI(int(x+0.5), 0, bw-1)
-		yi := clampI(int(y+0.5), 0, bh-1)
+	at := func(xi, yi int) (float64, float64, float64) {
 		if pix != nil {
 			o := yi*stride + xi*4
 			return float64(pix[o]), float64(pix[o+1]), float64(pix[o+2])
 		}
 		r, g, bl, _ := img.At(b.Min.X+xi, b.Min.Y+yi).RGBA()
 		return float64(r >> 8), float64(g >> 8), float64(bl >> 8)
+	}
+	// Sampling: bilinear, except when the crop magnifies the source by more
+	// than upMax — then nearest. Interpolating a 1-2 px stroke across a
+	// 3-4× enlargement turns it grey and PP-OCR loses spaces and edge
+	// characters (synthetic 10-20 px corpus: exact 0.919 → 0.80 all-bilinear,
+	// 0.919 at ≤1.5×); when shrinking or mildly enlarging, interpolation is
+	// what the models were trained on (IIIT5K: PARSeq 96.8 → 97.6 all-bilinear,
+	// PP-OCR 89.2 → 89.5 at ≤1.5× / 90.6 all-bilinear — see docs/PERF.md).
+	nearest := cropNearest
+	if !nearest {
+		srcH := math.Max(dist(p[0], p[3]), dist(p[1], p[2]))
+		if float64(H) > upMax*math.Max(srcH, 1) {
+			nearest = true
+		}
+	}
+	sample := func(x, y float64) (float64, float64, float64) {
+		if nearest {
+			return at(clampI(int(x+0.5), 0, bw-1), clampI(int(y+0.5), 0, bh-1))
+		}
+		// Bilinear over the four surrounding pixel centres (edges clamped).
+		// Pixel centres sit at integer coordinates, the same convention as
+		// the nearest path's rounding and the detector's box coordinates, so
+		// an integer-aligned 1:1 crop reproduces the source pixels exactly.
+		x0f, y0f := math.Floor(x), math.Floor(y)
+		fx, fy := x-x0f, y-y0f
+		x0, y0 := clampI(int(x0f), 0, bw-1), clampI(int(y0f), 0, bh-1)
+		x1, y1 := clampI(int(x0f)+1, 0, bw-1), clampI(int(y0f)+1, 0, bh-1)
+		r00, g00, b00 := at(x0, y0)
+		r10, g10, b10 := at(x1, y0)
+		r01, g01, b01 := at(x0, y1)
+		r11, g11, b11 := at(x1, y1)
+		w00, w10, w01, w11 := (1-fx)*(1-fy), fx*(1-fy), (1-fx)*fy, fx*fy
+		return r00*w00 + r10*w10 + r01*w01 + r11*w11,
+			g00*w00 + g10*w10 + g01*w01 + g11*w11,
+			b00*w00 + b10*w10 + b01*w01 + b11*w11
 	}
 	for oy := 0; oy < H; oy++ {
 		v := (float64(oy) + 0.5) / float64(H)
@@ -220,6 +253,25 @@ func cropInto(dst []float32, img image.Image, box Box, H, W, Wstride int) {
 			dst[2*plane+o] = float32(bb/255*2 - 1)
 		}
 	}
+}
+
+// cropNearest forces nearest-pixel crop sampling (A/B knob); cropUpMax is
+// the magnification above which the PP-OCR recogniser and classifier fall
+// back to nearest (see cropInto), overridable with OCR_CROP_UPMAX. PARSeq
+// always interpolates (its training transform is bicubic at every scale).
+var (
+	cropNearest = os.Getenv("OCR_CROP_NEAREST") == "1"
+	cropUpMax   = envFloat("OCR_CROP_UPMAX", 1.5)
+)
+
+func envFloat(name string, def float64) float64 {
+	if v := os.Getenv(name); v != "" {
+		var f float64
+		if _, err := fmt.Sscan(v, &f); err == nil {
+			return f
+		}
+	}
+	return def
 }
 
 func dist(a, b Point) float64 { return math.Hypot(a.X-b.X, a.Y-b.Y) }
