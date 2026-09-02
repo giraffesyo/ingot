@@ -21,6 +21,10 @@ type Recognizer struct {
 	outName string
 	dict    []string // index i -> character; index 0 is CTC blank
 	height  int      // model input height (48 for PP-OCRv4)
+	// BeamWidth > 1 selects CTC prefix beam search over greedy decoding
+	// (ctcbeam.go). The posterior is near-one-hot on clean text, so the
+	// default stays greedy; see docs/PERF.md for the corpus A/B.
+	BeamWidth int
 }
 
 // NewRecognizer loads a recognition model and its character dictionary. The
@@ -119,6 +123,10 @@ func (r *Recognizer) RecognizeBatch(img image.Image, boxes []Box) ([]string, []f
 	texts := make([]string, len(boxes))
 	confs := make([]float64, len(boxes))
 	for i := range boxes {
+		if r.BeamWidth > 1 {
+			texts[i], confs[i] = r.beamDecode(of[i*T*C:(i+1)*T*C], T, C)
+			continue
+		}
 		t, c, err := r.ctcDecode(of[i*T*C:(i+1)*T*C], T, C)
 		if err != nil {
 			return nil, nil, err

@@ -30,7 +30,9 @@
 - [x] text crop + perspective rectify (bilinear corner blend)
 - [x] PP-OCRv4 recognizer (SVTR-LCNet), greedy CTC decode; PARSeq word
       recognizer (NAR) behind the same BoxRecognizer interface; angle
-      classifier; rec batching. TODO: beam/LM decode, PARSeq AR w/ KV cache
+      classifier; rec batching; CTC prefix beam search (Recognizer.BeamWidth,
+      opt-in — corpus-neutral, the posterior is near-one-hot). TODO: LM
+      scoring hook, PARSeq AR w/ KV cache
 - [x] eval harness: synthetic corpus (P/R/F1, CER) as regression gate;
       TODO: ICDAR15, TotalText, IIIT5K, SVT, Union14M
 - [x] `cmd/ocr` end-to-end
