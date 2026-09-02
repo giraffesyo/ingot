@@ -53,15 +53,16 @@ func TestPipelineStages(t *testing.T) {
 	out := outs[p.Det.outName]
 	os := out.Shape()
 	boxes := boxesFromProb(out.F32(), os[2], os[3], sx, sy, p.Det)
+	rec := p.Rec.(*Recognizer)
 	for _, b := range boxes {
 		w := cropWidth(b, 48)
 		t0 := time.Now()
 		x := tensor.New(tensor.F32, 1, 3, 48, w)
 		cropInto(x.F32(), img, b, 48, w, w)
 		t1 := time.Now()
-		p.Rec.sess.Run(map[string]*tensor.Tensor{p.Rec.inName: x})
+		rec.sess.Run(map[string]*tensor.Tensor{rec.inName: x})
 		t2 := time.Now()
-		p.Rec.sess.Run(map[string]*tensor.Tensor{p.Rec.inName: x})
+		rec.sess.Run(map[string]*tensor.Tensor{rec.inName: x})
 		t3 := time.Now()
 		t.Logf("  box W=%d crop %v  rec-forward %v (2nd %v)", w, t1.Sub(t0), t2.Sub(t1), t3.Sub(t2))
 	}

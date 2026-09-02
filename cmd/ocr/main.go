@@ -23,6 +23,8 @@ func main() {
 	det := flag.String("det", "testdata/ocr/det.onnx", "detection model path")
 	rec := flag.String("rec", "testdata/ocr/rec.onnx", "recognition model path")
 	dict := flag.String("dict", "testdata/ocr/rec_dict.txt", "recognition char dictionary")
+	parseq := flag.String("parseq", "", "use a PARSeq recognizer (ONNX path) instead of -rec; word-level, 94-char ASCII")
+	charset := flag.String("charset", "testdata/models/parseq_charset.txt", "PARSeq charset file (with -parseq)")
 	inPath := flag.String("in", "testdata/ocr/sample.png", "input image")
 	outPath := flag.String("out", "det_boxes.png", "annotated output PNG")
 	boxThr := flag.Float64("boxthr", 0.6, "box score threshold")
@@ -47,13 +49,21 @@ func main() {
 	}
 	fmt.Printf("detected %d text boxes\n", len(boxes))
 	sortBoxesTopToBottom(boxes)
-	var recog *ocr.Recognizer
-	if !*norec {
-		recog, err = ocr.NewRecognizer(*rec, *dict)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "recognizer:", err)
+	var recog ocr.BoxRecognizer
+	if !*norec && *parseq != "" {
+		pr, perr := ocr.NewParseq(*parseq, *charset)
+		if perr != nil {
+			fmt.Fprintln(os.Stderr, "parseq:", perr)
 			os.Exit(1)
 		}
+		recog = pr
+	} else if !*norec {
+		r, rerr := ocr.NewRecognizer(*rec, *dict)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "recognizer:", rerr)
+			os.Exit(1)
+		}
+		recog = r
 	}
 	if recog != nil {
 		// One batched forward per group of similar-width boxes (see ocr.Pipeline).

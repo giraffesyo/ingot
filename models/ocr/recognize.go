@@ -70,6 +70,10 @@ func loadDict(path string) ([]string, error) {
 	return chars, sc.Err()
 }
 
+// CropWidth is the model-input width of the box's crop at the model height
+// (aspect-preserving; see cropWidth).
+func (r *Recognizer) CropWidth(box Box) int { return cropWidth(box, r.height) }
+
 // Recognize crops the box from img, runs recognition, and returns the decoded
 // text and mean confidence.
 func (r *Recognizer) Recognize(img image.Image, box Box) (string, float64, error) {

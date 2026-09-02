@@ -15,6 +15,8 @@ SHAPES = [
     ("rec_b8_320", "rec.onnx", (8, 3, 48, 320)),
     ("det_int8_640", "det_int8.onnx", (1, 3, 640, 640)),
     ("rec_int8_320", "rec_int8.onnx", (1, 3, 48, 320)),
+    ("parseq_128", "../models/parseq_nar.onnx", (1, 3, 32, 128)),
+    ("parseq_b8_128", "../models/parseq_nar.onnx", (8, 3, 32, 128)),
 ]
 
 def main():

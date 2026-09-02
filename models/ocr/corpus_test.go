@@ -85,9 +85,33 @@ func levenshtein(a, b string) int {
 
 func normText(s string) string { return strings.TrimSpace(s) }
 
-func TestCorpus(t *testing.T) {
-	const dir = "../../testdata/ocr"
-	mb, err := os.ReadFile(dir + "/corpus/manifest.json")
+// corpusMetrics is the detection/recognition score of one pipeline over the
+// synthetic corpus (tools/export/corpus.py).
+type corpusMetrics struct {
+	tp, fp, fn     int
+	matched, exact int
+	cerNum, cerDen int
+}
+
+func (m corpusMetrics) prec() float64 { return float64(m.tp) / math.Max(1, float64(m.tp+m.fp)) }
+func (m corpusMetrics) rec() float64  { return float64(m.tp) / math.Max(1, float64(m.tp+m.fn)) }
+func (m corpusMetrics) f1() float64   { return 2 * m.prec() * m.rec() / math.Max(1e-9, m.prec()+m.rec()) }
+func (m corpusMetrics) exactRate() float64 {
+	return float64(m.exact) / math.Max(1, float64(m.matched))
+}
+func (m corpusMetrics) cer() float64 { return float64(m.cerNum) / math.Max(1, float64(m.cerDen)) }
+
+func (m corpusMetrics) log(t *testing.T, tag string) {
+	t.Logf("%sDETECTION: precision %.3f recall %.3f F1 %.3f (tp=%d fp=%d fn=%d)", tag, m.prec(), m.rec(), m.f1(), m.tp, m.fp, m.fn)
+	t.Logf("%sRECOGNITION (matched boxes): exact-match %.3f, char-acc %.3f, CER %.3f (%d edits / %d chars)", tag, m.exactRate(), 1-m.cer(), m.cer(), m.cerNum, m.cerDen)
+	t.Logf("%s  matched %d lines; exact %d", tag, m.matched, m.exact)
+}
+
+const corpusDir = "../../testdata/ocr"
+
+func loadCorpus(t *testing.T) []gtImage {
+	t.Helper()
+	mb, err := os.ReadFile(corpusDir + "/corpus/manifest.json")
 	if err != nil {
 		t.Skip("no corpus (run tools/export/corpus.py)")
 	}
@@ -95,31 +119,18 @@ func TestCorpus(t *testing.T) {
 	if err := json.Unmarshal(mb, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	detPath, recPath := dir+"/det.onnx", dir+"/rec.onnx"
-	if v := os.Getenv("OCR_DET_ONNX"); v != "" {
-		detPath = v
-	}
-	if v := os.Getenv("OCR_REC_ONNX"); v != "" {
-		recPath = v
-	}
-	p, err := NewPipeline(detPath, recPath, dir+"/rec_dict.txt")
-	if v := os.Getenv("OCR_REC_BATCH"); v != "" {
-		fmt.Sscan(v, &p.RecBatch)
-	}
-	if v := os.Getenv("OCR_REC_PAD_RATIO"); v != "" {
-		fmt.Sscan(v, &p.RecPadRatio)
-	}
-	if err != nil {
-		t.Skip(err)
-	}
+	return corpus
+}
 
-	var tp, fp, fn int
-	var matched, exact int
-	var cerNum, cerDen int
+// evalCorpus runs p over the corpus and scores it. Ground-truth lines for
+// which keep returns false (nil keeps all) are dropped from every count —
+// used to score a recogniser on the subset of lines its charset can express.
+func evalCorpus(t *testing.T, p *Pipeline, corpus []gtImage, keep func(gt string) bool) corpusMetrics {
+	t.Helper()
+	var m corpusMetrics
 	const iouThr = 0.5
-
 	for _, gi := range corpus {
-		f, err := os.Open(filepath.Join(dir, "corpus", gi.Image))
+		f, err := os.Open(filepath.Join(corpusDir, "corpus", gi.Image))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,21 +166,24 @@ func TestCorpus(t *testing.T) {
 			}
 			usedGT[pr.g] = true
 			usedPred[pr.r] = true
-			tp++
-			matched++
 			gtText := normText(gi.Lines[pr.g].Text)
+			if keep != nil && !keep(gtText) {
+				continue
+			}
+			m.tp++
+			m.matched++
 			predText := normText(res[pr.r].Text)
 			if gtText == predText {
-				exact++
+				m.exact++
 			} else if os.Getenv("OCR_DUMP") != "" {
 				t.Logf("MISMATCH %s gt=%q pred=%q", gi.Image, gtText, predText)
 			}
-			cerNum += levenshtein(gtText, predText)
-			cerDen += len([]rune(gtText))
+			m.cerNum += levenshtein(gtText, predText)
+			m.cerDen += len([]rune(gtText))
 		}
 		for gi2, u := range usedGT {
-			if !u {
-				fn++
+			if !u && (keep == nil || keep(normText(gi.Lines[gi2].Text))) {
+				m.fn++
 				if os.Getenv("OCR_DUMP") != "" {
 					t.Logf("FN %s missed gt=%q", gi.Image, gi.Lines[gi2].Text)
 				}
@@ -177,34 +191,51 @@ func TestCorpus(t *testing.T) {
 		}
 		for ri, u := range usedPred {
 			if !u {
-				fp++
+				m.fp++
 				if os.Getenv("OCR_DUMP") != "" {
 					t.Logf("FP %s spurious pred=%q", gi.Image, res[ri].Text)
 				}
 			}
 		}
 	}
-	prec := float64(tp) / math.Max(1, float64(tp+fp))
-	rec := float64(tp) / math.Max(1, float64(tp+fn))
-	f1 := 2 * prec * rec / math.Max(1e-9, prec+rec)
-	exactRate := float64(exact) / math.Max(1, float64(matched))
-	cer := float64(cerNum) / math.Max(1, float64(cerDen))
-	t.Logf("DETECTION: precision %.3f recall %.3f F1 %.3f (tp=%d fp=%d fn=%d)", prec, rec, f1, tp, fp, fn)
-	t.Logf("RECOGNITION (matched boxes): exact-match %.3f, char-acc %.3f, CER %.3f (%d edits / %d chars)", exactRate, 1-cer, cer, cerNum, cerDen)
-	t.Logf("  matched %d lines; exact %d", matched, exact)
+	return m
+}
+
+func TestCorpus(t *testing.T) {
+	corpus := loadCorpus(t)
+	detPath, recPath := corpusDir+"/det.onnx", corpusDir+"/rec.onnx"
+	if v := os.Getenv("OCR_DET_ONNX"); v != "" {
+		detPath = v
+	}
+	if v := os.Getenv("OCR_REC_ONNX"); v != "" {
+		recPath = v
+	}
+	p, err := NewPipeline(detPath, recPath, corpusDir+"/rec_dict.txt")
+	if err != nil {
+		t.Skip(err)
+	}
+	if v := os.Getenv("OCR_REC_BATCH"); v != "" {
+		fmt.Sscan(v, &p.RecBatch)
+	}
+	if v := os.Getenv("OCR_REC_PAD_RATIO"); v != "" {
+		fmt.Sscan(v, &p.RecPadRatio)
+	}
+
+	m := evalCorpus(t, p, corpus, nil)
+	m.log(t, "")
 
 	// Regression gates, set from the 2026-08-21 baseline (F1 0.917, exact 0.919,
 	// CER 0.013) with margin. Tighten as the pipeline improves.
-	if rec < 0.85 {
-		t.Errorf("detection recall %.3f < 0.85 (regression)", rec)
+	if m.rec() < 0.85 {
+		t.Errorf("detection recall %.3f < 0.85 (regression)", m.rec())
 	}
-	if f1 < 0.85 {
-		t.Errorf("detection F1 %.3f < 0.85 (regression)", f1)
+	if m.f1() < 0.85 {
+		t.Errorf("detection F1 %.3f < 0.85 (regression)", m.f1())
 	}
-	if cer > 0.05 {
-		t.Errorf("char error rate %.3f > 0.05 (regression)", cer)
+	if m.cer() > 0.05 {
+		t.Errorf("char error rate %.3f > 0.05 (regression)", m.cer())
 	}
-	if exactRate < 0.85 {
-		t.Errorf("exact-match %.3f < 0.85 (regression)", exactRate)
+	if m.exactRate() < 0.85 {
+		t.Errorf("exact-match %.3f < 0.85 (regression)", m.exactRate())
 	}
 }
