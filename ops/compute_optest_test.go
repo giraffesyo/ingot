@@ -398,3 +398,32 @@ func TestAddLayerNorm(t *testing.T) {
 		eqF32(t, "normed", outs[1], sh, want.F32())
 	}
 }
+
+// TestMatMulGelu: the fused ingot_act=gelu MatMul (bias input) against
+// MatMul → Add → ingot.Gelu, on the packed path at a width that groups
+// sweep units and on the fallback path.
+func TestMatMulGelu(t *testing.T) {
+	rng := rand.New(rand.NewPCG(31, 32))
+	for _, c := range []struct{ as, bs []int }{
+		{[]int{128, 384}, []int{384, 1536}},
+		{[]int{1, 16, 48}, []int{48, 144}},
+		{[]int{2, 8, 32}, []int{2, 32, 96}},
+	} {
+		a := tensor.New(tensor.F32, c.as...)
+		b := tensor.New(tensor.F32, c.bs...)
+		N := c.bs[len(c.bs)-1]
+		bias := tensor.New(tensor.F32, N)
+		for _, tt := range []*tensor.Tensor{a, b, bias} {
+			for i := range tt.F32() {
+				tt.F32()[i] = rng.Float32()*2 - 1
+			}
+		}
+		attrs := Attrs{"ingot_act": {Kind: KindString, S: "gelu"}}
+		fused := run(t, mkOp(t, "MatMul", 1, attrs, 3, 1), a, b, bias)[0]
+		mm := run(t, mkOp(t, "MatMul", 1, nil, 3, 1), a, b, bias)[0]
+		bld, _ := Lookup("ingot", "Gelu", 1)
+		gop, _ := bld(NodeInfo{Name: "g", OpType: "Gelu", Domain: "ingot", Version: 1, NumIn: 1, NumOut: 1})
+		want := run(t, gop, mm)[0]
+		eqF32(t, "matmul-gelu", fused, want.Shape(), want.F32())
+	}
+}

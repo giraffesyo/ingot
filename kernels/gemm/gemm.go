@@ -23,9 +23,12 @@ type gemmCtx struct {
 	phase int // phasePackB, phasePackA, phaseMacro, phaseSmallPackA, phaseSmallM
 
 	// Fused epilogue for the packed-B small-M path (nil: none); eres is the
-	// residual's rows for the current M block.
-	epi  *Epilogue
-	eres []float32
+	// residual's rows for the current M block; group is how many sweep units
+	// (panels, or pairs) one task covers when an activation is fused — the
+	// activation then runs over group·NR columns per row instead of NR.
+	epi   *Epilogue
+	eres  []float32
+	group int
 
 	// current block geometry
 	kc, nc, mc       int
@@ -252,8 +255,24 @@ func (g *gemmCtx) Run(t, w int) {
 	case phaseSmallPackA:
 		g.smallPackA(t)
 	case phaseSmallM:
-		g.smallMTask(t, w)
+		g.smallMGroup(t, w)
 	}
+}
+
+// smallMGroup runs sweep units [t·group, (t+1)·group) and then the fused
+// activation over the columns they produced, still cache-hot.
+func (g *gemmCtx) smallMGroup(t, w int) {
+	units := g.nPanels
+	ppu := 1
+	if g.pairMode {
+		units, ppu = (g.nPanels+1)/2, 2
+	}
+	u0 := t * g.group
+	u1 := min(u0+g.group, units)
+	for u := u0; u < u1; u++ {
+		g.smallMTask(u, w)
+	}
+	g.epiAct(u0*ppu*NR, (u1-u0)*ppu*NR)
 }
 
 // smallM: see sgemmT. Packed A layout: block (kb, ip) at (kb*mPanels+ip)*KC*MR.
@@ -286,19 +305,28 @@ func (g *gemmCtx) smallMSweep(m, k, workers int) {
 	// keep every worker busy (or the sweep is single-threaded anyway).
 	g.pairMode = g.pb != nil && g.alpha == 1 && pairKernel() && g.nPanels >= 2 &&
 		(workers == 1 || (g.nPanels+1)/2 >= 2*workers)
-	tasks := g.nPanels
+	units := g.nPanels
 	if g.pairMode {
-		tasks = (g.nPanels + 1) / 2
+		units = (g.nPanels + 1) / 2
 	}
+	// With a fused activation, widen each task to up to 4 units so the
+	// activation kernel sees 64+ columns per row call (per-row calls on a
+	// 16-wide strip cost as much as a separate pass), keeping ≥2 tasks per
+	// worker.
+	g.group = 1
+	if g.epi != nil && g.epi.Act != nil {
+		g.group = max(1, min(4, units/(2*workers)))
+	}
+	tasks := (units + g.group - 1) / g.group
 	if workers > 1 {
-		grain := max(1, macroTaskMACs/(NR*m*k))
+		grain := max(1, macroTaskMACs/(NR*m*k*g.group))
 		if g.pairMode {
 			grain = max(1, grain/2)
 		}
 		par.Run(tasks, grain, g)
 	} else {
 		for t := 0; t < tasks; t++ {
-			g.smallMTask(t, 0)
+			g.smallMGroup(t, 0)
 		}
 	}
 	g.pairMode = false
@@ -387,7 +415,6 @@ func (g *gemmCtx) smallMTask(t, w int) {
 				}
 			}
 		}
-		g.epiAct(jp*NR, 2*NR)
 		return
 	}
 	acc0 := g.acc
@@ -437,7 +464,6 @@ func (g *gemmCtx) smallMTask(t, w int) {
 			}
 		}
 	}
-	g.epiAct(jp*NR, nr)
 }
 
 // biasAt returns the fused bias for columns [j0, j0+n) (nil when none).
