@@ -273,14 +273,43 @@ func TestMatMulBatched(t *testing.T) {
 	eqF32(t, "matmulBatch", out, []int{2, 2, 2}, want)
 }
 
+// TestMatMulBroadcastBatch: a 2-D rhs shared across A's batch dims (the
+// Linear-on-a-3-D/4-D-tensor form, collapsed to one GEMM) against a float64
+// oracle, including the sequence-first [T, 1, K] shape whose per-batch M is 1
+// and a rank-4 batch.
 func TestMatMulBroadcastBatch(t *testing.T) {
-	// [2,2,3] x [3,2] -> [2,2,2] (rhs broadcast over batch)
-	a := iota32(2, 2, 3)
-	b := iota32(3, 2)
-	op := mkOp(t, "MatMul", 1, nil, 2, 1)
-	out := run(t, op, a, b)[0]
-	if !out.Shape().Equal(tensor.Shape{2, 2, 2}) {
-		t.Fatalf("shape %v", out.Shape())
+	rng := rand.New(rand.NewPCG(7, 11))
+	for _, c := range []struct{ as, bs []int }{
+		{[]int{2, 2, 3}, []int{3, 2}},
+		{[]int{7, 1, 384}, []int{384, 96}},
+		{[]int{3, 5, 17}, []int{17, 9}},
+		{[]int{2, 3, 4, 33}, []int{33, 5}},
+	} {
+		a := tensor.New(tensor.F32, c.as...)
+		b := tensor.New(tensor.F32, c.bs...)
+		for i := range a.F32() {
+			a.F32()[i] = rng.Float32()*2 - 1
+		}
+		for i := range b.F32() {
+			b.F32()[i] = rng.Float32()*2 - 1
+		}
+		op := mkOp(t, "MatMul", 1, nil, 2, 1)
+		out := run(t, op, a, b)[0]
+		K, N := c.bs[0], c.bs[1]
+		rows := a.Numel() / K
+		want := make([]float32, rows*N)
+		af, bf := a.F32(), b.F32()
+		for r := 0; r < rows; r++ {
+			for j := 0; j < N; j++ {
+				var acc float64
+				for k := 0; k < K; k++ {
+					acc += float64(af[r*K+k]) * float64(bf[k*N+j])
+				}
+				want[r*N+j] = float32(acc)
+			}
+		}
+		ws := append(append([]int{}, c.as[:len(c.as)-1]...), N)
+		eqF32(t, "matmulBcast", out, ws, want)
 	}
 }
 
