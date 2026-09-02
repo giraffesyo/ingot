@@ -402,11 +402,13 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 // tile stays cache-resident, and utilization no longer caps at B·H workers).
 func attnRows(b, h, t, tk, dh, workers int) (rows, nRow int) {
 	rows = t
-	// Split a head into row tiles only when the per-tile GEMM stays big
-	// enough to amortise re-packing K each tile (≥512K MACs after halving:
-	// a 128×128×64 head split to 32-row tiles ran −45%, ViT-B's 197-token
-	// heads −21%; the old 2M floor left B·H=6 tasks on an 18-wide pool).
-	for b*h*((t+rows-1)/rows) < 2*workers && rows > 32 && rows*tk*dh >= 1<<19 {
+	// Split a head into row tiles only while the per-tile GEMM stays big
+	// enough to amortise re-packing K and V for each tile: halve while the
+	// tile holds ≥1M MACs. Measured on Zen 5 (12 workers): a 128×128×64 head
+	// is best at two 64-row tiles (12 tasks: 58 µs vs 78 at four tiles vs
+	// 230 unsplit); ViT-B's 197-token heads at two tiles (243 vs 271 at
+	// four); fewer tiles than 2·workers on big heads costs +45% (stragglers).
+	for b*h*((t+rows-1)/rows) < 2*workers && rows > 32 && rows*tk*dh >= 1<<20 {
 		rows = (rows + 1) / 2
 	}
 	return rows, (t + rows - 1) / rows
