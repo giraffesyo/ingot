@@ -28,8 +28,9 @@
 ## Phase 3 — OCR
 - [x] PP-OCRv4 detector (DBNet) on the runtime, DB postproc (min-area rect, unclip)
 - [x] text crop + perspective rectify (bilinear corner blend)
-- [x] PP-OCRv4 recognizer (SVTR-LCNet), greedy CTC decode; TODO: PARSeq (AR
-      decode w/ KV cache), beam/LM decode, angle classifier, rec batching
+- [x] PP-OCRv4 recognizer (SVTR-LCNet), greedy CTC decode; PARSeq word
+      recognizer (NAR) behind the same BoxRecognizer interface; angle
+      classifier; rec batching. TODO: beam/LM decode, PARSeq AR w/ KV cache
 - [x] eval harness: synthetic corpus (P/R/F1, CER) as regression gate;
       TODO: ICDAR15, TotalText, IIIT5K, SVT, Union14M
 - [x] `cmd/ocr` end-to-end
@@ -221,9 +222,19 @@
 - [x] PARSeq runs: NAR export (decode_ar=False, refine_iters=2; the AR loop
       does not export) verified vs ORT at 1.1e-05, 663→483 nodes with 15
       SDPA + 15 GELU fusions. Needed CumSum + rank-3 SDPA (dynamo bmm form).
-      tools/export/parseq.py exports model + training charset. NEXT: pipeline
-      recognizer (32×128 preproc, EOS-at-0 greedy decode, corpus accuracy A/B
-      vs PP-OCR rec)
+      tools/export/parseq.py exports model + training charset.
+- [x] PARSeq pipeline recognizer (ocr.Parseq, BoxRecognizer interface shared
+      with the CTC Recognizer; `cmd/ocr -parseq`): 32×128 non-aspect resize,
+      greedy decode with EOS at class 0, dynamic-batch export (example batch
+      must be >1 — torch.export 0/1-specialises). Corpus: 38/40 exact on the
+      lines its 94-char ASCII charset can express (CER 0.012 vs PP-OCR's 0.013
+      over all lines) — a word recognizer, no space/CJK; PP-OCR stays the line
+      default. Found two runtime wins on the way: MatMul with a 2-D rhs now
+      collapses A's batch dims into M (seq-first Linear was T GEMVs), and
+      attention row-tiling kicks in at 512K MACs/tile (B·H < 2·workers heads
+      were leaving the pool idle). Open: preprocessing is nearest-sampled
+      (PARSeq trains with bicubic), dynamic-shape plumbing costs ~1k small
+      allocs/run (Shape/Concat/Slice on shape tensors), AR decode export.
 - [ ] layout analysis, reading order, tables, multilingual, handwriting
 - [x] wasm target: js/wasm and wasip1/wasm build; the FULL test surface runs
       under node — kernels, ops, graph (zoo conformance vs ORT refs), and the
