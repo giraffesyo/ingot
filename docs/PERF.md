@@ -2337,3 +2337,35 @@ Splitting to fewer than 2·workers tiles instead (target = workers) was
 big heads need the task count for balance; the floor is the right knob.
 PARSeq at batch 1 is now 7.9 ms on the pod, 0.65× ORT-16T.
 
+## OPEN: small-M GEMM scheduling (2026-09-02, data only)
+
+Worker-count sweep of the packed-B GEMM on the Zen 5 pod, plain (no
+epilogue), medians of 2:
+
+| workers | 128×1152×384 | 1024×384×1536 |
+|---|---|---|
+| 1 | 432 µs (261 GFLOPS — kernel peak) | 4.70 ms |
+| 2 | 244 | 2.63 |
+| 4 | 137 | 1.70 |
+| 8 | 90 | 1.37 |
+| 12 | 71 (6.1×) | 1.15 (4.1×) |
+| 16 | 73 | 1.24 |
+
+At 12 workers the B=1 shape carries ~35 µs of overhead on ~36 µs of
+kernel work: a separate pack-A region, its barrier, and every worker
+reading the whole packed A across cores. The M=1024 shape runs the sweep
+once per 144-row block (8 sequential regions), which is why batch-8
+PARSeq scales worse than batch 1. Two ideas, neither landed:
+
+- per-worker redundant A pack for small A (≤64K floats) inside the sweep,
+  no pack region. A first cut swapped the shared buffer under
+  smallPackA per worker; it failed the reference tests and ran 10×
+  slower — a bug, not a measurement — and was reverted. A retry should
+  pack into dedicated per-worker buffers as an explicit pre-sweep step
+  and pass TestSgemmMatchesRef/TestMInvariance before timing.
+- one sweep region over (M block × panel pair) for M > MC, packing all
+  of A once, instead of a region per block.
+
+This is the largest lever left for transformers: MatMul is 66% of PARSeq
+at batch 1 and 62% at batch 8.
+
