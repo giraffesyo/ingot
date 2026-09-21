@@ -254,6 +254,16 @@
       (ingot.AddLayerNorm emits the sum and the normalised sum). Gated at
       D ≥ 128 — bertish's 48-wide rows lost 7% fused. PARSeq −6/−11% at
       B=1 (0.67× ORT-16T), neutral at B=8.
+- [x] packAPanel as row streams (1.6-1.9×; was 11% of PARSeq CPU) and the
+      attention row-tile floor at 1M MACs (PARSeq head 78→58 µs, ViT −10%).
+      PARSeq on Zen 5: 7.9 ms at B=1 (0.65× ORT-16T), 54 ms at B=8 (0.89×).
+      Measured and declined: GELU in the GEMM epilogue (wash at B=1, +3-4%
+      at B=8), bf16 weights on PARSeq (−6-9%: M=128 GEMMs are overhead-bound).
+- [ ] small-M GEMM scheduling: the packed-B sweep reaches 6.1× on 12 workers
+      (pack region + barrier + cross-core packed-A reads); one sweep region
+      across M blocks for M > MC. Data and the abandoned first attempt in
+      docs/PERF.md ("OPEN: small-M GEMM scheduling"). Largest transformer
+      lever left (MatMul 66% of PARSeq).
 - [x] IIIT5K-Word eval (tools/export/iiit5k.py → testdata/iiit5k, gitignored;
       models/ocr TestIIIT5K, case-insensitive alnum protocol): PARSeq 97.6%
       (paper 97.0), PP-OCRv4 rec 89.5%. Crop sampling is now bilinear (PARSeq
