@@ -25,14 +25,14 @@ func pwblk6x16zt_asm(dst0, dst1, x, w []float32, cin, xbstride, tiles int)
 // instruction count (each ci: 1 wload + 6 broadcasts + 6 FMAs vs 2+6+12);
 // double-pumped AVX-512 parts are decided by an init-time micro-probe on a
 // hot tile — relative timing, load-immune (gemm's µkernel-pick policy).
-// OCR_PWBLK=avx2|avx512 pins.
+// INGOT_PWBLK=avx2|avx512 pins.
 var usePwBlkZ = pickPwBlk()
 
 func pickPwBlk() bool {
 	if !cpu.X86.HasAVX512F {
 		return false
 	}
-	switch os.Getenv("OCR_PWBLK") {
+	switch os.Getenv("INGOT_PWBLK") {
 	case "avx2":
 		return false
 	case "avx512":

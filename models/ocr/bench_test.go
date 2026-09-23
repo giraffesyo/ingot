@@ -33,11 +33,11 @@ var ocrBenchShapes = []struct {
 }
 
 func init() {
-	// Benchmark knob: OCR_PAR_SPIN_NS overrides the helper spin window.
-	if v := os.Getenv("OCR_PAR_SPIN_NS"); v != "" {
+	// Benchmark knob: INGOT_PAR_SPIN_NS overrides the helper spin window.
+	if v := os.Getenv("INGOT_PAR_SPIN_NS"); v != "" {
 		fmt.Sscan(v, &par.SpinNS)
 	}
-	if v := os.Getenv("OCR_PAR_WORKERS"); v != "" {
+	if v := os.Getenv("INGOT_PAR_WORKERS"); v != "" {
 		fmt.Sscan(v, &par.MaxWorkers)
 	}
 }
@@ -124,7 +124,7 @@ func TestOCRProfile(t *testing.T) {
 		for _, st := range s.Stats() {
 			t.Logf("  %-22s n=%3d  %8.1f µs/run  %5.1f%%", st.OpType, st.Count, float64(st.Total.Microseconds())/runs, 100*float64(st.Total)/float64(total))
 		}
-		if os.Getenv("OCR_PROFILE_NODES") != "" {
+		if os.Getenv("INGOT_PROFILE_NODES") != "" {
 			ns := s.NodeStats()
 			sort.Slice(ns, func(i, j int) bool { return ns[i].Total > ns[j].Total })
 			for i, ns := range ns {

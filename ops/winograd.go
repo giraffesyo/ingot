@@ -34,10 +34,10 @@ import (
 // winogradEnabled: on by default since the fused per-block rewrite (the first
 // version materialised V/M per band, ~600 KB × workers, and lost in-model to
 // shared-cache eviction; the fused pipeline's working set is one ~250 KB
-// block). OCR_NO_WINOGRAD=1 disables. Eligible convs additionally yield to
+// block). INGOT_NO_WINOGRAD=1 disables. Eligible convs additionally yield to
 // the SME unit when the dispatch policy would take the equivalent im2col GEMM
 // (measured 1T order: SME > Winograd > im2col).
-var winogradEnabled = os.Getenv("OCR_NO_WINOGRAD") == "" || os.Getenv("OCR_WINOGRAD") == "1"
+var winogradEnabled = os.Getenv("INGOT_NO_WINOGRAD") == "" || os.Getenv("INGOT_WINOGRAD") == "1"
 
 // winogradOK reports whether this conv should take the Winograd path.
 func (o *convOp) winogradOK(G, Cg, Mg, KH, KW, OH, OW int) bool {

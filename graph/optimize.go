@@ -2199,9 +2199,9 @@ func blkEligible(n *Node) int {
 
 // blkSpatialGate returns the maximum H*W at which a blocked region may seed
 // (default 224², the measured break-even; see docs/DESIGN-nchwc.md).
-// OCR_BLK_GATE=<side> overrides for tuning sweeps.
+// INGOT_BLK_GATE=<side> overrides for tuning sweeps.
 func blkSpatialGate() int {
-	if v := os.Getenv("OCR_BLK_GATE"); v != "" {
+	if v := os.Getenv("INGOT_BLK_GATE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n * n
 		}
