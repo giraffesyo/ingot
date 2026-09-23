@@ -34,7 +34,7 @@ import (
 )
 
 // MaxWorkers is the total number of workers (including the caller). It is read
-// once, when the pool starts on first use. OCR_WORKERS overrides in either
+// once, when the pool starts on first use. INGOT_WORKERS overrides in either
 // direction.
 //
 // On many-core x86 the pool is capped at 12 by default: on a 32-core Zen 5
@@ -50,7 +50,7 @@ import (
 var MaxWorkers = defaultWorkers()
 
 func defaultWorkers() int {
-	if v := os.Getenv("OCR_WORKERS"); v != "" {
+	if v := os.Getenv("INGOT_WORKERS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}

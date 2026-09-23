@@ -79,7 +79,7 @@ func BenchmarkQgemmSME(b *testing.B) {
 		})
 		// Note: gemm.QgemmPackedS8 itself dispatches to SME under the auto/forced
 		// policy, so this row measures the dispatcher, not raw NEON — force
-		// OCR_GEMM_KERNEL=neon to compare kernels.
+		// INGOT_GEMM_KERNEL=neon to compare kernels.
 		b.Run(sh.name+"/gemm-dispatch", func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				gemm.QgemmPackedS8(paN, sh.n, bm, sh.n, c, sh.n, true)

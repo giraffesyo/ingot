@@ -128,9 +128,9 @@ func TestMobileNetV3Small(t *testing.T) { runConformance(t, "mobilenet_v3_small"
 // TestOpProfile prints a per-op-type time breakdown for a model
 // (go test -run TestOpProfile -v -args -model=mobilenet_v3_small).
 func TestOpProfile(t *testing.T) {
-	name := os.Getenv("OCR_PROFILE_MODEL")
+	name := os.Getenv("INGOT_PROFILE_MODEL")
 	if name == "" {
-		t.Skip("set OCR_PROFILE_MODEL=<name>")
+		t.Skip("set INGOT_PROFILE_MODEL=<name>")
 	}
 	s, man := loadSession(t, name)
 	feeds := map[string]*tensor.Tensor{}
@@ -155,7 +155,7 @@ func TestOpProfile(t *testing.T) {
 	for _, st := range s.Stats() {
 		t.Logf("  %-22s n=%3d  %8.1f µs/run  %5.1f%%", st.OpType, st.Count, float64(st.Total.Microseconds())/runs, 100*float64(st.Total)/float64(total))
 	}
-	if os.Getenv("OCR_PROFILE_NODES") != "" {
+	if os.Getenv("INGOT_PROFILE_NODES") != "" {
 		for _, ns := range s.NodeStats() {
 			t.Logf("    %-40s %8.1f µs", ns.Node.Name, float64(ns.Total.Microseconds())/runs)
 		}

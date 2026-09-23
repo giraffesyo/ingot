@@ -17,7 +17,7 @@ import (
 // Zen 5 / Intel server parts with true 512-bit datapaths the probe measures
 // the win directly (+12-15% GEMM, gptish -13% end-to-end on Zen 5). The probe
 // also inherently prices in any frequency licensing the part applies. Set
-// OCR_GEMM_KERNEL to avx2 / avx512 / generic to pin a kernel (for A/B
+// INGOT_GEMM_KERNEL to avx2 / avx512 / generic to pin a kernel (for A/B
 // measurement); unknown/empty = auto.
 var microKernel = pickMicroKernel()
 
@@ -31,7 +31,7 @@ var (
 var ActiveKernel string
 
 func pickMicroKernel() func(kc int, ap, bp []float32, c []float32, ldc int, accumulate bool, bias []float32) {
-	switch os.Getenv("OCR_GEMM_KERNEL") {
+	switch os.Getenv("INGOT_GEMM_KERNEL") {
 	case "avx512":
 		if HasAVX512 {
 			ActiveKernel = "avx512"

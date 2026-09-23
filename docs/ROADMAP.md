@@ -55,7 +55,7 @@
 - [x] vek.Exp/Sigmoid (NEON + AVX2) → Softmax, Sigmoid, Exp op (2.8 Gelem/s 1T)
 - [x] SiLU/Erf/GELU SIMD kernels + pattern fusion (ingot.SiLU/Gelu); Dot; GEMV
 - [x] Winograd F(2×2,3×3), fused per-block pipeline — default-on (yields to
-      SME at 1T; OCR_NO_WINOGRAD=1 disables): resnetish MT −20%, det −7%
+      SME at 1T; INGOT_NO_WINOGRAD=1 disables): resnetish MT −20%, det −7%
 - [x] hybrid SME+NEON MT GEMM: prototyped, measured, declined (parity at best
       on real shapes; docs/PERF.md)
 - [ ] Tanh SIMD; fused attention; layernorm SIMD; direct 3×3 / SIMD MaxPool for
@@ -153,7 +153,7 @@
       ≠ wall-share lesson — remaining mv2 cost is bandwidth + region churn
 - [x] fuse-blk-res: residual Adds fold into ConvPwBlk (post-epilogue,
       per-chunk): mv2 −4.5%, effnet −3%; all zoo residual Adds fold
-- [x] pool-width sweep + OCR_WORKERS knob: every model fastest at 8-16
+- [x] pool-width sweep + INGOT_WORKERS knob: every model fastest at 8-16
       workers on 32-core Zen 5 (mv3 −24%, resnetish −40% at 8w). Best-of:
       mv2 1.79 (1.23× ORT-16T), effnet 2.80, mv3 0.854
 - [x] SetInputShape + propagateShapes: blocked layout for dynamic models —
@@ -202,7 +202,7 @@
 - [x] SME probes + Sgemm (kernels/sme, pure Go WORD-encoded): FMOPA peak 2.17
       TFLOPS/core; pre-packed Sgemm 700 GFLOPS 1T (7.4× NEON); signal-mask
       guard (ZA dies on signal delivery — GC-storm regression test); dispatch
-      via OCR_GEMM_KERNEL=sme → rec_320 1T 8.8 ms vs ORT 11.7 (0.75×).
+      via INGOT_GEMM_KERNEL=sme → rec_320 1T 8.8 ms vs ORT 11.7 (0.75×).
       Default-on (auto): SME when the pool is single-threaded, NEON at MT.
       TODO: hybrid SME+NEON MT scheduling, linux detection (HWCAP2_SME)
 - [x] rec batching in the OCR pipeline (width-grouped, padding-bounded)

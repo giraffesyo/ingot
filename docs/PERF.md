@@ -122,7 +122,7 @@ the noise) — the expected result, because Zen4 runs 512-bit ops on *double-pum
 instructions / more registers. AVX-512 beats AVX2 on CPUs with true 512-bit
 datapaths (Intel server), and can *downclock* on some Intel parts. So the
 evidence-based call: **AVX2 stays the amd64 default**; the AVX-512 kernel is kept
-correct and opt-in via `OCR_GEMM_KERNEL=avx512` (also `avx2`/`generic`), to be
+correct and opt-in via `INGOT_GEMM_KERNEL=avx512` (also `avx2`/`generic`), to be
 A/B'd on an Intel true-512 box before defaulting anywhere. `gemm.ActiveKernel`
 reports the selection.
 
@@ -145,7 +145,7 @@ true AVX-512: avx512f/vnni/bw/...), 4 vCPU. First clean-ish native-x86 numbers:
 Intel's AVX-512 frequency downclocking. Combined with the Zen 4 result (parity,
 double-pumped 256-bit units), the AVX-512 kernel fails to beat AVX2 on *both*
 microarchitectures tested. This confirms the evidence-based default: **AVX2 is the
-amd64 fast path; AVX-512 stays opt-in** (`OCR_GEMM_KERNEL=avx512`) pending a part
+amd64 fast path; AVX-512 stays opt-in** (`INGOT_GEMM_KERNEL=avx512`) pending a part
 where it actually wins. The AVX2 micro-kernel at 106 GFLOPS/core is ~95% of this
 Xeon's ~112 GFLOPS AVX2 core peak — near-peak on Intel too, not just Apple Silicon.
 
@@ -171,7 +171,7 @@ Reference: ONNX Runtime 1.29 CPU, same host.
 Numerical parity vs ORT (max abs err): tiny_conv 1.5e-8, tiny_transformer 2.4e-7,
 mobilenet_v3_small 1.2e-5. Correctness is not the gap; speed is.
 
-Op breakdown, mobilenet_v3_small, 1T (`OCR_PROFILE_MODEL=… go test -run TestOpProfile -v`):
+Op breakdown, mobilenet_v3_small, 1T (`INGOT_PROFILE_MODEL=… go test -run TestOpProfile -v`):
 
 | op | count | µs/run | share |
 |---|---|---|---|
@@ -282,7 +282,7 @@ Remaining conv hot spots (next targets):
 ## Phase 4, round 1 — PP-OCRv4 det/rec vs ONNX Runtime (2026-08-21)
 
 Harness: `models/ocr` `BenchmarkOCRModels` + `TestOCRProfile` (per-op/per-node
-breakdown, `OCR_PROFILE=det_640 OCR_PROFILE_NODES=1`) on our side;
+breakdown, `OCR_PROFILE=det_640 INGOT_PROFILE_NODES=1`) on our side;
 `tools/export/orttime.py` (same shapes, same synthetic input) and
 `tools/export/ortprof.py` (ORT's own per-node profiler) on the ORT side.
 ORT 1.29 CPU EP, default graph optimisation. Apple Silicon (the dev box),
@@ -582,7 +582,7 @@ the 16 per-frequency GEMMs use pre-packed transformed weights cached on the op.
 Oracle tests cover even/odd extents, pads 0/1/2, batch > 1, and the fused
 epilogue; the zoo conformance suite passes with it forced on.
 
-Status: **opt-in via OCR_WINOGRAD=1** (tests force-enable it). Isolated,
+Status: **opt-in via INGOT_WINOGRAD=1** (tests force-enable it). Isolated,
 same-run comparison (det head 96→24 3×3): @160² **1.19 vs 1.56 ms** (wino vs
 tiled im2col), @80² 0.52 vs 0.54, resnet 64ch@56² 0.44 vs 0.46. But in-model
 it made det *slower* overall: with 18 workers each holding a
@@ -645,7 +645,7 @@ waste FMOPA lanes) — dispatch must be shape-aware. MT aggregate saturates
 ~1.2 TFLOPS (the matrix units are shared per cluster), ≈ the whole machine's
 NEON peak — from a couple of cores, leaving the rest free.
 
-Next: pre-packed-A entry point, dispatch (opt-in `OCR_GEMM_KERNEL=sme`, then
+Next: pre-packed-A entry point, dispatch (opt-in `INGOT_GEMM_KERNEL=sme`, then
 default-on for eligible shapes on SME hardware), then the model-level numbers
 that finally attack the "ORT uses SME" 1T column.
 
@@ -665,7 +665,7 @@ lost — the thread just can't be async-preempted, which is already true of
 assembly. With the guard: 12,000 concurrent runs + GC storm, zero corruptions;
 overhead is negligible (two libc calls per ~100 µs task).
 
-Integration: `OCR_GEMM_KERNEL=sme` (opt-in) makes gemm.PackA additionally pack
+Integration: `INGOT_GEMM_KERNEL=sme` (opt-in) makes gemm.PackA additionally pack
 eligible weights (m ≥ 32, k ≥ 48, no transpose) for the ZA kernel, and
 SgemmPackedA / Sgemm dispatch to it for beta=0 — ops code untouched. Pre-packed
 SME: rec-shape 480·240·480 at **700 GFLOPS 1T** (7.4× NEON), sq1024 684.
@@ -695,7 +695,7 @@ rec_b8 151 → 74; det 1T ~8% better) but a mild loss at full parallelism (the
 per-cluster matrix units contend while NEON pipelines idle). Policy, now the
 default with no env needed:
 
-- `OCR_GEMM_KERNEL` unset → **auto**: SME for eligible shapes when the worker
+- `INGOT_GEMM_KERNEL` unset → **auto**: SME for eligible shapes when the worker
   pool is single-threaded (GOMAXPROCS=1); NEON otherwise.
 - `=sme` forces SME at any parallelism (for experiments); `=neon` disables.
 
@@ -727,7 +727,7 @@ det55 @80² 0.29 vs 0.40, resnet 16ch@16² **14 vs 45 µs**, 64ch@56² 0.24 vs
 0.35. In-model MT: resnetish 375 → 297-315 µs, det_640 −7%, mnv2/det_960
 unchanged. Dispatch order, measured at 1T: **SME > Winograd > im2col** — so
 winogradOK yields to the SME unit when the dispatch policy would take the
-equivalent im2col GEMM (gemm.PrefersSME). OCR_NO_WINOGRAD=1 disables.
+equivalent im2col GEMM (gemm.PrefersSME). INGOT_NO_WINOGRAD=1 disables.
 
 Hybrid SME+NEON MT GEMM (split N panels between C coarse SME tasks and the
 NEON sweep) was prototyped (hybrid_arm64_test.go) and declined: with
@@ -1545,7 +1545,7 @@ first measure whether the tensor being "saved" ever leaves the LLC.
 ## AVX-512 micro-kernel, finally earned (2026-08-28)
 
 The AVX-512 6×16 f32 micro-kernel has existed — correctness-tested,
-behind OCR_GEMM_KERNEL=avx512 — since the first amd64 round, parked
+behind INGOT_GEMM_KERNEL=avx512 — since the first amd64 round, parked
 because the only AVX-512 CPU then measurable was Zen 4 (double-pumped
 256-bit units, throughput parity). The fleet now has true 512-bit
 datapaths, and on Zen 5 the kernel wins: **GEMM +12–15%** (sq1024
@@ -1849,7 +1849,7 @@ block/range). Zen 5 pod, interleaved medians of 6: **mv2 2.48 → 2.20 ms
 (−11.3%), mv3_small 1.60 → 1.48 (−7.3%), effnet 3.76 → 3.57 (−5.2%)**.
 ToBlk8 146→72 µs, dw@112² 123→87, dw-s2@112² 166→83.
 
-A gate sweep (OCR_BLK_GATE env, new) with the fixes in place settles the
+A gate sweep (INGOT_BLK_GATE env, new) with the fixes in place settles the
 large-plane question: seeding at ≤56² or ≤28² is WORSE everywhere
 (mv2 2.20 → 2.44 → 2.61) — the "+39% at det-scale planes" verdict was
 partly starvation, and blocked now wins at 112² too. Default gate stays
@@ -1896,7 +1896,7 @@ tile. The packed weight pair [ci][16] is exactly one 512-bit load, so
 each ci costs 1 wload + 6 broadcasts + 6 FMAs vs the AVX2 form's
 2 + 6 + 12. Same layouts, drop-in signature; selected by an init-time
 micro-probe (>5% relative win required — gemm's µkernel-pick policy;
-OCR_PWBLK=avx2|avx512 pins), concrete calls behind a bool so noescape
+INGOT_PWBLK=avx2|avx512 pins), concrete calls behind a bool so noescape
 survives. Verified on Zen 5 + CI Ice Lake; Rosetta skips. On top of SE
 chunking: **mv2 2.00 → 1.95 (−2.6%), effnet → 3.10, mv3 → 1.05** —
 small at model level because the pointwise op is now bandwidth-bound,
@@ -1942,7 +1942,7 @@ resnetish 0.20@8 vs 0.34@32 (−40%), effnet best @12 (−9%), mv2 @12
 (−4.6%), gptish @12 (−8.6%), bertish/llmblock flat. Region round-trips
 and cross-CCD coherence scale with pool width while the ops' chunkers
 scale task counts with it — small models are pure churn at 32. New
-OCR_WORKERS env pins the pool size (a knob, not yet an auto-default:
+INGOT_WORKERS env pins the pool size (a knob, not yet an auto-default:
 one 4-CCD machine's data; Apple topology differs — validate before
 defaulting).
 
@@ -1974,7 +1974,7 @@ Apple silicon measures the OPPOSITE: mv2/effnet/gptish scale
 monotonically to full width (big shared clusters, no CCD boundary);
 only tiny resnetish prefers few workers (0.156@6 vs 0.291@18 — region
 churn is universal for tiny models, the knob covers it). Default is now
-min(GOMAXPROCS, 12) on amd64, GOMAXPROCS elsewhere; OCR_WORKERS
+min(GOMAXPROCS, 12) on amd64, GOMAXPROCS elsewhere; INGOT_WORKERS
 overrides in either direction.
 
 Out-of-box validation (pod, defaults vs defaults): effnet −6.7%,
@@ -2226,7 +2226,7 @@ seed and an activation hook (oracle-tested through SgemmPackedBEpi);
 at the 16-column strip width each costs about what its own pass does,
 so the pass fuses bias only. Kernel oracle tests cover bias on every
 kernel (generic vs asm, AVX-512 vs generic on the pod under
-OCR_GEMM_KERNEL=auto/avx512/avx2/generic).
+INGOT_GEMM_KERNEL=auto/avx512/avx2/generic).
 
 Zen 5 pod, 12 workers, medians of 6 interleaved (before = fuse-mha-packed
 state):

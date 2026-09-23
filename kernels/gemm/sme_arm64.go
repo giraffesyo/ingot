@@ -14,12 +14,12 @@ import (
 // 8.8 ms), but a mild loss at full parallelism — the matrix units are shared
 // per cluster, so SME tasks contend while the NEON pipelines sit idle.
 //
-//	OCR_GEMM_KERNEL unset: auto — SME for eligible shapes when the worker
-//	                       pool is single-threaded (GOMAXPROCS=1), else NEON.
-//	OCR_GEMM_KERNEL=sme:   force SME for eligible shapes at any parallelism.
-//	OCR_GEMM_KERNEL=neon:  never dispatch to SME.
+//	INGOT_GEMM_KERNEL unset: auto — SME for eligible shapes when the worker
+//	                         pool is single-threaded (GOMAXPROCS=1), else NEON.
+//	INGOT_GEMM_KERNEL=sme:     force SME for eligible shapes at any parallelism.
+//	INGOT_GEMM_KERNEL=neon:    never dispatch to SME.
 var smeMode = func() int {
-	switch os.Getenv("OCR_GEMM_KERNEL") {
+	switch os.Getenv("INGOT_GEMM_KERNEL") {
 	case "sme":
 		if sme.Available() {
 			ActiveKernel = "neon+sme(forced)"
