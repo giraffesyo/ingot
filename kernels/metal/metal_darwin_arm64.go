@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -74,6 +75,11 @@ func send(obj uintptr, name string, args ...uintptr) uintptr {
 	return call(objc.msgSend, append([]uintptr{obj, sel(name)}, args...)...)
 }
 
+// sendF is send for a method returning a double.
+func sendF(obj uintptr, name string, args ...uintptr) float64 {
+	return callF(objc.msgSend, append([]uintptr{obj, sel(name)}, args...)...)
+}
+
 func nsstring(s string) uintptr {
 	b := cstr(s)
 	r := send(class("NSString"), "stringWithUTF8String:", uintptr(unsafe.Pointer(&b[0])))
@@ -106,8 +112,30 @@ var shared struct {
 	err  error
 }
 
-// Available reports whether a Metal device can be opened.
-func Available() bool { _, err := Open(); return err == nil }
+// Available reports whether the GPU backend is usable (see Supported).
+func Available() bool { return Supported() == nil }
+
+var support struct {
+	once sync.Once
+	err  error
+}
+
+// Supported reports why the GPU backend cannot run here, or nil: a Metal
+// device must open and compile the GEMM kernels, which need Metal 4 tensor
+// ops (MetalPerformancePrimitives; macOS 26+ on Apple silicon — not, e.g.,
+// virtualized CI runners).
+func Supported() error {
+	support.once.Do(func() {
+		d, err := Open()
+		if err == nil {
+			err = d.Prepare()
+		}
+		if err != nil {
+			support.err = fmt.Errorf("metal: GPU backend unsupported: %w", err)
+		}
+	})
+	return support.err
+}
 
 // Open returns the system default device (opened once, shared).
 func Open() (*Device, error) {
@@ -340,6 +368,7 @@ type Stream struct {
 	err     error
 	queued  []func(e *Encoder)
 	pending int
+	gpu     time.Duration
 }
 
 // streamBatch is how many queued callbacks trigger recording before Flush.
@@ -400,6 +429,7 @@ func (s *Stream) Flush() error {
 				if ce := send(s.cb, "error"); ce != 0 {
 					err = fmt.Errorf("metal: command buffer: %w", nserror(ce))
 				}
+				s.gpu = time.Duration((sendF(s.cb, "GPUEndTime") - sendF(s.cb, "GPUStartTime")) * 1e9)
 			}
 			send(s.enc, "release")
 			send(s.cb, "release")
@@ -408,6 +438,10 @@ func (s *Stream) Flush() error {
 	s.cb, s.enc, s.err, s.pending = 0, 0, nil, 0
 	return err
 }
+
+// GPUTime is the GPU execution time of the last flushed command buffer
+// (Metal's GPUStartTime to GPUEndTime; excludes encoding and scheduling).
+func (s *Stream) GPUTime() time.Duration { return s.gpu }
 
 // Dispatch runs p once in its own command buffer and waits.
 func (p *Pipeline) Dispatch(grid, group [3]int, args ...Arg) error {
