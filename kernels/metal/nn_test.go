@@ -1,0 +1,244 @@
+//go:build darwin && arm64
+
+package metal
+
+import (
+	"encoding/binary"
+	"math"
+	"math/rand/v2"
+	"os"
+	"path/filepath"
+	"syscall"
+	"testing"
+)
+
+func prepared(t *testing.T) *Device {
+	t.Helper()
+	d := openDev(t)
+	if err := d.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func fill(r *rand.Rand, b *Buffer) []float32 {
+	f := f32s(b.Bytes())
+	for i := range f {
+		f[i] = r.Float32()*4 - 2
+	}
+	return f
+}
+
+func buf(t *testing.T, d *Device, floats int) *Buffer {
+	t.Helper()
+	b, err := d.NewBuffer(4 * floats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(b.Release)
+	return b
+}
+
+func near(t *testing.T, what string, got float32, want, tol float64) {
+	t.Helper()
+	if d := math.Abs(float64(got) - want); d > tol*(1+math.Abs(want)) || math.IsNaN(float64(got)) {
+		t.Fatalf("%s = %g, want %g", what, got, want)
+	}
+}
+
+func TestLayerNormMod(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(1, 1))
+	const rows, cols, ldx, ldy = 5, 4099, 4100, 4105
+	x, y, s := buf(t, d, rows*ldx), buf(t, d, rows*ldy), buf(t, d, cols)
+	xf, sf := fill(r, x), fill(r, s)
+	if err := d.Run(func(e *Encoder) { e.LayerNormMod(x.At(0), y.At(0), s.At(0), rows, cols, ldx, ldy, 1e-6) }); err != nil {
+		t.Fatal(err)
+	}
+	yf := f32s(y.Bytes())
+	for rr := range rows {
+		var mean, vs float64
+		for c := range cols {
+			mean += float64(xf[rr*ldx+c])
+		}
+		mean /= cols
+		for c := range cols {
+			vs += (float64(xf[rr*ldx+c]) - mean) * (float64(xf[rr*ldx+c]) - mean)
+		}
+		inv := 1 / math.Sqrt(vs/cols+1e-6)
+		for c := range cols {
+			near(t, "ln", yf[rr*ldy+c], (float64(xf[rr*ldx+c])-mean)*inv*float64(sf[c]), 1e-4)
+		}
+	}
+}
+
+func TestRMSNormRoPE(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(2, 2))
+	const T, heads, dh, ld, off = 3, 4, 128, 1000, 7 // heads start at column 7
+	x, w, cs, sn := buf(t, d, T*ld), buf(t, d, dh), buf(t, d, T*dh/2), buf(t, d, T*dh/2)
+	xf, wf, cf, sf := fill(r, x), fill(r, w), fill(r, cs), fill(r, sn)
+	orig := append([]float32(nil), xf...)
+	if err := d.Run(func(e *Encoder) {
+		e.RMSNormRoPE(x.At(4*off), w.At(0), cs.At(0), sn.At(0), T, heads, dh, ld, 1e-6)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for tt := range T {
+		for h := range heads {
+			base := tt*ld + off + h*dh
+			var ss float64
+			for i := range dh {
+				ss += float64(orig[base+i]) * float64(orig[base+i])
+			}
+			inv := 1 / math.Sqrt(ss/dh+1e-6)
+			for j := range dh / 2 {
+				re := float64(orig[base+2*j]) * inv * float64(wf[2*j])
+				im := float64(orig[base+2*j+1]) * inv * float64(wf[2*j+1])
+				c, s := float64(cf[tt*dh/2+j]), float64(sf[tt*dh/2+j])
+				near(t, "rope re", xf[base+2*j], re*c-im*s, 1e-4)
+				near(t, "rope im", xf[base+2*j+1], re*s+im*c, 1e-4)
+			}
+		}
+	}
+	if xf[off-1] != orig[off-1] || xf[off+heads*dh] != orig[off+heads*dh] {
+		t.Fatal("RMSNormRoPE wrote outside its heads")
+	}
+}
+
+func TestSoftmaxRows(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(3, 3))
+	const rows, cols, ld = 4, 8451, 8460
+	x := buf(t, d, rows*ld)
+	xf := fill(r, x)
+	orig := append([]float32(nil), xf...)
+	if err := d.Run(func(e *Encoder) { e.SoftmaxRows(x.At(0), rows, cols, ld, 3) }); err != nil {
+		t.Fatal(err)
+	}
+	for rr := range rows {
+		m := math.Inf(-1)
+		for c := range cols {
+			m = math.Max(m, 3*float64(orig[rr*ld+c]))
+		}
+		var sum float64
+		for c := range cols {
+			sum += math.Exp(3*float64(orig[rr*ld+c]) - m)
+		}
+		for c := range cols {
+			near(t, "softmax", xf[rr*ld+c], math.Exp(3*float64(orig[rr*ld+c])-m)/sum, 1e-4)
+		}
+	}
+}
+
+func TestSiLUMulGatedAdd(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(4, 4))
+	const rows, cols, ld = 3, 1000, 2 * 1000 // a and b interleaved as [gate | proj] halves
+	ab, o := buf(t, d, rows*ld), buf(t, d, rows*cols)
+	x, g := buf(t, d, rows*cols), buf(t, d, cols)
+	abf, xf, gf := fill(r, ab), fill(r, x), fill(r, g)
+	x0 := append([]float32(nil), xf...)
+	if err := d.Run(func(e *Encoder) {
+		e.SiLUMul(ab.At(0), ab.At(4*cols), o.At(0), rows, cols, ld, ld, cols)
+		e.GatedAdd(x.At(0), g.At(0), o.At(0), rows, cols, cols, cols)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for rr := range rows {
+		for c := range cols {
+			a, b := float64(abf[rr*ld+c]), float64(abf[rr*ld+cols+c])
+			y := a / (1 + math.Exp(-a)) * b
+			near(t, "gated add", xf[rr*cols+c], float64(x0[rr*cols+c])+float64(gf[c])*y, 1e-5)
+		}
+	}
+}
+
+// TestGemmStrided runs one attention head the way the DiT step does: S =
+// Q_h·K_hᵀ over head-slices of [T, H·dh] buffers (NT, strided, offset), then
+// O_h = S·V_h (NN) written into a head slice of the output.
+func TestGemmStrided(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(5, 5))
+	const Tq, Tk, H, dh, h = 70, 150, 3, 64, 1
+	D := H * dh
+	q, k, v, o, s := buf(t, d, Tq*D), buf(t, d, Tk*D), buf(t, d, Tk*D), buf(t, d, Tq*D), buf(t, d, Tq*Tk)
+	qf, kf, vf := fill(r, q), fill(r, k), fill(r, v)
+	if err := d.Run(func(e *Encoder) {
+		e.Gemm(Gemm{M: Tq, N: Tk, K: dh, A: q.At(4 * h * dh), LDA: D, B: k.At(4 * h * dh), LDB: D, C: s.At(0), TransB: true})
+		e.Gemm(Gemm{M: Tq, N: dh, K: Tk, A: s.At(0), B: v.At(4 * h * dh), LDB: D, C: o.At(4 * h * dh), LDC: D})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	of := f32s(o.Bytes())
+	for i := range Tq {
+		sc := make([]float64, Tk)
+		for j := range Tk {
+			for c := range dh {
+				sc[j] += float64(qf[i*D+h*dh+c]) * float64(kf[j*D+h*dh+c])
+			}
+		}
+		for c := range dh {
+			var want float64
+			for j := range Tk {
+				want += sc[j] * float64(vf[j*D+h*dh+c])
+			}
+			near(t, "O", of[i*D+h*dh+c], want, 1e-4)
+		}
+		if of[i*D] != 0 || of[i*D+2*dh] != 0 {
+			t.Fatal("gemm wrote outside its head slice")
+		}
+	}
+}
+
+// TestWrapMappedFile: a read-only mmap of a file feeds a GEMM with no copy
+// (how checkpoint weights reach the GPU), at a non-zero offset.
+func TestWrapMappedFile(t *testing.T) {
+	d := prepared(t)
+	const m, n, k, off = 8, 16, 32, 4096 + 8
+	w := make([]float32, n*k)
+	raw := make([]byte, off+4*n*k)
+	for i := range w {
+		w[i] = float32(i%7) - 3
+		binary.LittleEndian.PutUint32(raw[off+4*i:], math.Float32bits(w[i]))
+	}
+	path := filepath.Join(t.TempDir(), "w.bin")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	mem, err := syscall.Mmap(int(f.Fd()), 0, len(raw), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Munmap(mem)
+	wb, err := d.Wrap(mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wb.Release()
+	a, c := buf(t, d, m*k), buf(t, d, m*n)
+	af := f32s(a.Bytes())
+	for i := range af {
+		af[i] = float32(i%5) - 2
+	}
+	if err := d.Run(func(e *Encoder) {
+		e.Gemm(Gemm{M: m, N: n, K: k, A: a.At(0), B: wb.At(off), C: c.At(0), TransB: true})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cf := f32s(c.Bytes())
+	for i := range m {
+		for j := range n {
+			var want float64
+			for p := range k {
+				want += float64(af[i*k+p]) * float64(w[j*k+p])
+			}
+			near(t, "C", cf[i*n+j], want, 1e-6)
+		}
+	}
+}

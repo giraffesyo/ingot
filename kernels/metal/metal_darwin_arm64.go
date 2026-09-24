@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"syscall"
 	"unsafe"
 )
 
@@ -188,9 +189,10 @@ func (d *Device) Compile(src, name string) (*Pipeline, error) {
 // Buffer is GPU memory in shared storage: on unified-memory devices the CPU
 // reads and writes it in place through Bytes, with no copies.
 type Buffer struct {
-	dev *Device
-	id  uintptr
-	n   int
+	dev  *Device
+	id   uintptr
+	n    int
+	base unsafe.Pointer // contents: stable for shared-storage buffers
 }
 
 const storageModeShared = 0
@@ -198,21 +200,47 @@ const storageModeShared = 0
 // NewBuffer allocates n bytes of shared, zeroed GPU memory.
 func (d *Device) NewBuffer(n int) (*Buffer, error) {
 	b := &Buffer{dev: d, n: n}
-	d.do(func() { b.id = send(d.id, "newBufferWithLength:options:", uintptr(n), storageModeShared) })
+	d.do(func() {
+		if b.id = send(d.id, "newBufferWithLength:options:", uintptr(n), storageModeShared); b.id != 0 {
+			b.base = cptr(send(b.id, "contents"))
+		}
+	})
 	if b.id == 0 {
 		return nil, fmt.Errorf("metal: cannot allocate %d-byte buffer", n)
 	}
 	return b, nil
 }
 
-// Bytes is the buffer's memory, valid until Release.
-func (b *Buffer) Bytes() []byte {
-	var p uintptr
-	b.dev.do(func() { p = send(b.id, "contents") })
-	return unsafe.Slice((*byte)(cptr(p)), b.n)
+// PageSize is the alignment Wrap requires.
+var PageSize = syscall.Getpagesize()
+
+// Wrap exposes existing memory to the GPU without copying — e.g. a
+// memory-mapped weight file. mem must start on a page boundary; the buffer
+// spans len(mem) rounded up to whole pages (the mapping covers them). The
+// memory must outlive the buffer.
+func (d *Device) Wrap(mem []byte) (*Buffer, error) {
+	if len(mem) == 0 || uintptr(unsafe.Pointer(&mem[0]))%uintptr(PageSize) != 0 {
+		return nil, fmt.Errorf("metal: Wrap needs non-empty page-aligned memory")
+	}
+	n := (len(mem) + PageSize - 1) / PageSize * PageSize
+	b := &Buffer{dev: d, n: len(mem), base: unsafe.Pointer(&mem[0])}
+	d.do(func() {
+		b.id = send(d.id, "newBufferWithBytesNoCopy:length:options:deallocator:",
+			uintptr(unsafe.Pointer(&mem[0])), uintptr(n), storageModeShared, 0)
+	})
+	if b.id == 0 {
+		return nil, fmt.Errorf("metal: cannot wrap %d bytes", len(mem))
+	}
+	return b, nil
 }
 
-// Release frees the buffer.
+// Len is the buffer's size in bytes.
+func (b *Buffer) Len() int { return b.n }
+
+// Bytes is the buffer's memory, valid until Release.
+func (b *Buffer) Bytes() []byte { return unsafe.Slice((*byte)(b.base), b.n) }
+
+// Release frees the buffer (never the wrapped memory).
 func (b *Buffer) Release() {
 	if b.id != 0 {
 		b.dev.do(func() { send(b.id, "release") })
@@ -220,50 +248,87 @@ func (b *Buffer) Release() {
 	}
 }
 
-// Arg is a kernel argument: a *Buffer or a small constant ([]byte, set with
-// setBytes, at most 4 KiB).
+// Region binds a buffer at a byte offset.
+type Region struct {
+	B   *Buffer
+	Off int
+}
+
+// At returns the region of b starting off bytes in.
+func (b *Buffer) At(off int) Region { return Region{b, off} }
+
+// Arg is a kernel argument: a *Buffer, a Region, or a small constant
+// ([]byte, set with setBytes, at most 4 KiB).
 type Arg any
 
 type mtlSize struct{ w, h, d uint64 }
 
-// Dispatch runs p over a grid of threads (non-uniform threadgroups: the grid
-// need not be a multiple of group) with args bound to indices 0, 1, …, and
-// waits for completion.
-func (p *Pipeline) Dispatch(grid, group [3]int, args ...Arg) error {
-	d := p.dev
+// Encoder records dispatches into one command buffer (see Device.Run).
+// Dispatches execute in order; each sees the previous ones' writes.
+type Encoder struct {
+	enc uintptr
+	err error
+}
+
+// Run records the dispatches fn makes into a single command buffer, commits
+// it and waits — one CPU/GPU round trip for a whole sequence of kernels.
+// fn runs on the device thread: it must not call other Device methods.
+func (d *Device) Run(fn func(e *Encoder)) error {
 	var err error
 	d.do(func() {
 		cb := send(d.queue, "commandBuffer")
-		enc := send(cb, "computeCommandEncoder")
-		send(enc, "setComputePipelineState:", p.pso)
-		for i, a := range args {
-			switch v := a.(type) {
-			case *Buffer:
-				send(enc, "setBuffer:offset:atIndex:", v.id, 0, uintptr(i))
-			case []byte:
-				if len(v) == 0 || len(v) > 4096 {
-					err = fmt.Errorf("metal: constant arg %d is %d bytes (want 1..4096)", i, len(v))
-					send(enc, "endEncoding")
-					return
-				}
-				send(enc, "setBytes:length:atIndex:", uintptr(unsafe.Pointer(&v[0])), uintptr(len(v)), uintptr(i))
-				runtime.KeepAlive(v)
-			default:
-				err = fmt.Errorf("metal: arg %d: unsupported type %T", i, a)
-				send(enc, "endEncoding")
-				return
-			}
+		e := &Encoder{enc: send(cb, "computeCommandEncoder")}
+		fn(e)
+		send(e.enc, "endEncoding")
+		if e.err != nil {
+			err = e.err
+			return
 		}
-		g := mtlSize{uint64(grid[0]), uint64(grid[1]), uint64(grid[2])}
-		t := mtlSize{uint64(group[0]), uint64(group[1]), uint64(group[2])}
-		// MTLSize is 24 bytes: the arm64 ABI passes it by reference.
-		send(enc, "dispatchThreads:threadsPerThreadgroup:", uintptr(unsafe.Pointer(&g)), uintptr(unsafe.Pointer(&t)))
-		send(enc, "endEncoding")
 		send(cb, "commit")
 		send(cb, "waitUntilCompleted")
-		if e := send(cb, "error"); e != 0 {
-			err = fmt.Errorf("metal: command buffer: %w", nserror(e))
+		if ce := send(cb, "error"); ce != 0 {
+			err = fmt.Errorf("metal: command buffer: %w", nserror(ce))
 		}
 	})
 	return err
+}
+
+// Dispatch encodes p over a grid of threads (non-uniform threadgroups: the
+// grid need not be a multiple of group) with args bound to indices 0, 1, ….
+func (e *Encoder) Dispatch(p *Pipeline, grid, group [3]int, args ...Arg) {
+	if e.err != nil {
+		return
+	}
+	send(e.enc, "setComputePipelineState:", p.pso)
+	for i, a := range args {
+		switch v := a.(type) {
+		case *Buffer:
+			send(e.enc, "setBuffer:offset:atIndex:", v.id, 0, uintptr(i))
+		case Region:
+			if v.Off < 0 || v.Off > v.B.n {
+				e.err = fmt.Errorf("metal: arg %d: offset %d outside %d-byte buffer", i, v.Off, v.B.n)
+				return
+			}
+			send(e.enc, "setBuffer:offset:atIndex:", v.B.id, uintptr(v.Off), uintptr(i))
+		case []byte:
+			if len(v) == 0 || len(v) > 4096 {
+				e.err = fmt.Errorf("metal: constant arg %d is %d bytes (want 1..4096)", i, len(v))
+				return
+			}
+			send(e.enc, "setBytes:length:atIndex:", uintptr(unsafe.Pointer(&v[0])), uintptr(len(v)), uintptr(i))
+			runtime.KeepAlive(v)
+		default:
+			e.err = fmt.Errorf("metal: arg %d: unsupported type %T", i, a)
+			return
+		}
+	}
+	g := mtlSize{uint64(grid[0]), uint64(grid[1]), uint64(grid[2])}
+	t := mtlSize{uint64(group[0]), uint64(group[1]), uint64(group[2])}
+	// MTLSize is 24 bytes: the arm64 ABI passes it by reference.
+	send(e.enc, "dispatchThreads:threadsPerThreadgroup:", uintptr(unsafe.Pointer(&g)), uintptr(unsafe.Pointer(&t)))
+}
+
+// Dispatch runs p once in its own command buffer and waits.
+func (p *Pipeline) Dispatch(grid, group [3]int, args ...Arg) error {
+	return p.dev.Run(func(e *Encoder) { e.Dispatch(p, grid, group, args...) })
 }
