@@ -3,6 +3,7 @@ package qwenimage
 import (
 	"fmt"
 	"image"
+	"math"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -193,17 +194,37 @@ func TestEditParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := Generate(snapshotDir(t), Options{
-		Prompt:     ref.Meta["prompt"].(string),
-		Images:     []image.Image{img},
-		Resolution: int(ref.Meta["resolution"].(float64)),
-		Steps:      int(ref.Meta["steps"].(float64)),
-		Latents:    ref.tensor(t, "latents0"),
-		Device:     "gpu",
-		Log:        t.Logf,
-	})
-	if err != nil {
-		t.Fatal(err)
+	// f32, and fast (bf16 GEMM inputs, the fused prefix with per-row key
+	// limits): the image stays within a few 8-bit levels.
+	for _, fast := range []bool{false, true} {
+		res, err := Generate(snapshotDir(t), Options{
+			Prompt:     ref.Meta["prompt"].(string),
+			Images:     []image.Image{img},
+			Resolution: int(ref.Meta["resolution"].(float64)),
+			Steps:      int(ref.Meta["steps"].(float64)),
+			Latents:    ref.tensor(t, "latents0"),
+			Device:     "gpu",
+			Fast:       fast,
+			Log:        t.Logf,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := ref.tensor(t, "image").F32()
+		if !fast {
+			compare(t, "edit image (f32)", res.Float.F32(), want, 1e-2)
+			continue
+		}
+		// bf16 drifts pixel by pixel over the trajectory; bound the mean.
+		var sum, mx float64
+		for i, v := range res.Float.F32() {
+			d := math.Abs(float64(v - want[i]))
+			sum, mx = sum+d, max(mx, d)
+		}
+		mean := sum / float64(len(want))
+		t.Logf("edit image (fast): mean |Δ| %.4f, max %.3f (on [-1, 1])", mean, mx)
+		if mean > 0.01 || mx > 0.5 {
+			t.Fatalf("fast edit image drifted: mean %.4f max %.3f", mean, mx)
+		}
 	}
-	compare(t, "edit image", res.Float.F32(), ref.tensor(t, "image").F32(), 1e-2)
 }

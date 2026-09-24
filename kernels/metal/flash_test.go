@@ -3,6 +3,7 @@
 package metal
 
 import (
+	"encoding/binary"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -36,16 +37,36 @@ func TestFlash(t *testing.T) {
 	r := rand.New(rand.NewPCG(10, 10))
 	const H, dh = 2, 128
 	D := H * dh
-	for _, c := range []struct{ tq, n1, n2 int }{{64, 0, 64}, {100, 31, 150}, {70, 5, 3}} {
+	for _, c := range []struct {
+		tq, n1, n2  int
+		blockCausal bool
+	}{{64, 0, 64, false}, {100, 31, 150, false}, {70, 5, 3, false}, {150, 150, 0, true}} {
 		q, qv := bf16buf(t, d, r, c.tq*D)
 		k1, k1v := bf16buf(t, d, r, max(c.n1, 1)*D)
 		v1, v1v := bf16buf(t, d, r, max(c.n1, 1)*D)
-		k2, k2v := bf16buf(t, d, r, c.n2*D)
-		v2, v2v := bf16buf(t, d, r, c.n2*D)
+		k2, k2v := bf16buf(t, d, r, max(c.n2, 1)*D)
+		v2, v2v := bf16buf(t, d, r, max(c.n2, 1)*D)
 		o := buf(t, d, c.tq*D)
 		scale := float32(1 / math.Sqrt(dh))
+		// Block-causal keys: rows 0..39 causal text, 40..119 one image block
+		// (sees keys [0, 120)), 120.. causal text again.
+		kend := make([]int, c.tq)
+		var kb *Region
+		if c.blockCausal {
+			kbuf, _ := d.NewBuffer(4 * c.tq)
+			defer kbuf.Release()
+			for r := range c.tq {
+				kend[r] = r + 1
+				if r >= 40 && r < 120 {
+					kend[r] = 120
+				}
+				binary.LittleEndian.PutUint32(kbuf.Bytes()[4*r:], uint32(kend[r]))
+			}
+			reg := kbuf.At(0)
+			kb = &reg
+		}
 		if err := d.Run(func(e *Encoder) {
-			e.Flash(Flash{Q: q.At(0), K1: k1.At(0), V1: v1.At(0), K2: k2.At(0), V2: v2.At(0), O: o.At(0),
+			e.Flash(Flash{Q: q.At(0), K1: k1.At(0), V1: v1.At(0), K2: k2.At(0), V2: v2.At(0), O: o.At(0), KeyEnd: kb,
 				Tq: c.tq, N1: c.n1, N2: c.n2, Heads: H, LDQ: D, LD1: D, LD2: D, LDO: D, Scale: scale})
 		}); err != nil {
 			t.Fatal(err)
@@ -61,9 +82,13 @@ func TestFlash(t *testing.T) {
 		}
 		for h := range H {
 			for qi := range c.tq {
-				s := make([]float64, n)
+				nq := n
+				if c.blockCausal {
+					nq = kend[qi]
+				}
+				s := make([]float64, nq)
 				m := math.Inf(-1)
-				for j := range n {
+				for j := range nq {
 					for i := range dh {
 						kk, _ := key(j, h, i)
 						s[j] += qv[qi*D+h*dh+i] * kk
@@ -78,7 +103,7 @@ func TestFlash(t *testing.T) {
 				}
 				for i := range dh {
 					var want float64
-					for j := range n {
+					for j := range nq {
 						_, vv := key(j, h, i)
 						want += s[j] * vv
 					}

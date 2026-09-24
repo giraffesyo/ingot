@@ -41,6 +41,7 @@ type MetalDiT struct {
 	lat, out           *metal.Buffer
 	s1, g1, s2, g2, fs *metal.Buffer
 	pmask, pvalid      *metal.Buffer   // prefix attention mask, valid-row indices
+	pkend              *metal.Buffer   // per-row key limits when the prefix mask is prefix-shaped (fast prefix)
 	kp, vp             []*metal.Buffer // per-layer prefix K/V [valid prefix, dim]
 	kp16, vp16         []*metal.Buffer // their bf16 copies (Fast)
 	textIn             *graph.Session
@@ -235,6 +236,21 @@ func (m *MetalDiT) Prefix(txt, cond *tensor.Tensor) error {
 			return err
 		}
 	}
+	if m.Fast && m.pkend != nil {
+		kend := m.pkend.At(0)
+		return m.dev.Run(func(e *metal.Encoder) {
+			for li := range m.lw {
+				m.blockAttn(e, li, w, true, func() {
+					e.GatherRows16(w.k16.At(0), m.kp16[li].At(0), m.pvalid.At(0), m.pv, D, D, D)
+					e.GatherRows16(w.v16.At(0), m.vp16[li].At(0), m.pvalid.At(0), m.pv, D, D, D)
+				}, func() {
+					e.Flash(metal.Flash{Q: w.q16.At(0), K1: w.k16.At(0), V1: w.v16.At(0), K2: w.k16.At(0), V2: w.v16.At(0),
+						O: w.o.At(0), KeyEnd: &kend, Tq: P, N1: P, N2: 0, Heads: m.cfg.NumAttentionHeads,
+						LDQ: D, LD1: D, LD2: D, LDO: D, Scale: scale})
+				})
+			}
+		})
+	}
 	return m.dev.Run(func(e *metal.Encoder) {
 		for li := range m.lw {
 			m.block(e, li, w, false, func() {
@@ -385,6 +401,34 @@ func (m *MetalDiT) linearFrom(e *metal.Encoder, w *metalWork, fast bool, a *meta
 	e.Gemm(metal.Gemm{M: w.T, N: out, K: in, A: a.At(0), B: wt, C: c.At(0), TransB: true, BF16: true})
 }
 
+// prefixKeyEnds returns, per prefix row, the end of its allowed keys when
+// every row allows exactly [0, end) — true of the block-causal mask without
+// padding — or nil.
+func prefixKeyEnds(l *DiTLayout) []int {
+	P := l.Prefix
+	if len(l.prefixValid) != P {
+		return nil
+	}
+	ends := make([]int, P)
+	for q := range P {
+		row := l.prefixMask[q*P : (q+1)*P]
+		end := 0
+		for end < P && !math.IsInf(float64(row[end]), -1) {
+			end++
+		}
+		for k := end; k < P; k++ {
+			if !math.IsInf(float64(row[k]), -1) {
+				return nil // allowed keys are not a prefix
+			}
+		}
+		if end == 0 {
+			return nil
+		}
+		ends[q] = end
+	}
+	return ends
+}
+
 // fastBuffers allocates the bf16 scratch Fast mode needs.
 func (m *MetalDiT) fastBuffers() error {
 	if len(m.kp16) > 0 {
@@ -404,6 +448,20 @@ func (m *MetalDiT) fastBuffers() error {
 	for range m.layers {
 		m.kp16, m.vp16 = append(m.kp16, nb(m.pv*D)), append(m.vp16, nb(m.pv*D))
 	}
+	// The prefix runs fast too when its mask is prefix-shaped: every row
+	// attends to keys [0, end) (block-causal, no padding) — Flash's KeyEnd.
+	if kend := prefixKeyEnds(m.l); kend != nil {
+		P := m.l.Prefix
+		p := m.pw
+		p.y16, p.q16, p.k16, p.v16 = nb(P*max(D, hid)), nb(P*D), nb(P*D), nb(P*D)
+		m.pkend = nb(P)
+		if err == nil {
+			iv := unsafe.Slice((*uint32)(unsafe.Pointer(&m.pkend.Bytes()[0])), P)
+			for r, e := range kend {
+				iv[r] = uint32(e)
+			}
+		}
+	}
 	return err
 }
 
@@ -414,7 +472,7 @@ func (m *MetalDiT) Close() {
 			w.release()
 		}
 	}
-	for _, b := range []*metal.Buffer{m.lat, m.out, m.s1, m.g1, m.s2, m.g2, m.fs, m.pmask, m.pvalid} {
+	for _, b := range []*metal.Buffer{m.lat, m.out, m.s1, m.g1, m.s2, m.g2, m.fs, m.pmask, m.pvalid, m.pkend} {
 		if b != nil {
 			b.Release()
 		}

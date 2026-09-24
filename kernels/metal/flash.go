@@ -32,7 +32,7 @@ using ext = dextents<int32_t, 2>;
 struct FlashArgs {
 	uint tq, n1, n2;        // queries, keys in segment 1, keys in segment 2
 	uint ldq, ldk1, ldk2;   // row strides (elements) of q, k1/v1, k2/v2
-	uint ldo, pad0;
+	uint ldo, keyEnd;       // keyEnd != 0: query row r sees keys [0, kend[r]) only
 	float scale, pad1, pad2, pad3;
 };
 
@@ -41,7 +41,7 @@ struct FlashArgs {
 // its own single-simdgroup tensor ops (reduce_rows needs that scope).
 kernel void flash_attn(device bfloat* Q [[buffer(0)]], device bfloat* K1 [[buffer(1)]], device bfloat* V1 [[buffer(2)]],
                        device bfloat* K2 [[buffer(3)]], device bfloat* V2 [[buffer(4)]], device float* O [[buffer(5)]],
-                       constant FlashArgs& a [[buffer(6)]],
+                       constant FlashArgs& a [[buffer(6)]], device const uint* kend [[buffer(7)]],
                        uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]]) {
 	threadgroup float m_all[NSG * BQ], l_all[NSG * BQ], c_all[NSG * BQ], b_all[NSG * BQ];
@@ -54,6 +54,14 @@ kernel void flash_attn(device bfloat* Q [[buffer(0)]], device bfloat* K1 [[buffe
 	const uint h = tg.y, q0 = (tg.x * NSG + sg) * BQ;
 	if (q0 >= a.tq) return;
 	for (uint r = lane; r < BQ; r += 32) { m_run[r] = -INFINITY; l_run[r] = 0; }
+	// Per-row key limits (block-causal prefixes): skip key blocks past the
+	// largest limit among this simdgroup's rows.
+	uint kmax = 0xffffffffu;
+	if (a.keyEnd != 0) {
+		uint mine = 0;
+		for (uint r = lane; r < BQ; r += 32) mine = max(mine, q0 + r < a.tq ? kend[q0 + r] : 0u);
+		kmax = simd_max(mine);
+	}
 
 	tensor<device bfloat, ext, tensor_inline> tQ(Q + h * DH, ext(DH, a.tq), array<int32_t, 2>{1, int(a.ldq)});
 	tensor<device float, ext, tensor_inline> tO(O + h * DH, ext(DH, a.tq), array<int32_t, 2>{1, int(a.ldo)});
@@ -82,7 +90,8 @@ kernel void flash_attn(device bfloat* Q [[buffer(0)]], device bfloat* K1 [[buffe
 
 	for (int seg = 0; seg < 2; seg++) {
 		const uint n = seg == 0 ? a.n1 : a.n2;
-		for (uint k0 = 0; k0 < n; k0 += BK) {
+		const uint base = seg == 0 ? 0 : a.n1; // key index of the segment's first key
+		for (uint k0 = 0; k0 < n && base + k0 < kmax; k0 += BK) {
 			auto mK = (seg == 0 ? seg0k : seg1k).slice(0, k0);
 			auto mV = (seg == 0 ? seg0v : seg1v).slice(0, k0);
 			#pragma unroll
@@ -93,7 +102,12 @@ kernel void flash_attn(device bfloat* Q [[buffer(0)]], device bfloat* K1 [[buffe
 			for (uint16_t i = 0; i < cS.get_capacity(); ++i) {
 				if (!cS.is_valid_element(i)) continue;
 				auto idx = cS.get_multidimensional_index(i); // (col, row)
-				cS[i] = (k0 + idx[0] < n) ? cS[i] * a.scale : -INFINITY;
+				bool ok = k0 + idx[0] < n;
+				if (a.keyEnd != 0) {
+					const uint q = q0 + idx[1];
+					ok = ok && (q >= a.tq || base + k0 + idx[0] < kend[q]);
+				}
+				cS[i] = ok ? cS[i] * a.scale : -INFINITY;
 			}
 			reduce_rows(cS, rRed, reduction_operation::max, -INFINITY);
 			#pragma unroll
@@ -172,9 +186,13 @@ func (d *Device) compileFlash(bq, bk, nsg int) (*Pipeline, error) {
 // Flash describes fused softmax(scale·Q·Kᵀ)·V for heads of width 128 over
 // keys in two segments (K1/V1 then K2/V2; either may be empty), all bf16
 // [rows, ld] with heads at column h·128; O is f32. Every head of Q's
-// Heads is computed.
+// Heads is computed. KeyEnd, if set, holds one uint32 per query row: row r
+// attends to keys [0, KeyEnd[r]) of the concatenated segments only (any
+// block-causal mask whose allowed keys are a prefix, e.g. causal text with
+// bidirectional image blocks); every limit must be ≥ 1.
 type Flash struct {
 	Q, K1, V1, K2, V2, O Region
+	KeyEnd               *Region
 	Tq, N1, N2, Heads    int
 	LDQ, LD1, LD2, LDO   int
 	Scale                float32
@@ -193,8 +211,12 @@ func (e *Encoder) Flash(f Flash) {
 		e.err = fmt.Errorf("metal: Flash with no queries or keys")
 		return
 	}
-	args := append(u32s(f.Tq, f.N1, f.N2, f.LDQ, f.LD1, f.LD2, f.LDO, 0), f32c(f.Scale)...)
+	kend, useEnd := f.Q, 0 // any bound buffer when unused
+	if f.KeyEnd != nil {
+		kend, useEnd = *f.KeyEnd, 1
+	}
+	args := append(u32s(f.Tq, f.N1, f.N2, f.LDQ, f.LD1, f.LD2, f.LDO, useEnd), f32c(f.Scale)...)
 	rows := flashPSO.bq * flashPSO.nsg
 	e.Dispatch(flashPSO.p, [3]int{(f.Tq + rows - 1) / rows * 32 * flashPSO.nsg, f.Heads, 1}, [3]int{32 * flashPSO.nsg, 1, 1},
-		f.Q, f.K1, f.V1, f.K2, f.V2, f.O, args)
+		f.Q, f.K1, f.V1, f.K2, f.V2, f.O, args, kend)
 }
