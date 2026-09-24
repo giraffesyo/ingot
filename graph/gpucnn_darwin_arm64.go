@@ -135,6 +135,14 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	}
 	n, P := out.Numel(), g.OH*g.OW
 	epi := o.epi
+	if metal.DepthwiseOK(g) {
+		// Four outputs per thread over a register window of the input row:
+		// 1.2x the generic direct kernel on PP-OCR's 5x5 depthwise convs.
+		return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+			e.ConvDepthwise(rs[0], rs[1], rb, ro[0], g)
+			epi.encode(e, ro[0], n)
+		}, true
+	}
 	if g.Group != 1 {
 		return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 			e.ConvDirect(rs[0], rs[1], rb, ro[0], g)

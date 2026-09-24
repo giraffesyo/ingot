@@ -13,6 +13,7 @@ import (
 type GPUSession struct {
 	*Session
 	GPUSteps, CPUSteps, Flushes int
+	GPUTime                     time.Duration
 	FlushedBy                   []string
 	Profile                     bool
 	OpTime                      map[string]time.Duration

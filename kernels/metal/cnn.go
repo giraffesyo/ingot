@@ -64,6 +64,45 @@ kernel void conv_direct(device const float* x [[buffer(0)]], device const float*
 	o[((n * e.z + m) * OH + oy) * OW + ox] = acc;
 }
 
+// Depthwise convolution (group == C == M), kernel width ≤ 7: each thread
+// computes DWX horizontally adjacent outputs of one row, loading each input
+// row segment once into registers and sharing it across them and across
+// the kernel's taps. Grid (ceil(OW/DWX), OH, N·C); e = (hasBias, 0, 0, OH).
+#define DWX 4
+kernel void conv_dw(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                    device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
+                    constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
+                    constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
+                    uint3 i [[thread_position_in_grid]]) {
+	const uint OW = a.w, OH = e.w, ox0 = i.x * DWX, oy = i.y, nc = i.z, ch = nc % a.x;
+	if (ox0 >= OW || oy >= OH) return;
+	const int H = int(a.y), W = int(a.z), KH = int(b.x), KW = int(b.y), sw = int(b.w), dw = int(c.y);
+	const int y0 = int(oy * b.z) - int(c.z), x0 = int(ox0) * sw - int(c.w);
+	device const float* xp = x + nc * a.y * a.z;
+	device const float* wp = w + ch * uint(KH * KW);
+	const float bv = e.x != 0 ? bias[ch] : 0.0f;
+	float acc[DWX];
+	for (int j = 0; j < DWX; j++) acc[j] = bv;
+	const int span = (DWX - 1) * sw + (KW - 1) * dw + 1; // ≤ 3·sw + 6·dw + 1
+	for (int ky = 0; ky < KH; ky++) {
+		const int iy = y0 + ky * int(c.x);
+		if (iy < 0 || iy >= H) continue;
+		device const float* row = xp + iy * W;
+		float seg[32];
+		for (int t = 0; t < span && t < 32; t++) {
+			const int ix = x0 + t;
+			seg[t] = (ix >= 0 && ix < W) ? row[ix] : 0.0f;
+		}
+		for (int kx = 0; kx < KW; kx++) {
+			const float wv = wp[ky * KW + kx];
+			for (int j = 0; j < DWX; j++) acc[j] = fma(seg[j * sw + kx * dw], wv, acc[j]);
+		}
+	}
+	device float* op = o + (nc * OH + oy) * OW + ox0;
+	const uint n = min(uint(DWX), OW - ox0);
+	for (uint j = 0; j < n; j++) op[j] = acc[j];
+}
+
 // Transposed convolution (gather form: each output sums the inputs whose
 // taps land on it; no atomics). x [N, Cin, H, W], w [Cin, CoutG, KH, KW],
 // out [N, Cout, OH, OW]; a = (Cin, H, W, OW), e = (CinG, CoutG, Cout, OH).
@@ -283,7 +322,7 @@ const (
 var cnnPSO struct {
 	once                        sync.Once
 	im2col, direct, pool2d, act *Pipeline
-	convT, resize               *Pipeline
+	convT, resize, dw           *Pipeline
 	directCB, convTCB           [len(blockWidths)]*Pipeline
 	err                         error
 }
@@ -295,7 +334,7 @@ func (d *Device) PrepareCNN() error {
 			name string
 			dst  **Pipeline
 		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act},
-			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}} {
+			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}, {"conv_dw", &cnnPSO.dw}} {
 			if *k.dst, cnnPSO.err = d.Compile(cnnSrc, k.name); cnnPSO.err != nil {
 				return
 			}
@@ -416,6 +455,30 @@ func (e *Encoder) convTCB(v int, x, w, bias, out Region, g ConvGeom) {
 		blocks := (coutG + cb - 1) / cb
 		e.Dispatch(cnnPSO.convTCB[v], [3]int{g.OH * g.OW, g.Group * blocks, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
 			u32s(g.C/g.Group, coutG, g.M, g.OH), u32s(hasBias, g.N, blocks, 0))
+	}
+}
+
+// DepthwiseOK reports whether ConvDepthwise handles g: group == C == M,
+// and the register window (3·SW + (KW−1)·DW + 1) fits 32.
+func DepthwiseOK(g ConvGeom) bool {
+	return g.Group == g.C && g.C == g.M && 3*g.SW+(g.KW-1)*g.DW+1 <= 32
+}
+
+// ConvDepthwise computes a depthwise convolution (+ bias), four adjacent
+// outputs per thread. bias may be the zero Region.
+func (e *Encoder) ConvDepthwise(x, w, bias, out Region, g ConvGeom) {
+	if !DepthwiseOK(g) {
+		e.err = fmt.Errorf("metal: ConvDepthwise unsupported geometry %+v", g)
+		return
+	}
+	hasBias := 1
+	if bias.B == nil {
+		bias, hasBias = w, 0
+	}
+	if e.ready(cnnPSO.dw) {
+		a, b, c := g.args()
+		e.Dispatch(cnnPSO.dw, [3]int{(g.OW + 3) / 4, g.OH, g.N * g.C}, [3]int{32, 2, 1}, x, w, bias, out, a, b, c,
+			u32s(hasBias, 0, 0, g.OH))
 	}
 }
 

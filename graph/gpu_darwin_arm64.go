@@ -42,15 +42,19 @@ type GPUSession struct {
 	// (resize taps), in session memory for the session's lifetime.
 	tables map[string]metal.Region
 
+	// GPUTime is the last Run's GPU execution time, summed over its
+	// command buffers.
+	GPUTime time.Duration
 	// GPUSteps and CPUSteps count where the last Run placed its nodes;
 	// Flushes counts its GPU round trips (mid-graph flushes before CPU
 	// nodes, plus the final one).
 	GPUSteps, CPUSteps, Flushes int
 	// FlushedBy names the CPU nodes that forced mid-graph flushes.
 	FlushedBy []string
-	// Profile, when set, flushes after every GPU node and accumulates its
-	// GPU execution time per op type (OpTime) and per node (NodeTime) —
-	// for finding slow kernels, not for production runs.
+	// Profile, when set, runs every GPU node in its own command buffer
+	// (repeated, then averaged) and accumulates its GPU execution time per
+	// op type (OpTime) and per node (NodeTime) — for finding slow kernels,
+	// not for production runs (GPUTime then counts the repeats).
 	Profile  bool
 	OpTime   map[string]time.Duration
 	NodeTime map[*Node]time.Duration
@@ -154,6 +158,9 @@ func (s *GPUSession) region(t *tensor.Tensor) (metal.Region, bool) {
 	return b.At(off), true
 }
 
+// profileRepeat is how many times Profile encodes each GPU node.
+const profileRepeat = 10
+
 // table returns data copied once into session memory under key.
 func (s *GPUSession) table(key string, data func() []byte) (metal.Region, bool) {
 	if r, ok := s.tables[key]; ok {
@@ -206,8 +213,13 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 	// Side outputs are released only at a flush: GPU nodes may read them.
 	sideOut := make([]bool, s.nval)
 	var deferred []*tensor.Tensor
+	s.GPUTime = 0
 	flush := func() error {
+		pending := s.stream.Pending()
 		err := s.stream.Flush()
+		if pending {
+			s.GPUTime += s.stream.GPUTime()
+		}
 		for _, t := range deferred {
 			s.side.Put(t)
 		}
@@ -261,6 +273,12 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 				placed = true
 				s.GPUSteps++
 				if s.Profile {
+					// Repeat the node (encodings are idempotent: every node
+					// overwrites its outputs) so its time is measured at
+					// busy-GPU clocks, not after an idle gap.
+					for range profileRepeat - 1 {
+						s.stream.Encode(enc)
+					}
 					if err := flush(); err != nil {
 						return nil, fmt.Errorf("graph: gpu: %w", err)
 					}
@@ -268,8 +286,8 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 					if s.OpTime == nil {
 						s.OpTime, s.NodeTime = map[string]time.Duration{}, map[*Node]time.Duration{}
 					}
-					s.OpTime[st.node.OpType] += s.stream.GPUTime()
-					s.NodeTime[st.node] += s.stream.GPUTime()
+					s.OpTime[st.node.OpType] += s.stream.GPUTime() / profileRepeat
+					s.NodeTime[st.node] += s.stream.GPUTime() / profileRepeat
 				}
 			}
 		}
