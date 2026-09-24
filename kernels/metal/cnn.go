@@ -64,6 +64,47 @@ kernel void conv_direct(device const float* x [[buffer(0)]], device const float*
 	o[((n * e.z + m) * OH + oy) * OW + ox] = acc;
 }
 
+// Register-blocked direct convolution for group 1 with few output
+// channels: one thread per (pixel, block of CB output channels) reads each
+// input tap once and accumulates CB outputs — no im2col scratch, which
+// makes thin convs at high resolution bandwidth-bound. Grid (P, ceil(M/CB),
+// N); e = (C, M, OH, hasBias).
+#define CB 8
+kernel void conv_direct_cb(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                           device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
+                           constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
+                           constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
+                           uint3 i [[thread_position_in_grid]]) {
+	const uint OW = a.w, OH = e.z, P = OH * OW, p = i.x, m0 = i.y * CB, n = i.z, M = e.y, C = e.x;
+	if (p >= P || m0 >= M) return;
+	const uint KK = b.x * b.y, K = C * KK;
+	const int y0 = int((p / OW) * b.z) - int(c.z), x0 = int((p % OW) * b.w) - int(c.w);
+	float acc[CB];
+	for (uint j = 0; j < CB; j++) acc[j] = (e.w != 0 && m0 + j < M) ? bias[m0 + j] : 0.0f;
+	device const float* xn = x + n * C * a.y * a.z;
+	const uint mc = min(uint(CB), M - m0);
+	for (uint ky = 0; ky < b.x; ky++) {
+		const int iy = y0 + int(ky * c.x);
+		if (iy < 0 || iy >= int(a.y)) continue;
+		for (uint kx = 0; kx < b.y; kx++) {
+			const int ix = x0 + int(kx * c.y);
+			if (ix < 0 || ix >= int(a.z)) continue;
+			device const float* xp = xn + uint(iy) * a.z + uint(ix);
+			device const float* wp = w + m0 * K + ky * b.y + kx;
+			for (uint ch = 0; ch < C; ch++) {
+				const float v = xp[ch * a.y * a.z];
+				if (mc == CB) {
+					for (uint j = 0; j < CB; j++) acc[j] = fma(v, wp[j * K + ch * KK], acc[j]);
+				} else {
+					for (uint j = 0; j < mc; j++) acc[j] = fma(v, wp[j * K + ch * KK], acc[j]);
+				}
+			}
+		}
+	}
+	device float* op = o + (n * M + m0) * P + p;
+	for (uint j = 0; j < mc; j++) op[j * P] = acc[j];
+}
+
 // Transposed convolution (gather form: each output sums the inputs whose
 // taps land on it; no atomics). x [N, Cin, H, W], w [Cin, CoutG, KH, KW],
 // out [N, Cout, OH, OW]; a = (Cin, H, W, OW), e = (CinG, CoutG, Cout, OH).
@@ -191,7 +232,7 @@ const (
 var cnnPSO struct {
 	once                        sync.Once
 	im2col, direct, pool2d, act *Pipeline
-	convT, resize               *Pipeline
+	convT, resize, directCB     *Pipeline
 	err                         error
 }
 
@@ -202,7 +243,7 @@ func (d *Device) PrepareCNN() error {
 			name string
 			dst  **Pipeline
 		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act},
-			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}} {
+			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}, {"conv_direct_cb", &cnnPSO.directCB}} {
 			if *k.dst, cnnPSO.err = d.Compile(cnnSrc, k.name); cnnPSO.err != nil {
 				return
 			}
@@ -255,6 +296,26 @@ func (e *Encoder) ConvDirect(x, w, bias, out Region, g ConvGeom) {
 		a, b, c := g.args()
 		e.Dispatch(cnnPSO.direct, [3]int{g.OH * g.OW, g.M, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
 			u32s(g.C/g.Group, g.M/g.Group, g.M, g.OH), u32s(hasBias, g.N, 0, 0))
+	}
+}
+
+// ConvDirectBlocked computes a group-1 convolution (+ bias) with each
+// thread producing 8 output channels of one pixel: for thin convs (few
+// output channels, large planes) where im2col's scratch traffic dominates.
+// bias may be the zero Region.
+func (e *Encoder) ConvDirectBlocked(x, w, bias, out Region, g ConvGeom) {
+	if g.Group != 1 {
+		e.err = fmt.Errorf("metal: ConvDirectBlocked group=%d", g.Group)
+		return
+	}
+	hasBias := 1
+	if bias.B == nil {
+		bias, hasBias = w, 0
+	}
+	if e.ready(cnnPSO.directCB) {
+		a, b, c := g.args()
+		e.Dispatch(cnnPSO.directCB, [3]int{g.OH * g.OW, (g.M + 7) / 8, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
+			u32s(g.C, g.M, g.OH, hasBias))
 	}
 }
 

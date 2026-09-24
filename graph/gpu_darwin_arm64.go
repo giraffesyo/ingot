@@ -51,8 +51,9 @@ type GPUSession struct {
 	// Profile, when set, flushes after every GPU node and accumulates its
 	// wall time (encode + GPU) per op type in OpTime — for finding slow
 	// kernels, not for production runs.
-	Profile bool
-	OpTime  map[string]time.Duration
+	Profile  bool
+	OpTime   map[string]time.Duration
+	NodeTime map[*Node]time.Duration
 }
 
 // CompileGPU optimizes g and compiles it for the GPU (darwin/arm64 with
@@ -263,9 +264,10 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 					}
 					gen++
 					if s.OpTime == nil {
-						s.OpTime = map[string]time.Duration{}
+						s.OpTime, s.NodeTime = map[string]time.Duration{}, map[*Node]time.Duration{}
 					}
 					s.OpTime[st.node.OpType] += time.Since(t0)
+					s.NodeTime[st.node] += time.Since(t0)
 				}
 			}
 		}

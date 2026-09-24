@@ -16,6 +16,7 @@ type GPUSession struct {
 	FlushedBy                   []string
 	Profile                     bool
 	OpTime                      map[string]time.Duration
+	NodeTime                    map[*Node]time.Duration
 }
 
 // CompileGPU reports that no GPU backend exists on this platform.

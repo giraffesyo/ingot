@@ -141,6 +141,16 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 			epi.encode(e, ro[0], n)
 		}, true
 	}
+	// Thin spatial convs (few output channels): im2col's scratch traffic
+	// dominates the GEMM; the register-blocked direct kernel measured
+	// 1.2-1.4x faster (M5 Pro: [24,96,3,3] at 240², the 3-channel stem).
+	// 1x1 and wide convs stay on the GEMM.
+	if g.M <= 32 && g.KH*g.KW > 1 {
+		return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+			e.ConvDirectBlocked(rs[0], rs[1], rb, ro[0], g)
+			epi.encode(e, ro[0], n)
+		}, true
+	}
 	K := g.C * g.KH * g.KW
 	direct := g.KH == 1 && g.KW == 1 && g.SH == 1 && g.SW == 1 && g.PT == 0 && g.PL == 0 && P == g.H*g.W
 	pc := P

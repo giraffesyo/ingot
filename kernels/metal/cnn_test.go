@@ -68,7 +68,7 @@ func TestConv(t *testing.T) {
 			x, w, b := buf(t, d, g.N*g.C*g.H*g.W), buf(t, d, g.M*K), buf(t, d, g.M)
 			xf, wf, bf := fill(r, x), fill(r, w), fill(r, b)
 			want := convRef(xf, wf, bf, g)
-			yd, yg := buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P)
+			yd, yg, yb := buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P)
 			pc := (P + 2) / 3 // three pixel chunks
 			cols := buf(t, d, K*pc)
 			err := d.Run(func(e *Encoder) {
@@ -76,6 +76,7 @@ func TestConv(t *testing.T) {
 				if g.Group != 1 {
 					return
 				}
+				e.ConvDirectBlocked(x.At(0), w.At(0), b.At(0), yb.At(0), g)
 				for n := range g.N {
 					xn, yn := x.At(4*n*g.C*g.H*g.W), n*g.M*P
 					for p0 := 0; p0 < P; p0 += pc {
@@ -91,8 +92,8 @@ func TestConv(t *testing.T) {
 				t.Fatal(err)
 			}
 			tol := 1e-5 * math.Sqrt(float64(K)) * 4
-			for name, y := range map[string]*Buffer{"direct": yd, "im2col": yg} {
-				if name == "im2col" && g.Group != 1 {
+			for name, y := range map[string]*Buffer{"direct": yd, "im2col": yg, "blocked": yb} {
+				if name != "direct" && g.Group != 1 {
 					continue
 				}
 				for i, v := range f32s(y.Bytes()) {
@@ -293,4 +294,58 @@ func TestResizeTaps(t *testing.T) {
 			}
 		}
 	}
+}
+
+// BenchmarkConvThin: im2col + GEMM vs the register-blocked direct kernel
+// on the OCR detector's thin high-resolution convs.
+func BenchmarkConvThin(b *testing.B) {
+	d := openDev(b)
+	for _, p := range []func() error{d.Prepare, d.PrepareEW, d.PrepareCNN} {
+		if err := p(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for _, g := range []ConvGeom{
+		{N: 1, C: 96, H: 240, W: 240, M: 24, KH: 3, KW: 3, SH: 1, SW: 1, DH: 1, DW: 1, PT: 1, PL: 1, Group: 1, OH: 240, OW: 240},
+		{N: 1, C: 16, H: 480, W: 480, M: 32, KH: 1, KW: 1, SH: 1, SW: 1, DH: 1, DW: 1, Group: 1, OH: 480, OW: 480},
+		{N: 1, C: 3, H: 960, W: 960, M: 16, KH: 3, KW: 3, SH: 2, SW: 2, DH: 1, DW: 1, PT: 1, PL: 1, Group: 1, OH: 480, OW: 480},
+		{N: 1, C: 192, H: 60, W: 60, M: 192, KH: 1, KW: 1, SH: 1, SW: 1, DH: 1, DW: 1, Group: 1, OH: 60, OW: 60},
+	} {
+		K, P := g.C*g.KH*g.KW, g.OH*g.OW
+		x, w, y := bufB(b, d, g.N*g.C*g.H*g.W), bufB(b, d, g.M*K), bufB(b, d, g.M*P)
+		pc := min(P, max(256, (8<<20)/K))
+		cols := bufB(b, d, K*pc)
+		name := fmt.Sprintf("c%d_m%d_%dx%d_k%d", g.C, g.M, g.H, g.W, g.KH)
+		b.Run(name+"/im2col", func(b *testing.B) {
+			for b.Loop() {
+				d.Run(func(e *Encoder) {
+					for p0 := 0; p0 < P; p0 += pc {
+						c := min(pc, P-p0)
+						if g.KH == 1 && g.SH == 1 {
+							e.Gemm(Gemm{M: g.M, N: P, K: K, A: w.At(0), B: x.At(0), C: y.At(0)})
+							break
+						}
+						e.Im2ColNCHW(x.At(0), cols.At(0), g, p0, c)
+						e.Gemm(Gemm{M: g.M, N: c, K: K, A: w.At(0), B: cols.At(0), LDB: c, C: y.At(4 * p0), LDC: P})
+					}
+				})
+			}
+			b.ReportMetric(2*float64(g.M*K*P)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+		b.Run(name+"/blocked", func(b *testing.B) {
+			for b.Loop() {
+				d.Run(func(e *Encoder) { e.ConvDirectBlocked(x.At(0), w.At(0), Region{}, y.At(0), g) })
+			}
+			b.ReportMetric(2*float64(g.M*K*P)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+	}
+}
+
+func bufB(b *testing.B, d *Device, floats int) *Buffer {
+	buf, err := d.NewBuffer(4 * max(floats, 1))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(buf.Release)
+	return buf
 }
