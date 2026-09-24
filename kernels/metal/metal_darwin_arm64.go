@@ -361,15 +361,16 @@ func (e *Encoder) Dispatch(p *Pipeline, grid, group [3]int, args ...Arg) {
 	send(e.enc, "dispatchThreads:threadsPerThreadgroup:", uintptr(unsafe.Pointer(&g)), uintptr(unsafe.Pointer(&t)))
 }
 
-// Stream records dispatches across calls into one command buffer, left
-// open until Flush — for an executor encoding op by op. Encode queues its
-// callbacks and records them on the device thread in batches (a thread
-// hand-off per call would dominate small kernels); the recorded work only
-// runs at Flush. Its encoder and command buffer are retained past each
-// job's autorelease pool. Not safe for concurrent use.
+// Stream records dispatches across calls — for an executor encoding op by
+// op. Encode queues its callbacks; every streamBatch of them are recorded
+// on the device thread into a command buffer that is committed at once
+// (a thread hand-off per call would dominate small kernels, and waiting
+// for Flush to commit anything left the GPU idle while the host encoded).
+// Command buffers on one queue execute in commit order. Flush records the
+// rest, commits, and waits for all of them. Not safe for concurrent use.
 type Stream struct {
 	d       *Device
-	cb, enc uintptr
+	cbs     []uintptr // committed, retained, not yet waited on
 	err     error
 	queued  []func(e *Encoder)
 	pending int
@@ -379,33 +380,32 @@ type Stream struct {
 	Counts map[string]int
 }
 
-// streamBatch is how many queued callbacks trigger recording before Flush.
-const streamBatch = 64
+// streamBatch is how many queued callbacks are recorded and committed as
+// one command buffer before Flush.
+const streamBatch = 32
 
 // NewStream returns an empty stream on d.
 func (d *Device) NewStream() *Stream { return &Stream{d: d} }
 
-// Encode queues fn's dispatches for the open command buffer. fn runs later
-// on the device thread and must not call Device methods; it sees only what
-// it captured. The first error sticks until Flush reports it.
+// Encode queues fn's dispatches. fn runs later on the device thread and
+// must not call Device methods; it sees only what it captured. The first
+// error sticks until Flush reports it (work recorded after it is dropped).
 func (s *Stream) Encode(fn func(e *Encoder)) {
 	s.queued = append(s.queued, fn)
 	s.pending++
 	if len(s.queued) >= streamBatch {
-		s.d.do(s.record)
+		s.d.do(s.commitQueued)
 	}
 }
 
-// record encodes the queued callbacks (on the device thread).
-func (s *Stream) record() {
+// commitQueued records the queued callbacks into a new command buffer and
+// commits it without waiting (on the device thread).
+func (s *Stream) commitQueued() {
 	if len(s.queued) == 0 {
 		return
 	}
-	if s.enc == 0 {
-		s.cb = send(send(s.d.queue, "commandBuffer"), "retain")
-		s.enc = send(send(s.cb, "computeCommandEncoder"), "retain")
-	}
-	e := &Encoder{enc: s.enc, count: s.Counts}
+	cb := send(send(s.d.queue, "commandBuffer"), "retain")
+	e := &Encoder{enc: send(cb, "computeCommandEncoder"), count: s.Counts}
 	for i, fn := range s.queued {
 		if s.err == nil {
 			fn(e)
@@ -414,41 +414,44 @@ func (s *Stream) record() {
 		s.queued[i] = nil
 	}
 	s.queued = s.queued[:0]
+	send(e.enc, "endEncoding")
+	if s.err != nil {
+		send(cb, "release") // never committed
+		return
+	}
+	send(cb, "commit")
+	s.cbs = append(s.cbs, cb)
 }
 
 // Pending reports whether dispatches are waiting for Flush.
 func (s *Stream) Pending() bool { return s.pending > 0 }
 
-// Flush records what is queued, commits it, waits, and reports the first
-// error since the last Flush.
+// Flush commits what is queued, waits for every committed command buffer,
+// and reports the first error since the last Flush.
 func (s *Stream) Flush() error {
 	var err error
 	if s.pending > 0 {
 		s.d.do(func() {
-			s.record()
+			s.commitQueued()
 			err = s.err
-			if s.enc == 0 {
-				return
-			}
-			send(s.enc, "endEncoding")
-			if err == nil {
-				send(s.cb, "commit")
-				send(s.cb, "waitUntilCompleted")
-				if ce := send(s.cb, "error"); ce != 0 {
+			s.gpu = 0
+			for _, cb := range s.cbs {
+				send(cb, "waitUntilCompleted")
+				if ce := send(cb, "error"); ce != 0 && err == nil {
 					err = fmt.Errorf("metal: command buffer: %w", nserror(ce))
 				}
-				s.gpu = time.Duration((sendF(s.cb, "GPUEndTime") - sendF(s.cb, "GPUStartTime")) * 1e9)
+				s.gpu += time.Duration((sendF(cb, "GPUEndTime") - sendF(cb, "GPUStartTime")) * 1e9)
+				send(cb, "release")
 			}
-			send(s.enc, "release")
-			send(s.cb, "release")
 		})
 	}
-	s.cb, s.enc, s.err, s.pending = 0, 0, nil, 0
+	s.cbs, s.err, s.pending = s.cbs[:0], nil, 0
 	return err
 }
 
-// GPUTime is the GPU execution time of the last flushed command buffer
-// (Metal's GPUStartTime to GPUEndTime; excludes encoding and scheduling).
+// GPUTime is the GPU execution time of the last Flush, summed over its
+// command buffers (Metal's GPUStartTime to GPUEndTime; excludes encoding
+// and scheduling).
 func (s *Stream) GPUTime() time.Duration { return s.gpu }
 
 // Dispatch runs p once in its own command buffer and waits.
