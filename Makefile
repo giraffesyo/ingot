@@ -4,8 +4,12 @@ BENCH ?= .
 
 .PHONY: test bench lint prof vet fmt corpus
 
+# The race detector needs cgo except on darwin; CI is CGO_ENABLED=0, so
+# -race runs only where it works without cgo.
+RACE ?= $(if $(filter darwin,$(shell go env GOOS)),-race,)
+
 test:
-	go test -race -count=1 $(PKG)
+	go test $(RACE) -count=1 $(PKG)
 
 bench:
 	go test -run=^$$ -bench=$(BENCH) -benchmem $(PKG)
