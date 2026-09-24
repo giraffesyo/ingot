@@ -86,3 +86,13 @@ func Ones(n int) *tensor.Tensor {
 	}
 	return t
 }
+
+// Conv2d is torch.nn.Conv2d over NCHW with square stride and symmetric
+// padding; w is [out, in/groups, kh, kw], bias may be nil.
+func (b *Builder) Conv2d(x *Value, w, bias *tensor.Tensor, stride, pad int) *Value {
+	in := []*Value{x, b.Const("weight", w)}
+	if bias != nil {
+		in = append(in, b.Const("bias", bias))
+	}
+	return b.Op("Conv", Attr("strides", []int{stride, stride}, "pads", []int{pad, pad, pad, pad}), in...)
+}
