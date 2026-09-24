@@ -66,10 +66,8 @@ func BuildVision(cfg VisionConfig, set *safetensors.Set, gh, gw int) (g *graph.G
 
 	cos, sin := visionRope(cfg, gh, gw)
 	cosV, sinV := b.Const("rope_cos", cos), b.Const("rope_sin", sin)
-	rope := func(b *graph.Builder, t *graph.Value) *graph.Value { // t [N, H, dh]
-		x1 := b.Slice(t, 2, 0, int64(dh/2))
-		x2 := b.Slice(t, 2, int64(dh/2), int64(dh))
-		return b.Add(b.Mul(t, cosV), b.Mul(b.Concat(2, b.Op("Neg", nil, x2), x1), sinV))
+	rope := func(b *graph.Builder, t *graph.Value) *graph.Value { // t [N, H, dh], rotate_half
+		return b.Op("ingot.RoPE", graph.Attr("layout", 1), t, cosV, sinV)
 	}
 	deep := map[int]int{}
 	for i, l := range cfg.DeepstackVisualIndexes {
@@ -164,9 +162,10 @@ func visionPosEmbed(cfg VisionConfig, table *tensor.Tensor, gh, gw int) *tensor.
 	return out
 }
 
-// visionRope returns the axial rotary tables [N, 1, dh] (rotate_half
-// layout): frequencies over dh/2 channels, the first half driven by the
-// patch row and the second by its column, the whole set repeated twice.
+// visionRope returns the axial rotary tables [N, dh/2] (rotate_half
+// layout's first half; the second repeats it): frequencies over dh/2
+// channels, the first quarter driven by the patch row, the next by its
+// column.
 func visionRope(cfg VisionConfig, gh, gw int) (*tensor.Tensor, *tensor.Tensor) {
 	dh := cfg.HiddenSize / cfg.NumHeads
 	spatial := dh / 2
@@ -175,7 +174,7 @@ func visionRope(cfg VisionConfig, gh, gw int) (*tensor.Tensor, *tensor.Tensor) {
 		inv[i] = 1 / float32(math.Pow(visionRopeTheta, float64(float32(2*i)/float32(spatial))))
 	}
 	N := gh * gw
-	cos, sin := tensor.New(tensor.F32, N, 1, dh), tensor.New(tensor.F32, N, 1, dh)
+	cos, sin := tensor.New(tensor.F32, N, spatial), tensor.New(tensor.F32, N, spatial)
 	for p := range N {
 		r, c := visionPatchRC(p, gw)
 		for i, f := range inv {
@@ -183,8 +182,7 @@ func visionRope(cfg VisionConfig, gh, gw int) (*tensor.Tensor, *tensor.Tensor) {
 				a := float64(float32(pos) * f)
 				cv, sv := float32(math.Cos(a)), float32(math.Sin(a))
 				j := k*len(inv) + i
-				cos.F32()[p*dh+j], cos.F32()[p*dh+j+spatial] = cv, cv
-				sin.F32()[p*dh+j], sin.F32()[p*dh+j+spatial] = sv, sv
+				cos.F32()[p*spatial+j], sin.F32()[p*spatial+j] = cv, sv
 			}
 		}
 	}

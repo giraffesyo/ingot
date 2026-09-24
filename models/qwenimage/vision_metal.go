@@ -158,11 +158,9 @@ func (v *MetalVision) Encode(pixels *tensor.Tensor, gh, gw int) (merged *tensor.
 	for i := range f32view(ones) {
 		f32view(ones)[i] = 1
 	}
-	fc, fs := visionRope(c, gh, gw) // [N, 1, dh]; the kernel takes the first half
-	for p := range N {
-		copy(f32view(cos)[p*dh/2:(p+1)*dh/2], fc.F32()[p*dh:p*dh+dh/2])
-		copy(f32view(sin)[p*dh/2:(p+1)*dh/2], fs.F32()[p*dh:p*dh+dh/2])
-	}
+	fc, fs := visionRope(c, gh, gw) // [N, dh/2]
+	copy(f32view(cos), fc.F32())
+	copy(f32view(sin), fs.F32())
 	deepAt := map[int]int{}
 	for j, l := range c.DeepstackVisualIndexes {
 		deepAt[l] = j
