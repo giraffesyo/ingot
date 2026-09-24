@@ -153,6 +153,15 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	// dominates the GEMM; the register-blocked direct kernel measured
 	// 1.2-1.4x faster (M5 Pro: [24,96,3,3] at 240², the 3-channel stem).
 	// 1x1 and wide convs stay on the GEMM.
+	if g.M <= 32 && g.KH*g.KW > 1 && c.s.bf16 {
+		// bf16 mode: the implicit GEMM (im2col tiles staged on chip, bf16
+		// matrix units, epilogue fused) beat the f32 blocked kernel 1.25x
+		// and bf16 im2col 1.7x on DBNet's [24,96,3,3] at 240².
+		if wb, ok := c.bf16Const(st, 1); ok {
+			ep := metal.ConvEpilogue{Act: epi.act, Alpha: epi.alpha, Beta: epi.beta, Scale: epi.scale, Shift: epi.shift}
+			return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.ConvIGEMM(rs[0], wb, rb, ro[0], g, true, ep) }, true
+		}
+	}
 	if g.M <= 32 && g.KH*g.KW > 1 {
 		return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 			e.ConvDirectBlocked(rs[0], rs[1], rb, ro[0], g)

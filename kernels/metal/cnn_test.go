@@ -46,7 +46,7 @@ func convRef(x, w, bias []float32, g ConvGeom) []float64 {
 // kernel (any group) vs the oracle over strides, dilations, pads, groups.
 func TestConv(t *testing.T) {
 	d := openDev(t)
-	for _, p := range []func() error{d.Prepare, d.PrepareEW, d.PrepareCNN} {
+	for _, p := range []func() error{d.Prepare, d.PrepareEW, d.PrepareCNN, d.PrepareIGEMM} {
 		if err := p(); err != nil {
 			t.Fatal(err)
 		}
@@ -73,6 +73,7 @@ func TestConv(t *testing.T) {
 			yd, yg, yb := buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P)
 			// bf16 path: bf16 weights and columns, bf16×bf16 GEMM.
 			yh, wh, colsH := buf(t, d, g.N*g.M*P), buf(t, d, (g.M*K+1)/2), buf(t, d, (K*P+1)/2)
+			yi, yih := buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P) // implicit GEMM, f32 and bf16
 			pc := (P + 2) / 3 // three pixel chunks
 			cols := buf(t, d, K*pc)
 			err := d.Run(func(e *Encoder) {
@@ -93,6 +94,8 @@ func TestConv(t *testing.T) {
 					}
 				}
 				e.CastBF16(w.At(0), wh.At(0), g.M, K, K, K)
+				e.ConvIGEMM(x.At(0), w.At(0), b.At(0), yi.At(0), g, false, ConvEpilogue{})
+				e.ConvIGEMM(x.At(0), wh.At(0), b.At(0), yih.At(0), g, true, ConvEpilogue{})
 				for n := range g.N {
 					e.Im2ColNCHWBF16(x.At(4*n*g.C*g.H*g.W), colsH.At(0), g, 0, P)
 					e.Gemm(Gemm{M: g.M, N: P, K: K, A: wh.At(0), B: colsH.At(0), C: yh.At(4 * n * g.M * P), ABF16: true, BF16: true})
@@ -114,14 +117,16 @@ func TestConv(t *testing.T) {
 					aw[i] = float32(math.Abs(float64(v)))
 				}
 				bound := convRef(ax, aw, nil, g)
-				for i, v := range f32s(yh.Bytes()) {
-					if math.Abs(float64(v)-want[i]) > bound[i]/128+1e-6 {
-						t.Fatalf("bf16 [%d] = %g, want %g (bound %g)", i, v, want[i], bound[i]/128)
+				for name, y := range map[string]*Buffer{"bf16": yh, "igemm-bf16": yih} {
+					for i, v := range f32s(y.Bytes()) {
+						if math.Abs(float64(v)-want[i]) > bound[i]/128+1e-6 {
+							t.Fatalf("%s [%d] = %g, want %g (bound %g)", name, i, v, want[i], bound[i]/128)
+						}
 					}
 				}
 			}
-			for name, y := range map[string]*Buffer{"direct": yd, "im2col": yg, "blocked": yb} {
-				if name == "im2col" && g.Group != 1 || name == "blocked" && g.Group != 1 && !DepthwiseOK(g) {
+			for name, y := range map[string]*Buffer{"direct": yd, "im2col": yg, "blocked": yb, "igemm": yi} {
+				if (name == "im2col" || name == "igemm") && g.Group != 1 || name == "blocked" && g.Group != 1 && !DepthwiseOK(g) {
 					continue
 				}
 				for i, v := range f32s(y.Bytes()) {
@@ -333,44 +338,79 @@ func TestResizeTaps(t *testing.T) {
 // on the OCR detector's thin high-resolution convs.
 func BenchmarkConvThin(b *testing.B) {
 	d := openDev(b)
-	for _, p := range []func() error{d.Prepare, d.PrepareEW, d.PrepareCNN} {
+	for _, p := range []func() error{d.Prepare, d.PrepareEW, d.PrepareCNN, d.PrepareIGEMM} {
 		if err := p(); err != nil {
 			b.Fatal(err)
 		}
 	}
 	for _, g := range []ConvGeom{
+		{N: 8, C: 240, H: 12, W: 134, M: 240, KH: 1, KW: 1, SH: 1, SW: 1, DH: 1, DW: 1, Group: 1, OH: 12, OW: 134},
+		{N: 1, C: 256, H: 64, W: 64, M: 256, KH: 3, KW: 3, SH: 1, SW: 1, DH: 1, DW: 1, PT: 1, PL: 1, Group: 1, OH: 64, OW: 64},
 		{N: 1, C: 96, H: 240, W: 240, M: 24, KH: 3, KW: 3, SH: 1, SW: 1, DH: 1, DW: 1, PT: 1, PL: 1, Group: 1, OH: 240, OW: 240},
 		{N: 1, C: 16, H: 480, W: 480, M: 32, KH: 1, KW: 1, SH: 1, SW: 1, DH: 1, DW: 1, Group: 1, OH: 480, OW: 480},
 		{N: 1, C: 3, H: 960, W: 960, M: 16, KH: 3, KW: 3, SH: 2, SW: 2, DH: 1, DW: 1, PT: 1, PL: 1, Group: 1, OH: 480, OW: 480},
 		{N: 1, C: 192, H: 60, W: 60, M: 192, KH: 1, KW: 1, SH: 1, SW: 1, DH: 1, DW: 1, Group: 1, OH: 60, OW: 60},
 	} {
 		K, P := g.C*g.KH*g.KW, g.OH*g.OW
-		x, w, y := bufB(b, d, g.N*g.C*g.H*g.W), bufB(b, d, g.M*K), bufB(b, d, g.M*P)
+		x, w, y := bufB(b, d, g.N*g.C*g.H*g.W), bufB(b, d, g.M*K), bufB(b, d, g.N*g.M*P)
+		flops := 2 * float64(g.N*g.M*K*P)
 		pc := min(P, max(256, (8<<20)/K))
 		cols := bufB(b, d, K*pc)
-		name := fmt.Sprintf("c%d_m%d_%dx%d_k%d", g.C, g.M, g.H, g.W, g.KH)
+		name := fmt.Sprintf("n%d_c%d_m%d_%dx%d_k%d", g.N, g.C, g.M, g.H, g.W, g.KH)
+		for _, bf := range []bool{false, true} {
+			b.Run(fmt.Sprintf("%s/igemm_bf16=%v", name, bf), func(b *testing.B) {
+				for b.Loop() {
+					d.Run(func(e *Encoder) { e.ConvIGEMM(x.At(0), w.At(0), Region{}, y.At(0), g, bf, ConvEpilogue{}) })
+				}
+				b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+			})
+		}
+		wh, colsH := bufB(b, d, (g.M*K+1)/2), bufB(b, d, (K*min(P, max(256, (16<<20)/K))+1)/2)
+		xh := bufB(b, d, (g.N*K*P+1)/2)
+		b.Run(name+"/im2col_bf16", func(b *testing.B) {
+			pcH := min(P, max(256, (16<<20)/K))
+			for b.Loop() {
+				d.Run(func(e *Encoder) {
+					if g.KH == 1 && g.SH == 1 {
+						e.CastBF16(x.At(0), xh.At(0), g.N*K, P, P, P)
+						e.Gemm(Gemm{M: g.M, N: P, K: K, A: wh.At(0), B: xh.At(0), C: y.At(0), ABF16: true, BF16: true,
+							Batch: g.N, StrideB: K * P, StrideC: g.M * P})
+						return
+					}
+					for n := range g.N {
+						for p0 := 0; p0 < P; p0 += pcH {
+							c := min(pcH, P-p0)
+							e.Im2ColNCHWBF16(x.At(4*n*g.C*g.H*g.W), colsH.At(0), g, p0, c)
+							e.Gemm(Gemm{M: g.M, N: c, K: K, A: wh.At(0), B: colsH.At(0), LDB: c, C: y.At(4 * (n*g.M*P + p0)), LDC: P,
+								ABF16: true, BF16: true})
+						}
+					}
+				})
+			}
+			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
 		b.Run(name+"/im2col", func(b *testing.B) {
 			for b.Loop() {
 				d.Run(func(e *Encoder) {
+					if g.KH == 1 && g.SH == 1 {
+						e.Gemm(Gemm{M: g.M, N: P, K: K, A: w.At(0), B: x.At(0), C: y.At(0), Batch: g.N, StrideB: K * P, StrideC: g.M * P})
+						return
+					}
 					for p0 := 0; p0 < P; p0 += pc {
 						c := min(pc, P-p0)
-						if g.KH == 1 && g.SH == 1 {
-							e.Gemm(Gemm{M: g.M, N: P, K: K, A: w.At(0), B: x.At(0), C: y.At(0)})
-							break
-						}
 						e.Im2ColNCHW(x.At(0), cols.At(0), g, p0, c)
 						e.Gemm(Gemm{M: g.M, N: c, K: K, A: w.At(0), B: cols.At(0), LDB: c, C: y.At(4 * p0), LDC: P})
 					}
 				})
 			}
-			b.ReportMetric(2*float64(g.M*K*P)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})
 		for v, cb := range blockWidths {
 			b.Run(fmt.Sprintf("%s/blocked%d", name, cb), func(b *testing.B) {
 				for b.Loop() {
 					d.Run(func(e *Encoder) { e.convDirectCB(v, x.At(0), w.At(0), Region{}, y.At(0), g) })
 				}
-				b.ReportMetric(2*float64(g.M*K*P)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+				b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 			})
 		}
 	}

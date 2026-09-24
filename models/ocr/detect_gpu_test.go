@@ -82,7 +82,7 @@ func TestDetectorGPU(t *testing.T) {
 // sample.png (320²) and a 960² input (the detector's size limit).
 func BenchmarkDetectorDevice(b *testing.B) {
 	for _, size := range []int{320, 960} {
-		for _, dev := range []string{"cpu", "gpu"} {
+		for _, dev := range []string{"cpu", "gpu", "gpu-bf16"} {
 			b.Run(fmt.Sprintf("size=%d/device=%s", size, dev), func(b *testing.B) {
 				g, in := detGraph(b)
 				if size != 320 {
