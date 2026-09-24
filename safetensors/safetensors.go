@@ -16,6 +16,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"sync"
 
 	"github.com/giraffesyo/ingot/kernels/par"
 	"github.com/giraffesyo/ingot/tensor"
@@ -37,6 +38,9 @@ type File struct {
 	unmap    func() error
 	tensors  map[string]Info
 	Metadata map[string]string
+
+	mu    sync.Mutex
+	views map[string]*tensor.Tensor // Tensor results, one per name
 }
 
 // maxHeader bounds the JSON header (the format caps it at 100 MB).
@@ -117,7 +121,9 @@ func (f *File) Close() error {
 		return nil
 	}
 	err := f.unmap()
-	f.unmap, f.raw, f.data = nil, nil, nil
+	f.mu.Lock()
+	f.unmap, f.raw, f.data, f.views = nil, nil, nil, nil
+	f.mu.Unlock()
 	return err
 }
 
@@ -139,8 +145,15 @@ func (f *File) Info(name string) (Info, bool) {
 
 // Tensor returns a zero-copy view of name in its stored dtype. Unaligned
 // storage (possible when the header length is not a multiple of the element
-// size) is copied instead.
+// size) is copied instead. Repeated calls return the same *tensor.Tensor, so
+// per-weight caches keyed on the tensor (packed GEMM weights) are shared by
+// every graph built over the file.
 func (f *File) Tensor(name string) (*tensor.Tensor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.views[name]; ok {
+		return t, nil
+	}
 	info, ok := f.tensors[name]
 	if !ok {
 		return nil, fmt.Errorf("safetensors: %s: no tensor %q", f.path, name)
@@ -153,7 +166,12 @@ func (f *File) Tensor(name string) (*tensor.Tensor, error) {
 	if !tensor.Aligned(dt, b) {
 		b = append([]byte(nil), b...)
 	}
-	return tensor.FromBytes(dt, b, info.Shape...), nil
+	t := tensor.FromBytes(dt, b, info.Shape...)
+	if f.views == nil {
+		f.views = map[string]*tensor.Tensor{}
+	}
+	f.views[name] = t
+	return t, nil
 }
 
 // F32 returns name as float32: a view for aligned F32 storage, otherwise a

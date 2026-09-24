@@ -170,3 +170,17 @@ func dupUp(b *graph.Builder, x *graph.Value, in, out, ft, h, w int) *graph.Value
 	y = b.Transpose(y, 0, 1, 4, 2, 5, 3)
 	return b.Reshape(y, 1, int64(out), int64(2*h), int64(2*w))
 }
+
+// UnpackLatents turns the DiT's packed latents [h·w, C] into the VAE's
+// input [1, C, h, w], denormalised with the config's latents_mean/std.
+func UnpackLatents(cfg VAEConfig, x *tensor.Tensor, h, w int) *tensor.Tensor {
+	c := cfg.ZDim
+	z := tensor.New(tensor.F32, 1, c, h, w)
+	src, dst := x.F32(), z.F32()
+	for p := range h * w {
+		for ch := range c {
+			dst[ch*h*w+p] = src[p*c+ch]*cfg.LatentsStd[ch] + cfg.LatentsMean[ch]
+		}
+	}
+	return z
+}

@@ -35,6 +35,17 @@ func (w weights) f32(name string) *tensor.Tensor {
 	return t
 }
 
+// raw returns prefix+name in its stored dtype, zero-copy: large bf16
+// Linear weights stay as views of the mapped file and Gemm packs them
+// straight from bf16.
+func (w weights) raw(name string) *tensor.Tensor {
+	t, err := w.set.Tensor(w.prefix + name)
+	if err != nil {
+		panic(loadError{err})
+	}
+	return t
+}
+
 // has reports whether the checkpoint holds prefix+name.
 func (w weights) has(name string) bool {
 	_, ok := w.set.Info(w.prefix + name)
@@ -53,13 +64,16 @@ func catch(err *error) {
 }
 
 // readConfig decodes dir/config.json into v.
-func readConfig(dir string, v any) error {
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+func readConfig(dir string, v any) error { return readJSON(dir, "config.json", v) }
+
+// readJSON decodes dir/name into v.
+func readJSON(dir, name string, v any) error {
+	raw, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		return fmt.Errorf("qwenimage: %w", err)
 	}
 	if err := json.Unmarshal(raw, v); err != nil {
-		return fmt.Errorf("qwenimage: %s/config.json: %w", dir, err)
+		return fmt.Errorf("qwenimage: %s/%s: %w", dir, name, err)
 	}
 	return nil
 }
