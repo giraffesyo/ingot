@@ -81,12 +81,13 @@ void rmsnorm_rope_t(device float* x, device T* out, device const float* w, devic
 	threadgroup_barrier(mem_flags::mem_threadgroup);
 	float tot = 0;
 	for (uint i = 0; i < (nthr + 31) / 32; i++) tot += scratch[i];
-	const float inv = rsqrt(tot / dh + f.x);
-	if (tid < dh) row[tid] = v * inv * w[tid];
+	const bool norm = (p.w & 2u) == 0; // mode bit 1: rotate only
+	const float inv = norm ? rsqrt(tot / dh + f.x) : 1.0f;
+	if (tid < dh) row[tid] = norm ? v * inv * w[tid] : v;
 	threadgroup_barrier(mem_flags::mem_threadgroup);
 	if (tid < dh) {
 		const uint hd = dh / 2;
-		if (p.w == 0) { // interleaved pairs (2j, 2j+1)
+		if ((p.w & 1u) == 0) { // interleaved pairs (2j, 2j+1)
 			const uint j = tid / 2;
 			const float c = cs[t * hd + j], s = sn[t * hd + j];
 			const float re = row[2 * j], im = row[2 * j + 1];
@@ -283,10 +284,12 @@ func (e *Encoder) LayerNormMod(x, y, s Region, rows, cols, ldx, ldy int, eps flo
 	}
 }
 
-// RoPE layouts for RMSNormRoPE.
+// RoPE layouts for RMSNormRoPE; RopeNoNorm may be or-ed in to rotate
+// without normalising first (w is then unused).
 const (
-	RopePairs = 0 // rotate channel pairs (2j, 2j+1) — complex view
-	RopeHalf  = 1 // rotate (j, j+dh/2) — rotate_half
+	RopePairs  = 0 // rotate channel pairs (2j, 2j+1) — complex view
+	RopeHalf   = 1 // rotate (j, j+dh/2) — rotate_half
+	RopeNoNorm = 2
 )
 
 // RMSNormRoPE normalises each dh-wide head of x [T, ld] (heads starting at

@@ -3,8 +3,8 @@ package qwenimage
 import (
 	"fmt"
 	"image"
-	"math"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"

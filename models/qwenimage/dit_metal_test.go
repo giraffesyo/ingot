@@ -270,3 +270,68 @@ func TestMetalTextEncoderMM(t *testing.T) {
 	}
 	compare(t, "edit prompt embeds (GPU LM + Go vision)", got.F32(), want.F32(), 3e-4*maxw)
 }
+
+// TestMetalVisionParity: the GPU vision tower against the reference.
+func TestMetalVisionParity(t *testing.T) {
+	if !metal.Available() {
+		t.Skip("no Metal device")
+	}
+	ref := loadRef(t, "edit")
+	dir := filepath.Join(snapshotDir(t), "text_encoder")
+	cfg, err := LoadVisionConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := safetensors.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	grid := ref.tensor(t, "image_grid_thw").I64()
+	v, err := NewMetalVision(cfg, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	merged, deep, err := v.Encode(ref.tensor(t, "pixel_values"), int(grid[1]), int(grid[2]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]*tensor.Tensor{"vision_merged": merged, "vision_deepstack0": deep[0],
+		"vision_deepstack1": deep[1], "vision_deepstack2": deep[2]} {
+		want := ref.tensor(t, name).F32()
+		var maxw float64
+		for _, x := range want {
+			maxw = max(maxw, float64(abs32(x)))
+		}
+		compare(t, name+" (GPU)", got.F32(), want, 2e-4*maxw)
+	}
+}
+
+// TestMetalVAEEncoderParity: GPU encoder vs the reference condition latents.
+func TestMetalVAEEncoderParity(t *testing.T) {
+	if !metal.Available() {
+		t.Skip("no Metal device")
+	}
+	ref := loadRef(t, "edit")
+	dir := filepath.Join(snapshotDir(t), "vae")
+	cfg, err := LoadVAEConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := safetensors.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	v, err := NewMetalVAE(cfg, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	got, err := v.Encode(ref.tensor(t, "vae_pixels"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compare(t, "cond latents (GPU encoder)", got.F32(), ref.tensor(t, "cond_latents").F32(), 2e-3)
+}

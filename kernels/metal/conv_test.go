@@ -84,3 +84,48 @@ func TestConvKernels(t *testing.T) {
 		}
 	}
 }
+
+func TestGELUAndRopeOnly(t *testing.T) {
+	d := openDev(t)
+	if err := d.PrepareConv(); err != nil {
+		t.Fatal(err)
+	}
+	r := rand.New(rand.NewPCG(12, 12))
+	const n = 5000
+	a, b := buf(t, d, n), buf(t, d, n)
+	af := fill(r, a)
+	for i := range af {
+		af[i] *= 3
+	}
+	copy(f32s(b.Bytes()), af)
+	x0 := append([]float32(nil), af...)
+	const T, heads, dh, ld = 3, 2, 72, 200
+	q := buf(t, d, T*ld)
+	qf := fill(r, q)
+	q0 := append([]float32(nil), qf...)
+	cs, sn := buf(t, d, T*dh/2), buf(t, d, T*dh/2)
+	cf, sf := fill(r, cs), fill(r, sn)
+	if err := d.Run(func(e *Encoder) {
+		e.GELU(a.At(0), n, false)
+		e.GELU(b.At(0), n, true)
+		e.RMSNormRoPEMode(q.At(4*10), cs.At(0), cs.At(0), sn.At(0), T, heads, dh, ld, 0, RopeHalf|RopeNoNorm)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, v := range x0 {
+		x := float64(v)
+		near(t, "gelu erf", f32s(a.Bytes())[i], 0.5*x*(1+math.Erf(x/math.Sqrt2)), 2e-6)
+		near(t, "gelu tanh", f32s(b.Bytes())[i], 0.5*x*(1+math.Tanh(math.Sqrt(2/math.Pi)*(x+0.044715*x*x*x))), 2e-6)
+	}
+	for tt := range T {
+		for h := range heads {
+			base := tt*ld + 10 + h*dh
+			for j := range dh / 2 {
+				c, s := float64(cf[tt*dh/2+j]), float64(sf[tt*dh/2+j])
+				lo, hi := float64(q0[base+j]), float64(q0[base+j+dh/2])
+				near(t, "rope-only lo", qf[base+j], lo*c-hi*s, 1e-5)
+				near(t, "rope-only hi", qf[base+j+dh/2], hi*c+lo*s, 1e-5)
+			}
+		}
+	}
+}

@@ -276,22 +276,23 @@ func visionInputs(tdir string, set *safetensors.Set, ids []int64, conds []condit
 	var merged []*tensor.Tensor
 	deep := make([][]*tensor.Tensor, len(vcfg.DeepstackVisualIndexes))
 	var grids [][2]int
+	mv, err := NewMetalVision(vcfg, set)
+	if err != nil {
+		return in, err
+	}
+	defer mv.Close()
 	for _, c := range conds {
 		pix, gh, gw, err := VisionPatches(c.img)
 		if err != nil {
 			return in, err
 		}
-		s, err := compile(BuildVision(vcfg, set, gh, gw))
+		m, d, err := mv.Encode(pix, gh, gw)
 		if err != nil {
 			return in, err
 		}
-		out, err := s.Run(map[string]*tensor.Tensor{"pixels": pix})
-		if err != nil {
-			return in, err
-		}
-		merged = append(merged, out["merged"].Clone())
+		merged = append(merged, m)
 		for i := range deep {
-			deep[i] = append(deep[i], out[fmt.Sprintf("deep%d", i)].Clone())
+			deep[i] = append(deep[i], d[i])
 		}
 		grids = append(grids, [2]int{gh / visMerge, gw / visMerge})
 	}
@@ -326,6 +327,21 @@ func encodeConditions(dir string, conds []condition) (*tensor.Tensor, error) {
 	}
 	defer set.Close()
 	var parts []*tensor.Tensor
+	if metalAvailable() { // edit mode runs on the GPU
+		v, err := NewMetalVAE(cfg, set)
+		if err != nil {
+			return nil, err
+		}
+		defer v.Close()
+		for _, c := range conds {
+			z, err := v.Encode(VAEPixels(c.img))
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, z)
+		}
+		return concatRows(parts), nil
+	}
 	for _, c := range conds {
 		px := VAEPixels(c.img)
 		ps := px.Shape()

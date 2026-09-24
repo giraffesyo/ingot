@@ -47,3 +47,18 @@ func (*MetalVAE) Close() {}
 func (*MetalTextEncoder) EncodeMM(TextInputs, int, int) (*tensor.Tensor, error) {
 	return nil, errors.New("unavailable")
 }
+
+// MetalVision is unavailable off darwin/arm64.
+type MetalVision struct{}
+
+func NewMetalVision(VisionConfig, *safetensors.Set) (*MetalVision, error) {
+	return nil, errors.New("qwenimage: Metal vision tower needs darwin/arm64")
+}
+func (*MetalVision) Encode(*tensor.Tensor, int, int) (*tensor.Tensor, []*tensor.Tensor, error) {
+	return nil, nil, errors.New("unavailable")
+}
+func (*MetalVision) Close() {}
+
+func (*MetalVAE) Encode(*tensor.Tensor) (*tensor.Tensor, error) {
+	return nil, errors.New("unavailable")
+}
