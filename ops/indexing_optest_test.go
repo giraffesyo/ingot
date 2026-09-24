@@ -307,3 +307,15 @@ func TestBinaryInt(t *testing.T) {
 		t.Fatalf("int32 Max = %s %v", got.DType(), got.I32())
 	}
 }
+
+// TestScalarBroadcastRank: a rank-0 × [1] product broadcasts to [1] (NumPy
+// rules), whichever side the scalar is on.
+func TestScalarBroadcastRank(t *testing.T) {
+	s, one := tensor.FromF32([]float32{3}), tensor.FromF32([]float32{2}, 1)
+	for _, pair := range [][2]*tensor.Tensor{{s, one}, {one, s}} {
+		got := run(t, mkOp(t, "Mul", 14, nil, 2, 1), pair[0], pair[1])[0]
+		if !got.Shape().Equal(tensor.Shape{1}) || got.F32()[0] != 6 {
+			t.Fatalf("Mul(%v, %v) = %v %v, want [1] [6]", pair[0].Shape(), pair[1].Shape(), got.Shape(), got.F32())
+		}
+	}
+}

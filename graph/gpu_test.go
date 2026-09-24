@@ -218,3 +218,48 @@ func argmax(v []float32) int {
 	}
 	return best
 }
+
+// TestZooGPUSelfCheck runs every zoo model with GPUSession.Check: each GPU
+// node's outputs must agree with its CPU op on the same inputs (shape,
+// dtype, and values to 1e-3 of the output scale).
+func TestZooGPUSelfCheck(t *testing.T) {
+	if !metal.Available() {
+		t.Skip("no Metal device")
+	}
+	for _, name := range discoverModels(t) {
+		t.Run(name, func(t *testing.T) {
+			mb, err := os.ReadFile(filepath.Join(modelDir, name+".json"))
+			if err != nil {
+				t.Skip(err)
+			}
+			var man manifest
+			if err := json.Unmarshal(mb, &man); err != nil {
+				t.Fatal(err)
+			}
+			m, err := onnx.DecodeFile(filepath.Join(modelDir, man.Model))
+			if err != nil {
+				t.Skipf("load: %v", err)
+			}
+			g, err := graph.FromONNX(m)
+			if err != nil {
+				t.Skipf("BUILD GAP: %v", err)
+			}
+			s, err := graph.CompileGPU(g)
+			if err != nil {
+				t.Skipf("OP GAP: %v", err)
+			}
+			defer s.Close()
+			s.Check = true
+			feeds := map[string]*tensor.Tensor{}
+			for _, in := range man.Inputs {
+				feeds[in.Name] = loadBin(t, in)
+			}
+			if _, err := s.Run(feeds); err != nil {
+				t.Skipf("RUN GAP: %v", err)
+			}
+			for _, mm := range s.Mismatches {
+				t.Errorf("%s %s output %d: max abs %.3g of scale %.3g %s", mm.Node.OpType, mm.Node.Name, mm.Output, mm.MaxAbs, mm.Scale, mm.Detail)
+			}
+		})
+	}
+}
