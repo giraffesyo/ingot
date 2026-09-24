@@ -78,7 +78,7 @@ func NewMetalDiT(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers int) 
 	if err != nil {
 		return nil, err
 	}
-	if err := dev.Prepare(); err != nil {
+	if err := dev.PrepareFlash(); err != nil {
 		return nil, err
 	}
 	mod, err := compile(BuildDiTModulation(cfg, set))
@@ -277,17 +277,12 @@ func (m *MetalDiT) Step(x *tensor.Tensor, t float32) (*tensor.Tensor, error) {
 		e.Gemm(metal.Gemm{M: T, N: D, K: cfg.InChannels, A: m.lat.At(0), B: m.imgIn, C: w.x.At(0), TransB: true, BF16: true})
 		for li := range m.lw {
 			if fast {
-				m.block(e, li, w, true, nil, func(ho int) {
-					h2 := ho / 2 // byte offset of the head in a bf16 row
-					e.Gemm(metal.Gemm{M: T, N: P, K: dh, A: w.q16.At(h2), LDA: D, B: m.kp16[li].At(h2), LDB: D,
-						C: w.s.At(0), LDC: SW, TransB: true, BF16: true, ABF16: true})
-					e.Gemm(metal.Gemm{M: T, N: T, K: dh, A: w.q16.At(h2), LDA: D, B: w.k16.At(h2), LDB: D,
-						C: w.s.At(4 * P), LDC: SW, TransB: true, BF16: true, ABF16: true})
-					e.SoftmaxRowsBF16(w.s.At(0), w.s16.At(0), T, SW, SW, SW, scale)
-					e.Gemm(metal.Gemm{M: T, N: dh, K: P, A: w.s16.At(0), LDA: SW, B: m.vp16[li].At(h2), LDB: D,
-						C: w.o.At(ho), LDC: D, BF16: true, ABF16: true})
-					e.Gemm(metal.Gemm{M: T, N: dh, K: T, A: w.s16.At(2 * P), LDA: SW, B: w.v16.At(h2), LDB: D,
-						C: w.o.At(ho), LDC: D, BF16: true, ABF16: true, Accumulate: true})
+				// One fused attention dispatch per layer: keys are the
+				// cached prefix then this step's target tokens.
+				m.blockAttn(e, li, w, true, nil, func() {
+					e.Flash(metal.Flash{Q: w.q16.At(0), K1: m.kp16[li].At(0), V1: m.vp16[li].At(0),
+						K2: w.k16.At(0), V2: w.v16.At(0), O: w.o.At(0), Tq: T, N1: P, N2: T,
+						Heads: cfg.NumAttentionHeads, LDQ: D, LD1: D, LD2: D, LDO: D, Scale: scale})
 				})
 				continue
 			}
@@ -314,11 +309,21 @@ func (m *MetalDiT) Step(x *tensor.Tensor, t float32) (*tensor.Tensor, error) {
 	return out, nil
 }
 
-// block encodes one transformer block over w's tokens. afterKV (optional)
+// block encodes one transformer block, attention head by head.
+func (m *MetalDiT) block(e *metal.Encoder, li int, w *metalWork, fast bool, afterKV func(), attend func(ho int)) {
+	H, dh := m.cfg.NumAttentionHeads, m.cfg.AttentionHeadDim
+	m.blockAttn(e, li, w, fast, afterKV, func() {
+		for h := range H {
+			attend(4 * h * dh)
+		}
+	})
+}
+
+// blockAttn encodes one transformer block over w's tokens. afterKV (optional)
 // runs once q/k/v are final (post-norm, post-RoPE; in fast mode also as
 // bf16 in q16/k16/v16); attend(ho) fills head h's slice of w.o (ho = its
 // byte offset in an f32 [T, dim] row).
-func (m *MetalDiT) block(e *metal.Encoder, li int, w *metalWork, fast bool, afterKV func(), attend func(ho int)) {
+func (m *MetalDiT) blockAttn(e *metal.Encoder, li int, w *metalWork, fast bool, afterKV func(), attendAll func()) {
 	cfg, lw := m.cfg, m.lw[li]
 	D, H, dh, T, eps := cfg.dim(), cfg.NumAttentionHeads, cfg.AttentionHeadDim, w.T, cfg.Eps
 	hid := D * cfg.MLPRatio
@@ -339,9 +344,7 @@ func (m *MetalDiT) block(e *metal.Encoder, li int, w *metalWork, fast bool, afte
 	if afterKV != nil {
 		afterKV()
 	}
-	for h := range H {
-		attend(4 * h * dh)
-	}
+	attendAll()
 	m.linear(e, w, fast, w.o, D, lw.o, w.y, D)
 	e.GatedAdd(w.x.At(0), m.g1.At(0), w.y.At(0), T, D, D, D)
 
