@@ -232,3 +232,18 @@ func TestRealCheckpoint(t *testing.T) {
 		s.Close()
 	}
 }
+
+func TestTensorIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m.safetensors")
+	writeFile(t, path, []entry{{"w", "BF16", []int{2}, u16Bytes(1, 2)}}, 0)
+	f, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	a, _ := f.Tensor("w")
+	b, _ := f.Tensor("w")
+	if a != b {
+		t.Fatal("Tensor must return the same view per name (shared weight caches key on it)")
+	}
+}

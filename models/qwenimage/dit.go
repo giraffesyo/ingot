@@ -290,7 +290,7 @@ func BuildDiTPrefix(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers in
 	h := d.txtIn(b.Scope("txt_in"), txt)
 	if l.CondTok > 0 {
 		cond := b.Input("cond", tensor.F32, l.CondTok, cfg.InChannels)
-		h = b.Concat(0, h, b.Scope("img_in").Linear(cond, d.w.f32("img_in.weight"), nil))
+		h = b.Concat(0, h, b.Scope("img_in").Linear(cond, d.w.raw("img_in.weight"), nil))
 	}
 	x := b.Op("Gather", graph.Attr("axis", 0), h, b.Const("prefix_src", tensor.FromI64(l.prefixSrc, l.Prefix)))
 	temb := d.timeEmbed(b.Scope("time"), b.Scalar(0))
@@ -323,7 +323,7 @@ func BuildDiTTarget(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers in
 	b := graph.NewBuilder("qwenimage21_dit_target")
 	D, H, dh := cfg.dim(), cfg.NumAttentionHeads, cfg.AttentionHeadDim
 	pv := int64(len(l.prefixValid))
-	x := b.Scope("img_in").Linear(b.Input("x", tensor.F32, l.Target, cfg.InChannels), d.w.f32("img_in.weight"), nil)
+	x := b.Scope("img_in").Linear(b.Input("x", tensor.F32, l.Target, cfg.InChannels), d.w.raw("img_in.weight"), nil)
 	temb := d.timeEmbed(b.Scope("time"), b.Input("t", tensor.F32, 1))
 	mod := d.modulation(b.Scope("modulation"), temb)
 	cos, sin := ropeConsts(b, l.targetCos, l.targetSin, l.Target, dh/2)
@@ -359,8 +359,8 @@ func (d *dit) txtIn(b *graph.Builder, x *graph.Value) *graph.Value {
 		scale.F32()[i] = v + 1
 	}
 	x = b.RMSNorm(x, scale, d.cfg.Eps)
-	x = b.GeluTanh(b.Linear(x, w.f32("in_layer.weight"), nil))
-	return b.Linear(x, w.f32("out_layer.weight"), nil)
+	x = b.GeluTanh(b.Linear(x, w.raw("in_layer.weight"), nil))
+	return b.Linear(x, w.raw("out_layer.weight"), nil)
 }
 
 // timeEmbed is QwenImage21TimestepProjEmbeddings for one timestep t [1]:
@@ -374,8 +374,8 @@ func (d *dit) timeEmbed(b *graph.Builder, t *graph.Value) *graph.Value {
 	args := b.Mul(b.Reshape(b.Mul(t, b.Scalar(1000)), 1, 1), b.Const("freqs", freqs))
 	emb := b.Concat(1, b.Op("Cos", nil, args), b.Op("Sin", nil, args))
 	w := d.w.scope("time_text_embed.timestep_embedder")
-	h := b.SiLU(b.Linear(emb, w.f32("linear_1.weight"), nil))
-	return b.Linear(h, w.f32("linear_2.weight"), nil)
+	h := b.SiLU(b.Linear(emb, w.raw("linear_1.weight"), nil))
+	return b.Linear(h, w.raw("linear_2.weight"), nil)
 }
 
 // mods are the shared per-block modulation terms, broadcast over tokens:
@@ -386,7 +386,7 @@ type mods struct{ s1, g1, s2, g2 *graph.Value }
 // chunked as [scale1 | gate1 | scale2 | gate2].
 func (d *dit) modulation(b *graph.Builder, temb *graph.Value) mods {
 	D := int64(d.cfg.dim())
-	m := b.Linear(b.SiLU(temb), d.w.f32("modulation.1.weight"), nil) // [1, 4D]
+	m := b.Linear(b.SiLU(temb), d.w.raw("modulation.1.weight"), nil) // [1, 4D]
 	one := b.Scalar(1)
 	return mods{
 		s1: b.Add(b.Slice(m, 1, 0, D), one),
@@ -426,29 +426,29 @@ func (d *dit) block(b *graph.Builder, w weights, x *graph.Value, m mods, t int, 
 
 	ab := b.Scope("attn")
 	y := b.Mul(b.LayerNorm(x, D, nil, nil, eps), m.s1)
-	q := ab.Linear(y, w.f32("attn.to_q.weight"), nil)
-	k := ab.Linear(y, w.f32("attn.to_k.weight"), nil)
-	v := ab.Linear(y, w.f32("attn.to_v.weight"), nil)
+	q := ab.Linear(y, w.raw("attn.to_q.weight"), nil)
+	k := ab.Linear(y, w.raw("attn.to_k.weight"), nil)
+	v := ab.Linear(y, w.raw("attn.to_v.weight"), nil)
 	q = ab.RMSNorm(ab.Reshape(q, int64(t), H, dh), w.f32("attn.norm_q.weight"), eps)
 	k = ab.RMSNorm(ab.Reshape(k, int64(t), H, dh), w.f32("attn.norm_k.weight"), eps)
 	q = d.rope(ab, ab.Reshape(q, int64(t), -1), cos, sin, t)
 	k = d.rope(ab, ab.Reshape(k, int64(t), -1), cos, sin, t)
 	v = ab.Reshape(v, 1, int64(t), H, dh)
 	o := ab.Reshape(attend(q, k, v), int64(t), int64(D))
-	o = ab.Linear(o, w.f32("attn.to_out.0.weight"), nil)
+	o = ab.Linear(o, w.raw("attn.to_out.0.weight"), nil)
 	x = b.Add(x, b.Mul(m.g1, o))
 
 	mb := b.Scope("mlp")
 	y = b.Mul(b.LayerNorm(x, D, nil, nil, eps), m.s2)
-	gate := mb.SiLU(mb.Linear(y, w.f32("img_mlp.gate_layer.weight"), nil))
-	proj := mb.Linear(y, w.f32("img_mlp.proj.weight"), nil)
-	y = mb.Linear(mb.Mul(gate, proj), w.f32("img_mlp.out.weight"), nil)
+	gate := mb.SiLU(mb.Linear(y, w.raw("img_mlp.gate_layer.weight"), nil))
+	proj := mb.Linear(y, w.raw("img_mlp.proj.weight"), nil)
+	y = mb.Linear(mb.Mul(gate, proj), w.raw("img_mlp.out.weight"), nil)
 	return b.Add(x, b.Mul(m.g2, y))
 }
 
 // final is norm_out (AdaLayerNormContinuous, scale only) → proj_out.
 func (d *dit) final(b *graph.Builder, x, temb *graph.Value) *graph.Value {
-	scale := b.Linear(b.SiLU(temb), d.w.f32("norm_out.linear.weight"), nil)
+	scale := b.Linear(b.SiLU(temb), d.w.raw("norm_out.linear.weight"), nil)
 	x = b.Mul(b.LayerNorm(x, d.cfg.dim(), nil, nil, d.cfg.Eps), b.Add(scale, b.Scalar(1)))
-	return b.Linear(x, d.w.f32("proj_out.weight"), nil)
+	return b.Linear(x, d.w.raw("proj_out.weight"), nil)
 }

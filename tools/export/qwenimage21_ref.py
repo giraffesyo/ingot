@@ -1,5 +1,11 @@
 """Reference activations for Qwen-Image-2.1 parity tests.
 
+  pipeline: an end-to-end text-to-image run (256x256, 4 steps, no CFG) with
+    every stage's hand-off saved — token ids, prompt embeddings, scheduler
+    sigmas, the latents after each step, the decoded image — plus tokenizer
+    cases. Stages load one at a time in float32 (text encoder ~35 GB, then
+    DiT + VAE ~30 GB), so it fits a 48 GB machine.
+
 Runs, on CPU in float32 with the real checkpoint weights:
   - a 1-layer QwenImage21Transformer2DModel (block 0 + every non-block
     weight: img_in, txt_in, timestep embedder, shared modulation, norm_out,
@@ -32,7 +38,8 @@ from diffusers.models.transformers.transformer_qwenimage21 import (
 )
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "..", "testdata", "qwenimage21")
-SNAP = snapshot_download("Qwen/Qwen-Image-2.1", local_files_only=True, allow_patterns=["transformer/*", "vae/*"])
+SNAP = snapshot_download("Qwen/Qwen-Image-2.1", local_files_only=True,
+                         allow_patterns=["*.json", "transformer/*", "vae/*", "text_encoder/*", "processor/*", "scheduler/*"])
 
 TXT = 24          # text tokens (last PAD of them masked out)
 PAD = 3
@@ -119,7 +126,60 @@ def vae():
     save("vae_dec", [("z", z.numpy())], [("image", img.numpy())], {"latent_hw": [LAT, LAT]})
 
 
+PROMPT = 'A red fox standing in fresh snow, holding a wooden sign that reads "INGOT"'
+TOKENIZER_CASES = [
+    "hello world", "Hello, World!", "  leading and   inner   spaces  ", "tabs\tand\nnewlines\n\n",
+    "numbers 1234567 and 3.14159", "unicode: café naïve 東京 🦊 ẞ", "don't won't I'm we'll they've",
+    "<|im_start|>user\nhi<|im_end|>", "trailing space ", "MiXeD CaSe_snake-kebab.dot/slash",
+    PROMPT,
+]
+
+
+def pipeline():
+    import gc
+    from diffusers import QwenImage21Pipeline
+
+    # Stage 1: text encoder (float32), then free it.
+    pipe = QwenImage21Pipeline.from_pretrained(SNAP, transformer=None, vae=None, torch_dtype=torch.float32)
+    tok = pipe.processor.tokenizer
+    templ = pipe.prompt_template_t2i.format(PROMPT)
+    ids = pipe.processor(text=[templ], return_tensors="pt").input_ids
+    with torch.no_grad():
+        embeds, emb_mask, img_pad = pipe.encode_prompt(PROMPT)
+    cases = [{"text": t, "ids": tok(t, add_special_tokens=False).input_ids} for t in TOKENIZER_CASES]
+    json.dump({"cases": cases, "template": templ, "drop_idx": pipe._drop_idx}, open(os.path.join(OUT, "tokenizer.json"), "w"), indent=1)
+    print(f"text: {ids.shape[1]} tokens, embeds {list(embeds.shape)}, mask {emb_mask}, drop_idx {pipe._drop_idx}")
+    del pipe
+    gc.collect()
+
+    # Stage 2: DiT + VAE (float32) over the saved embeddings and fixed noise.
+    pipe = QwenImage21Pipeline.from_pretrained(SNAP, text_encoder=None, torch_dtype=torch.float32)
+    lat = LAT * LAT
+    g = torch.Generator().manual_seed(7)
+    lat0 = torch.randn(1, lat, pipe.transformer.config.in_channels, generator=g)
+    steps = []
+    def cb(p, i, t, kw):
+        steps.append(kw["latents"].clone())
+        return {}
+    with torch.no_grad():
+        final = pipe(prompt_embeds=embeds, width=LAT * 16, height=LAT * 16, num_inference_steps=4, latents=lat0,
+                     output_type="latent", callback_on_step_end=cb, callback_on_step_end_tensor_inputs=["latents"],
+                     return_dict=False)[0]
+        z = pipe._unpack_latents(final, LAT * 16, LAT * 16, pipe.vae_scale_factor)
+        mean = torch.tensor(pipe.vae.config.latents_mean).view(1, -1, 1, 1, 1)
+        std = torch.tensor(pipe.vae.config.latents_std).view(1, -1, 1, 1, 1)
+        image = pipe.vae.decode(z * std + mean, return_dict=False)[0][:, :, 0]
+    f = lambda x: x.float().numpy()
+    save("pipeline",
+         [("input_ids", ids.numpy().astype(np.int64)), ("prompt_embeds", f(embeds[0])), ("latents0", f(lat0[0]))],
+         [("sigmas", f(pipe.scheduler.sigmas)), ("timesteps", f(pipe.scheduler.timesteps))]
+         + [(f"latents{i + 1}", f(x[0])) for i, x in enumerate(steps)] + [("image", f(image[0]))],
+         {"prompt": PROMPT, "steps": 4, "hw": [LAT * 16, LAT * 16]})
+
+
 if __name__ == "__main__":
+    import sys
     torch.set_num_threads(os.cpu_count())
-    dit()
-    vae()
+    which = sys.argv[1:] or ["dit", "vae", "pipeline"]
+    for name in which:
+        {"dit": dit, "vae": vae, "pipeline": pipeline}[name]()
