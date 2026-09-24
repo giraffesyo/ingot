@@ -118,7 +118,7 @@ func (o *poolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}()
 	}
 	n := owHi - owLo
-	par.For(N*C, max(1, unaryChunk/max(OH*OW*KH*KW, 1)), func(nc, wk int) {
+	par.For(N*C, 1, func(nc, wk int) {
 		xc := xf[nc*H*W : (nc+1)*H*W]
 		oc := of[nc*OH*OW : (nc+1)*OH*OW]
 		for oh := 0; oh < OH; oh++ {
