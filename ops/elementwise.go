@@ -451,6 +451,8 @@ func init() {
 	un("Neg", 6, func(x float32) float32 { return -x })
 	Register("", "Erf", 9, func(n NodeInfo) (Op, error) { return &unaryOp{n, vek.Erf}, nil })
 	un("Reciprocal", 6, func(x float32) float32 { return 1 / x })
+	un("Sin", 7, func(x float32) float32 { return float32(math.Sin(float64(x))) })
+	un("Cos", 7, func(x float32) float32 { return float32(math.Cos(float64(x))) })
 	un("Floor", 6, func(x float32) float32 { return float32(math.Floor(float64(x))) })
 	un("Ceil", 6, func(x float32) float32 { return float32(math.Ceil(float64(x))) })
 	un("Round", 11, func(x float32) float32 { return float32(math.RoundToEven(float64(x))) })

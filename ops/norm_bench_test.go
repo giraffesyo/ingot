@@ -40,3 +40,39 @@ func BenchmarkLayerNorm(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkGroupNorm times GroupNormalization at VAE decoder shapes (32
+// groups over NCHW activations).
+func BenchmarkGroupNorm(b *testing.B) {
+	for _, c := range []struct{ C, H, W int }{{128, 64, 64}, {256, 128, 128}, {512, 32, 32}} {
+		x := tensor.New(tensor.F32, 1, c.C, c.H, c.W)
+		for i := range x.F32() {
+			x.F32()[i] = float32(i%17)*0.1 - 0.8
+		}
+		sc := tensor.New(tensor.F32, c.C)
+		bs := tensor.New(tensor.F32, c.C)
+		for i := range sc.F32() {
+			sc.F32()[i] = 1 + float32(i%3)*0.1
+			bs.F32()[i] = float32(i%5) * 0.01
+		}
+		bld, _ := Lookup("", "GroupNormalization", 21)
+		op, err := bld(NodeInfo{Name: "gn", OpType: "GroupNormalization", Version: 21,
+			Attrs: Attrs{"num_groups": {Kind: KindInt, I: 32}, "epsilon": {Kind: KindFloat, F: 1e-6}}, NumIn: 3, NumOut: 1})
+		if err != nil {
+			b.Fatal(err)
+		}
+		ctx := &Ctx{Pool: tensor.NewPool()}
+		in := []*tensor.Tensor{x, sc, bs}
+		b.Run(fmt.Sprintf("shape=%dx%dx%d", c.C, c.H, c.W), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(8 * c.C * c.H * c.W))
+			for i := 0; i < b.N; i++ {
+				out, err := op.Run(ctx, in)
+				if err != nil {
+					b.Fatal(err)
+				}
+				ctx.Pool.Put(out[0])
+			}
+		})
+	}
+}

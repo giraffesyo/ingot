@@ -313,6 +313,86 @@ func (o *instanceNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, e
 	return ctx.Out(out), nil
 }
 
+// groupNormOp: GroupNormalization. X [N, C, ...] is split into num_groups
+// groups of C/G channels; each (n, g) block — contiguous in NCHW — is
+// normalised over its (C/G)·spatial elements. perChannel selects the
+// opset-21 semantics (scale/bias [C]); opset 18 has them per group ([G]).
+type groupNormOp struct {
+	n          NodeInfo
+	groups     int
+	eps        float32
+	perChannel bool
+}
+
+func (o *groupNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	if len(in) < 3 || in[0] == nil || in[1] == nil || in[2] == nil {
+		return nil, o.n.Errorf("need X, scale, bias")
+	}
+	x := in[0]
+	if x.DType() != tensor.F32 || in[1].DType() != tensor.F32 || in[2].DType() != tensor.F32 {
+		return nil, o.n.Errorf("want f32 inputs, got x=%s scale=%s bias=%s", x.DType(), in[1].DType(), in[2].DType())
+	}
+	xs := x.Shape()
+	if len(xs) < 2 {
+		return nil, o.n.Errorf("X rank %d < 2", len(xs))
+	}
+	N, C, G := xs[0], xs[1], o.groups
+	if G <= 0 || C%G != 0 {
+		return nil, o.n.Errorf("num_groups %d must divide channels %d", G, C)
+	}
+	P := 1
+	for _, d := range xs[2:] {
+		P *= d
+	}
+	sc, b := in[1].F32(), in[2].F32()
+	want := G
+	if o.perChannel {
+		want = C
+	}
+	if len(sc) != want || len(b) != want {
+		return nil, o.n.Errorf("scale/bias numel %d/%d, want %d", len(sc), len(b), want)
+	}
+	cpg := C / G
+	L := cpg * P
+	out := ctx.NewUninit(tensor.F32, xs...)
+	xf, of := x.F32(), out.F32()
+	par.For(N*G, 1, func(ng, _ int) {
+		g := ng % G
+		src, dst := xf[ng*L:(ng+1)*L], of[ng*L:(ng+1)*L]
+		mean := float32(chunkedDot(src, nil) / float64(L))
+		vek.AddScalar(dst, src, -mean)
+		inv := float32(1 / math.Sqrt(chunkedDot(dst, dst)/float64(L)+float64(o.eps)))
+		for c := range cpg {
+			s, t := sc[g], b[g]
+			if o.perChannel {
+				s, t = sc[g*cpg+c], b[g*cpg+c]
+			}
+			row := dst[c*P : (c+1)*P]
+			vek.MulScalar(row, row, inv*s)
+			vek.AddScalar(row, row, t)
+		}
+	})
+	return ctx.Out(out), nil
+}
+
+// normChunk bounds each f32 vek.Dot so the per-chunk sum stays accurate; the
+// chunk sums are carried in float64 (a VAE group can hold ~10⁶ elements).
+const normChunk = 4096
+
+// chunkedDot returns Σ a·b (or Σ a when b is nil) with float64 carry.
+func chunkedDot(a, b []float32) float64 {
+	var s float64
+	for i := 0; i < len(a); i += normChunk {
+		j := min(i+normChunk, len(a))
+		if b == nil {
+			s += float64(vek.Dot(a[i:j], onesVec(j-i)))
+		} else {
+			s += float64(vek.Dot(a[i:j], b[i:j]))
+		}
+	}
+	return s
+}
+
 func init() {
 	Register(ingotDomainNorm, "LayerNorm", 1, func(n NodeInfo) (Op, error) {
 		return &layerNormOp{n: n, axis: int(n.Attrs.Int("axis", -1)), eps: n.Attrs.Float("epsilon", 1e-5)}, nil
@@ -326,6 +406,17 @@ func init() {
 	Register("", "BatchNormalization", 9, func(n NodeInfo) (Op, error) {
 		return &batchNormOp{n: n, eps: n.Attrs.Float("epsilon", 1e-5)}, nil
 	})
+	groupNorm := func(perChannel bool) Builder {
+		return func(n NodeInfo) (Op, error) {
+			g := n.Attrs.Int("num_groups", 0)
+			if g <= 0 {
+				return nil, n.Errorf("num_groups attribute required (got %d)", g)
+			}
+			return &groupNormOp{n: n, groups: int(g), eps: n.Attrs.Float("epsilon", 1e-5), perChannel: perChannel}, nil
+		}
+	}
+	Register("", "GroupNormalization", 18, groupNorm(false))
+	Register("", "GroupNormalization", 21, groupNorm(true))
 	Register("", "InstanceNormalization", 6, func(n NodeInfo) (Op, error) {
 		return &instanceNormOp{n: n, eps: n.Attrs.Float("epsilon", 1e-5)}, nil
 	})
