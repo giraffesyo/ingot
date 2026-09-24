@@ -452,3 +452,40 @@ func (d *dit) final(b *graph.Builder, x, temb *graph.Value) *graph.Value {
 	x = b.Mul(b.LayerNorm(x, d.cfg.dim(), nil, nil, d.cfg.Eps), b.Add(scale, b.Scalar(1)))
 	return b.Linear(x, d.w.raw("proj_out.weight"), nil)
 }
+
+// BuildDiTModulation builds the per-step conditioning the target pass
+// broadcasts over tokens, for backends that run the blocks themselves:
+// input "t" [1]; outputs "s1", "g1", "s2", "g2" (1+scale and tanh(gate) for
+// the attention and MLP halves, shared by every block) and "fs" (1+scale of
+// norm_out), each [1, dim].
+func BuildDiTModulation(cfg DiTConfig, set *safetensors.Set) (g *graph.Graph, err error) {
+	defer catch(&err)
+	d := &dit{cfg: cfg, w: weights{set: set}}
+	b := graph.NewBuilder("qwenimage21_dit_modulation")
+	temb := d.timeEmbed(b.Scope("time"), b.Input("t", tensor.F32, 1))
+	m := d.modulation(b.Scope("modulation"), temb)
+	b.Output("s1", m.s1)
+	b.Output("g1", m.g1)
+	b.Output("s2", m.s2)
+	b.Output("g2", m.g2)
+	fs := b.Linear(b.SiLU(temb), d.w.raw("norm_out.linear.weight"), nil)
+	b.Output("fs", b.Add(fs, b.Scalar(1)))
+	return b.Build()
+}
+
+// BuildDiTTextIn builds the prefix's input stage for backends that run the
+// blocks themselves: inputs "txt" (and "cond" when the layout has condition
+// images); output "x" [Prefix, dim] — txt_in(txt) and img_in(cond) gathered
+// into joint prefix order.
+func BuildDiTTextIn(cfg DiTConfig, set *safetensors.Set, l *DiTLayout) (g *graph.Graph, err error) {
+	defer catch(&err)
+	d := &dit{cfg: cfg, w: weights{set: set}}
+	b := graph.NewBuilder("qwenimage21_dit_text_in")
+	h := d.txtIn(b.Scope("txt_in"), b.Input("txt", tensor.F32, l.TxtRows, cfg.ContextInDim))
+	if l.CondTok > 0 {
+		cond := b.Input("cond", tensor.F32, l.CondTok, cfg.InChannels)
+		h = b.Concat(0, h, b.Scope("img_in").Linear(cond, d.w.raw("img_in.weight"), nil))
+	}
+	b.Output("x", b.Op("Gather", graph.Attr("axis", 0), h, b.Const("prefix_src", tensor.FromI64(l.prefixSrc, l.Prefix))))
+	return b.Build()
+}

@@ -101,6 +101,19 @@ func (s *Set) Info(name string) (Info, bool) {
 	return f.Info(name)
 }
 
+// Locate returns the mapped (or read) contents of the shard holding name
+// and the byte offset of name's data within it — for handing a whole
+// mapping to a device (a GPU buffer over the file) and addressing tensors
+// by offset. mem is the same slice for every tensor of a shard.
+func (s *Set) Locate(name string) (mem []byte, off int, info Info, err error) {
+	f, ok := s.byName[name]
+	if !ok {
+		return nil, 0, Info{}, fmt.Errorf("safetensors: no tensor %q in checkpoint", name)
+	}
+	info = f.tensors[name]
+	return f.raw, len(f.raw) - len(f.data) + info.Begin, info, nil
+}
+
 // Tensor returns name in its stored dtype (see File.Tensor).
 func (s *Set) Tensor(name string) (*tensor.Tensor, error) {
 	f, ok := s.byName[name]

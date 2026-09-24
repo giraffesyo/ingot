@@ -25,6 +25,10 @@ type Options struct {
 	Steps  int // default 40
 	Seed   uint64
 
+	// Device runs the DiT on "cpu", "gpu" (Metal, darwin/arm64) or "auto"
+	// (the default: gpu when available).
+	Device string
+
 	// Latents, when set, replaces the seeded noise: packed [h·w, 64]
 	// (parity tests inject the reference pipeline's torch noise).
 	Latents *tensor.Tensor
@@ -180,15 +184,6 @@ func denoise(dir string, embeds *tensor.Tensor, lh, lw int, opt Options, logf fu
 	if err != nil {
 		return nil, err
 	}
-	pre, err := compile(BuildDiTPrefix(cfg, set, l, cfg.NumLayers, false))
-	if err != nil {
-		return nil, err
-	}
-	tgt, err := compile(BuildDiTTarget(cfg, set, l, cfg.NumLayers))
-	if err != nil {
-		return nil, err
-	}
-
 	x := opt.Latents
 	if x == nil {
 		x = gaussian(opt.Seed, l.Target, cfg.InChannels)
@@ -198,13 +193,29 @@ func denoise(dir string, embeds *tensor.Tensor, lh, lw int, opt Options, logf fu
 		}
 		x = x.Clone()
 	}
+	sched := NewSchedule(scfg, opt.Steps, l.Target)
+	gpu := opt.Device == "gpu" || ((opt.Device == "" || opt.Device == "auto") && metalAvailable())
+	if gpu {
+		return denoiseMetal(cfg, set, l, embeds, x, sched, opt.Steps, logf)
+	}
+	if opt.Device != "" && opt.Device != "auto" && opt.Device != "cpu" {
+		return nil, fmt.Errorf("qwenimage: unknown device %q (cpu, gpu, auto)", opt.Device)
+	}
+	pre, err := compile(BuildDiTPrefix(cfg, set, l, cfg.NumLayers, false))
+	if err != nil {
+		return nil, err
+	}
+	tgt, err := compile(BuildDiTTarget(cfg, set, l, cfg.NumLayers))
+	if err != nil {
+		return nil, err
+	}
+
 	t0 := time.Now()
 	kv, err := pre.Run(l.PrefixFeeds(embeds, nil))
 	if err != nil {
 		return nil, err
 	}
 	logf("  prefix      %8.2fs (%d tokens)", time.Since(t0).Seconds(), l.Prefix)
-	sched := NewSchedule(scfg, opt.Steps, l.Target)
 	for i := range opt.Steps {
 		t0 = time.Now()
 		out, err := tgt.Run(l.TargetFeeds(x, sched.ModelTime(i), kv))
@@ -214,6 +225,31 @@ func denoise(dir string, embeds *tensor.Tensor, lh, lw int, opt Options, logf fu
 		sched.Step(i, x.F32(), out["out"].F32())
 		tgt.Release(out)
 		logf("  step %2d/%d  %8.2fs", i+1, opt.Steps, time.Since(t0).Seconds())
+	}
+	return x, nil
+}
+
+// denoiseMetal runs the prefix pass and every step on the GPU.
+func denoiseMetal(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, embeds, x *tensor.Tensor, sched Schedule, steps int,
+	logf func(string, ...any)) (*tensor.Tensor, error) {
+	t0 := time.Now()
+	m, err := NewMetalDiT(cfg, set, l, cfg.NumLayers)
+	if err != nil {
+		return nil, err
+	}
+	defer m.Close()
+	if err := m.Prefix(embeds, nil); err != nil {
+		return nil, err
+	}
+	logf("  prefix      %8.2fs (%d tokens, gpu)", time.Since(t0).Seconds(), l.Prefix)
+	for i := range steps {
+		t0 = time.Now()
+		v, err := m.Step(x, sched.ModelTime(i))
+		if err != nil {
+			return nil, err
+		}
+		sched.Step(i, x.F32(), v.F32())
+		logf("  step %2d/%d  %8.2fs (gpu)", i+1, steps, time.Since(t0).Seconds())
 	}
 	return x, nil
 }

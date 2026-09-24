@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"unsafe"
 )
 
 func prepared(t *testing.T) *Device {
@@ -164,9 +165,16 @@ func TestGemmStrided(t *testing.T) {
 	D := H * dh
 	q, k, v, o, s := buf(t, d, Tq*D), buf(t, d, Tk*D), buf(t, d, Tk*D), buf(t, d, Tq*D), buf(t, d, Tq*Tk)
 	qf, kf, vf := fill(r, q), fill(r, k), fill(r, v)
+	// Split the keys in two as the DiT step does (cached prefix + target):
+	// S's column halves from two NT GEMMs, then P·V accumulated over halves.
+	const split = 40
 	if err := d.Run(func(e *Encoder) {
-		e.Gemm(Gemm{M: Tq, N: Tk, K: dh, A: q.At(4 * h * dh), LDA: D, B: k.At(4 * h * dh), LDB: D, C: s.At(0), TransB: true})
-		e.Gemm(Gemm{M: Tq, N: dh, K: Tk, A: s.At(0), B: v.At(4 * h * dh), LDB: D, C: o.At(4 * h * dh), LDC: D})
+		e.Gemm(Gemm{M: Tq, N: split, K: dh, A: q.At(4 * h * dh), LDA: D, B: k.At(4 * h * dh), LDB: D, C: s.At(0), LDC: Tk, TransB: true})
+		e.Gemm(Gemm{M: Tq, N: Tk - split, K: dh, A: q.At(4 * h * dh), LDA: D, B: k.At(4 * (split*D + h*dh)), LDB: D,
+			C: s.At(4 * split), LDC: Tk, TransB: true})
+		e.Gemm(Gemm{M: Tq, N: dh, K: split, A: s.At(0), LDA: Tk, B: v.At(4 * h * dh), LDB: D, C: o.At(4 * h * dh), LDC: D})
+		e.Gemm(Gemm{M: Tq, N: dh, K: Tk - split, A: s.At(4 * split), LDA: Tk, B: v.At(4 * (split*D + h*dh)), LDB: D,
+			C: o.At(4 * h * dh), LDC: D, Accumulate: true})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +247,59 @@ func TestWrapMappedFile(t *testing.T) {
 				want += float64(af[i*k+p]) * float64(w[j*k+p])
 			}
 			near(t, "C", cf[i*n+j], want, 1e-6)
+		}
+	}
+}
+
+func TestSoftmaxMaskedGather(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(6, 6))
+	const rows, cols = 9, 9
+	x, mask, g, idx := buf(t, d, rows*cols), buf(t, d, rows*cols), buf(t, d, 3*cols), buf(t, d, 3)
+	xf := fill(r, x)
+	orig := append([]float32(nil), xf...)
+	mf := f32s(mask.Bytes())
+	for i := range rows { // causal, and key 7 masked for everyone
+		for j := range cols {
+			if j > i || j == 7 {
+				mf[i*cols+j] = float32(math.Inf(-1))
+			}
+		}
+	}
+	iv := unsafe.Slice((*uint32)(unsafe.Pointer(&idx.Bytes()[0])), 3)
+	iv[0], iv[1], iv[2] = 8, 0, 4
+	if err := d.Run(func(e *Encoder) {
+		e.SoftmaxRowsMasked(x.At(0), mask.At(0), rows, cols, cols, cols, 0.5)
+		e.GatherRows(x.At(0), g.At(0), idx.At(0), 3, cols, cols, cols)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range rows {
+		m, sum := math.Inf(-1), 0.0
+		for j := 0; j <= i; j++ {
+			if j != 7 {
+				m = math.Max(m, 0.5*float64(orig[i*cols+j]))
+			}
+		}
+		for j := 0; j <= i; j++ {
+			if j != 7 {
+				sum += math.Exp(0.5*float64(orig[i*cols+j]) - m)
+			}
+		}
+		for j := range cols {
+			want := 0.0
+			if j <= i && j != 7 {
+				want = math.Exp(0.5*float64(orig[i*cols+j])-m) / sum
+			}
+			near(t, "masked softmax", xf[i*cols+j], want, 1e-5)
+		}
+	}
+	gf := f32s(g.Bytes())
+	for r, src := range []int{8, 0, 4} {
+		for c := range cols {
+			if gf[r*cols+c] != xf[src*cols+c] {
+				t.Fatalf("gather row %d col %d", r, c)
+			}
 		}
 	}
 }
