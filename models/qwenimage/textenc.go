@@ -110,22 +110,17 @@ func (te *TextEncoder) Build(T, drop, layers int) (g *graph.Graph, err error) {
 		}
 	}
 	maskV := b.Const("causal", mask)
-	cos, sin := tensor.New(tensor.F32, T, 1, dh), tensor.New(tensor.F32, T, 1, dh)
+	cos, sin := tensor.New(tensor.F32, T, dh/2), tensor.New(tensor.F32, T, dh/2)
 	for i := 0; i < dh/2; i++ {
 		inv := 1 / float32(math.Pow(c.RopeTheta, float64(float32(2*i)/float32(dh))))
 		for p := range T {
 			a := float64(float32(p) * inv)
-			cv, sv := float32(math.Cos(a)), float32(math.Sin(a))
-			cos.F32()[p*dh+i], cos.F32()[p*dh+i+dh/2] = cv, cv
-			sin.F32()[p*dh+i], sin.F32()[p*dh+i+dh/2] = sv, sv
+			cos.F32()[p*dh/2+i], sin.F32()[p*dh/2+i] = float32(math.Cos(a)), float32(math.Sin(a))
 		}
 	}
 	cosV, sinV := b.Const("rope_cos", cos), b.Const("rope_sin", sin)
-	rope := func(b *graph.Builder, x *graph.Value) *graph.Value { // x [T, heads, dh]
-		x1 := b.Slice(x, 2, 0, int64(dh/2))
-		x2 := b.Slice(x, 2, int64(dh/2), int64(dh))
-		rot := b.Concat(2, b.Op("Neg", nil, x2), x1)
-		return b.Add(b.Mul(x, cosV), b.Mul(rot, sinV))
+	rope := func(b *graph.Builder, x *graph.Value) *graph.Value { // x [T, heads, dh], rotate_half
+		return b.Op("ingot.RoPE", graph.Attr("layout", 1), x, cosV, sinV)
 	}
 	scale := float32(1 / math.Sqrt(float64(dh)))
 	rep := b.Ints(1, int64(T), int64(KV), int64(H/KV), int64(dh))

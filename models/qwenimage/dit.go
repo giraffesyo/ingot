@@ -396,23 +396,18 @@ func (d *dit) modulation(b *graph.Builder, temb *graph.Value) mods {
 	}
 }
 
-// ropeConsts adds the rotary tables as [T, 1, half, 1] constants, shaped to
-// broadcast over (tokens, heads, pairs, re/im).
+// ropeConsts adds the rotary tables [T, half] as constants.
 func ropeConsts(b *graph.Builder, cos, sin []float32, t, half int) (*graph.Value, *graph.Value) {
-	return b.Const("rope_cos", tensor.FromF32(cos, t, 1, half, 1)), b.Const("rope_sin", tensor.FromF32(sin, t, 1, half, 1))
+	return b.Const("rope_cos", tensor.FromF32(cos, t, half)), b.Const("rope_sin", tensor.FromF32(sin, t, half))
 }
 
 // rope applies apply_rotary_emb_qwen (use_real=False): consecutive channel
-// pairs of x [T, H·dh] rotate as complex numbers by the token's angles.
-// Returns [1, T, H, dh].
+// pairs of each head of x [T, H·dh] rotate as complex numbers by the
+// token's angles (fused ingot.RoPE). Returns [1, T, H, dh].
 func (d *dit) rope(b *graph.Builder, x, cos, sin *graph.Value, t int) *graph.Value {
 	H, dh := int64(d.cfg.NumAttentionHeads), int64(d.cfg.AttentionHeadDim)
-	x = b.Reshape(x, int64(t), H, dh/2, 2)
-	p := b.OpN("Split", graph.Attr("axis", 3, "num_outputs", 2), 2, x)
-	re, im := p[0], p[1]
-	outRe := b.Sub(b.Mul(re, cos), b.Mul(im, sin))
-	outIm := b.Add(b.Mul(re, sin), b.Mul(im, cos))
-	return b.Reshape(b.Concat(3, outRe, outIm), 1, int64(t), H, dh)
+	x = b.Op("ingot.RoPE", graph.Attr("layout", 0), b.Reshape(x, int64(t), H, dh), cos, sin)
+	return b.Reshape(x, 1, int64(t), H, dh)
 }
 
 // block is QwenImage21TransformerBlock over x [T, dim]. attend receives
