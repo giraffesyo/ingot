@@ -26,17 +26,17 @@ Notable: LLM decoder blocks (RMSNorm/SwiGLU/causal attention) and BERT/ViT
 encoders run today because they decompose to supported primitives — no fused
 Attention/RMSNorm op is required.
 
-## Supported ops (94 + control flow)
+## Supported ops (97 + control flow)
 
 Abs Add And ArgMax ArgMin AveragePool BatchNormalization Cast Ceil Clip Concat
-Constant ConstantOfShape Conv ConvTranspose CumSum DequantizeLinear Div Dropout
+Constant ConstantOfShape Conv ConvTranspose Cos CumSum DequantizeLinear Div Dropout
 DynamicQuantizeLinear Elu Equal Erf Exp Expand Flatten Floor Gather Gelu Gemm
-GlobalAveragePool GlobalMaxPool Greater GreaterOrEqual GridSample GRU HardSigmoid
+GlobalAveragePool GlobalMaxPool Greater GreaterOrEqual GridSample GroupNormalization GRU HardSigmoid
 HardSwish Identity InstanceNormalization LayerNormalization LeakyRelu Less
 LessOrEqual Log LogSoftmax LSTM MatMul MatMulInteger Max MaxPool Min Mish Mul Neg
 NonMaxSuppression Not Or Pad Pow QLinearConv QLinearMatMul QuantizeLinear Range
 Reciprocal ReduceL1 ReduceL2 ReduceMax ReduceMean ReduceMin ReduceProd ReduceSum
-ReduceSumSquare Relu Reshape Resize Round Shape Sigmoid Slice Softmax Softplus
+ReduceSumSquare Relu Reshape Resize Round Shape Sigmoid Sin Slice Softmax Softplus
 Split Sqrt Squeeze Sub Tanh Tile TopK Transpose Trilu Unsqueeze Where Xor
 
 Plus **If** and **Loop** as executor-level control flow (compiled
@@ -79,6 +79,10 @@ hand-curated list here had drifted badly.
 - **CumSum: supported** (2026-09-01; f32/int64, exclusive/reverse — PARSeq
   needed it). Still open: DepthToSpace / SpaceToDepth, Mod, Sign, Round modes.
 - **Resize cubic mode** (nearest and linear are implemented).
+- **Sin / Cos / GroupNormalization: supported** (2026-09-23) — for diffusion
+  models (timestep embeddings, VAE); GroupNormalization covers opset 18
+  (per-group scale/bias) and opset 21 (per-channel). Oracle-tested; no ORT
+  zoo probe yet. See DESIGN-large-models.md for the remaining large-model gaps.
 
 ### Types & shape
 - **f16 / bf16 / f64 are converted to f32 at load; there is no native low-precision
