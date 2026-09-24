@@ -10,26 +10,38 @@ import (
 
 // BenchmarkSDPA times the fused attention op at representative head
 // geometries: PARSeq's encoder (B=1, few heads, T=128), a ViT-B-ish shape,
-// and a causal decoder block (masked, flash path).
+// a causal decoder block (masked, flash path), and Qwen-Image-2.1's long
+// unmasked shapes: the DiT cached step (4096 target queries over [text
+// prefix, target] or [text + reference image, target] keys) and the VAE
+// mid-block's single 1152-wide head.
 func BenchmarkSDPA(b *testing.B) {
 	for _, c := range []struct {
-		B, H, T, dh int
-		causal      bool
+		B, H, T, Tk, dh int
+		causal          bool
 	}{
-		{1, 6, 128, 64, false},
-		{8, 6, 128, 64, false},
-		{1, 12, 197, 64, false},
-		{1, 12, 1024, 64, true},
+		{1, 6, 128, 0, 64, false},
+		{8, 6, 128, 0, 64, false},
+		{1, 12, 197, 0, 64, false},
+		{1, 12, 1024, 0, 64, true},
+		{1, 32, 4096, 4352, 128, false},
+		{1, 32, 4096, 8448, 128, false},
+		{1, 1, 4096, 0, 1152, false},
 	} {
+		if c.Tk == 0 {
+			c.Tk = c.T
+		}
 		name := fmt.Sprintf("B=%d/H=%d/T=%d/dh=%d", c.B, c.H, c.T, c.dh)
+		if c.Tk != c.T {
+			name = fmt.Sprintf("B=%d/H=%d/T=%d/Tk=%d/dh=%d", c.B, c.H, c.T, c.Tk, c.dh)
+		}
 		if c.causal {
 			name += "/causal"
 		}
 		b.Run(name, func(b *testing.B) {
 			rng := rand.New(rand.NewPCG(1, 2))
 			q := tensor.New(tensor.F32, c.B, c.H, c.T, c.dh)
-			k := tensor.New(tensor.F32, c.B, c.H, c.dh, c.T)
-			v := tensor.New(tensor.F32, c.B, c.H, c.T, c.dh)
+			k := tensor.New(tensor.F32, c.B, c.H, c.dh, c.Tk)
+			v := tensor.New(tensor.F32, c.B, c.H, c.Tk, c.dh)
 			for _, t := range []*tensor.Tensor{q, k, v} {
 				for i := range t.F32() {
 					t.F32()[i] = rng.Float32() - 0.5
@@ -55,7 +67,7 @@ func BenchmarkSDPA(b *testing.B) {
 				b.Fatal(err)
 			}
 			ctx := &Ctx{Pool: tensor.NewPool()}
-			flops := 4 * float64(c.B*c.H*c.T*c.T*c.dh)
+			flops := 4 * float64(c.B*c.H*c.T*c.Tk*c.dh)
 			b.SetBytes(0)
 			b.ReportAllocs()
 			b.ResetTimer()

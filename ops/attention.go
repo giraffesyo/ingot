@@ -113,6 +113,20 @@ type sdpaOp struct {
 // sdpaBk is the flash path's key-block width.
 const sdpaBk = 128
 
+// sdpaFlashTile is the rows×Tk score-tile size (elements, 4 MB) from which
+// unmasked attention streams key blocks instead of materialising the tile.
+var sdpaFlashTile = 1 << 20 // var: tests lower it to reach the path at small shapes
+
+// Unmasked flash geometry: with no mask-block grid to follow, wider key
+// blocks and shorter row tiles win — fewer online-softmax rescales per row,
+// and a rows×Bk score tile (256 KB) that stays L2-resident. Swept on the
+// M5 Pro (18 workers) over Bk ∈ {128,256,512} × rows ∈ {128..2048} at
+// Qwen-Image-2.1's DiT shapes: 512×128 was best at both Tk=4352 and 8448.
+const (
+	sdpaBkWide    = 512
+	sdpaFlashRows = 128
+)
+
 const (
 	blkClean = iota
 	blkMixed
@@ -247,16 +261,27 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if nRow == 1 && B*H < workers && T*Tk*dh >= 1<<22 {
 		gemmT = gemm.SgemmT
 	}
-	// Flash path: masked attention at long Tk streams key blocks with an
-	// online softmax — fully-masked blocks (the causal upper triangle,
-	// ~half the work) are skipped outright, and the working set per tile
-	// drops from rows×Tk to rows×Bk.
-	flash := mask != nil && Tk >= 4*sdpaBk // fewer blocks: skip savings < online-softmax overhead (T=256 measured flat-to-worse)
+	// Flash path: streams key blocks with an online softmax, so the working
+	// set per tile drops from rows×Tk to rows×Bk. Masked attention takes it
+	// at long Tk — fully-masked blocks (the causal upper triangle, ~half the
+	// work) are skipped outright; fewer blocks: skip savings < online-softmax
+	// overhead (T=256 measured flat-to-worse). Unmasked attention takes it
+	// once the rows×Tk score tile outgrows sdpaFlashTile, where the one-shot
+	// scratch (workers × tile) would run to hundreds of MB.
+	flash := Tk >= 4*sdpaBk && (mask != nil || rows*Tk >= sdpaFlashTile)
 	var st []uint8
+	bk := sdpaBk
 	scratchPer := rows * Tk
 	if flash {
-		st = o.blockStates(mask, T, Tk, rows)
-		scratchPer = rows*sdpaBk + rows*dh + 2*rows
+		if mask != nil {
+			st = o.blockStates(mask, T, Tk, rows)
+		} else {
+			bk = sdpaBkWide
+			rows = min(rows, sdpaFlashRows)
+			nRow = (T + rows - 1) / rows
+			gemmT = gemm.SgemmTSerial // B·H·nRow tiles now fill the pool
+		}
+		scratchPer = rows*bk + rows*dh + 2*rows
 	}
 	sT := ctx.NewUninit(tensor.F32, workers, scratchPer)
 	sAll := sT.F32()
@@ -286,24 +311,30 @@ func (o *sdpaOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 		if flash {
 			buf := sAll[wk*scratchPer:]
-			sblk := buf[:rows*sdpaBk]
-			acc := buf[rows*sdpaBk : rows*sdpaBk+rows*dh]
-			mrow := buf[rows*sdpaBk+rows*dh : rows*sdpaBk+rows*dh+rows]
-			lrow := buf[rows*sdpaBk+rows*dh+rows:]
+			sblk := buf[:rows*bk]
+			acc := buf[rows*bk : rows*bk+rows*dh]
+			mrow := buf[rows*bk+rows*dh : rows*bk+rows*dh+rows]
+			lrow := buf[rows*bk+rows*dh+rows:]
 			clear(acc[:tc*dh])
-			nKb := (Tk + sdpaBk - 1) / sdpaBk
-			stRow := st[rc*nKb:]
+			nKb := (Tk + bk - 1) / bk
+			var stRow []uint8
+			if st != nil {
+				stRow = st[rc*nKb:]
+			}
 			for i := 0; i < tc; i++ {
 				mrow[i] = float32(math.Inf(-1))
 				lrow[i] = 0
 			}
 			for kb := 0; kb < nKb; kb++ {
-				state := stRow[kb]
+				state := uint8(blkClean)
+				if stRow != nil {
+					state = stRow[kb]
+				}
 				if state == blkMasked {
 					continue
 				}
-				k0 := kb * sdpaBk
-				kc := min(sdpaBk, Tk-k0)
+				k0 := kb * bk
+				kc := min(bk, Tk-k0)
 				var bkb []float32
 				switch o.bLay {
 				case 1:
