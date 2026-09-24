@@ -327,19 +327,21 @@ func (m *MetalDiT) blockAttn(e *metal.Encoder, li int, w *metalWork, fast bool, 
 	cfg, lw := m.cfg, m.lw[li]
 	D, H, dh, T, eps := cfg.dim(), cfg.NumAttentionHeads, cfg.AttentionHeadDim, w.T, cfg.Eps
 	hid := D * cfg.MLPRatio
-	e.LayerNormMod(w.x.At(0), w.y.At(0), m.s1.At(0), T, D, D, D, eps)
-	if fast {
-		e.CastBF16(w.y.At(0), w.y16.At(0), T, D, D, D)
+	if fast { // producers write the bf16 GEMM operands directly
+		e.LayerNormModBF16(w.x.At(0), w.y16.At(0), m.s1.At(0), T, D, D, D, eps)
+	} else {
+		e.LayerNormMod(w.x.At(0), w.y.At(0), m.s1.At(0), T, D, D, D, eps)
 	}
 	m.linearFrom(e, w, fast, w.y, D, lw.q, w.q, D)
 	m.linearFrom(e, w, fast, w.y, D, lw.k, w.k, D)
 	m.linearFrom(e, w, fast, w.y, D, lw.v, w.v, D)
-	e.RMSNormRoPE(w.q.At(0), lw.normQ.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps)
-	e.RMSNormRoPE(w.k.At(0), lw.normK.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps)
 	if fast {
-		e.CastBF16(w.q.At(0), w.q16.At(0), T, D, D, D)
-		e.CastBF16(w.k.At(0), w.k16.At(0), T, D, D, D)
+		e.RMSNormRoPEBF16(w.q.At(0), w.q16.At(0), lw.normQ.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps, metal.RopePairs)
+		e.RMSNormRoPEBF16(w.k.At(0), w.k16.At(0), lw.normK.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps, metal.RopePairs)
 		e.CastBF16(w.v.At(0), w.v16.At(0), T, D, D, D)
+	} else {
+		e.RMSNormRoPE(w.q.At(0), lw.normQ.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps)
+		e.RMSNormRoPE(w.k.At(0), lw.normK.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps)
 	}
 	if afterKV != nil {
 		afterKV()
@@ -348,14 +350,20 @@ func (m *MetalDiT) blockAttn(e *metal.Encoder, li int, w *metalWork, fast bool, 
 	m.linear(e, w, fast, w.o, D, lw.o, w.y, D)
 	e.GatedAdd(w.x.At(0), m.g1.At(0), w.y.At(0), T, D, D, D)
 
-	e.LayerNormMod(w.x.At(0), w.y.At(0), m.s2.At(0), T, D, D, D, eps)
 	if fast {
-		e.CastBF16(w.y.At(0), w.y16.At(0), T, D, D, D)
+		e.LayerNormModBF16(w.x.At(0), w.y16.At(0), m.s2.At(0), T, D, D, D, eps)
+	} else {
+		e.LayerNormMod(w.x.At(0), w.y.At(0), m.s2.At(0), T, D, D, D, eps)
 	}
 	m.linearFrom(e, w, fast, w.y, D, lw.gate, w.g, hid)
 	m.linearFrom(e, w, fast, w.y, D, lw.proj, w.p, hid)
-	e.SiLUMul(w.g.At(0), w.p.At(0), w.g.At(0), T, hid, hid, hid, hid)
-	m.linear(e, w, fast, w.g, hid, lw.out, w.y, D)
+	if fast {
+		e.SiLUMulBF16(w.g.At(0), w.p.At(0), w.y16.At(0), T, hid, hid, hid, hid)
+		e.Gemm(metal.Gemm{M: T, N: D, K: hid, A: w.y16.At(0), B: lw.out, C: w.y.At(0), TransB: true, BF16: true, ABF16: true})
+	} else {
+		e.SiLUMul(w.g.At(0), w.p.At(0), w.g.At(0), T, hid, hid, hid, hid)
+		m.linear(e, w, fast, w.g, hid, lw.out, w.y, D)
+	}
 	e.GatedAdd(w.x.At(0), m.g2.At(0), w.y.At(0), T, D, D, D)
 }
 

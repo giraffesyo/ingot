@@ -414,3 +414,52 @@ func TestRMSNormRowsAndRopeHalf(t *testing.T) {
 		}
 	}
 }
+
+// TestBF16OutputVariants: each fused bf16-output kernel equals its f32 twin
+// rounded to bf16.
+func TestBF16OutputVariants(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(11, 11))
+	const rows, cols = 4, 1000
+	bf := func(b *Buffer, i int) float32 {
+		raw := b.Bytes()
+		return math.Float32frombits(uint32(raw[2*i])<<16 | uint32(raw[2*i+1])<<24)
+	}
+	close := func(what string, got, want float32) {
+		t.Helper()
+		if math.Abs(float64(got-want)) > math.Abs(float64(want))/128+1e-30 {
+			t.Fatalf("%s: bf16 %g vs f32 %g", what, got, want)
+		}
+	}
+	x, s, y := buf(t, d, rows*cols), buf(t, d, cols), buf(t, d, rows*cols)
+	a, b, o := buf(t, d, rows*cols), buf(t, d, rows*cols), buf(t, d, rows*cols)
+	fill(r, x)
+	fill(r, s)
+	fill(r, a)
+	fill(r, b)
+	const T, heads, dh = 3, 2, 128
+	q, w, cs, sn, q2 := buf(t, d, T*heads*dh), buf(t, d, dh), buf(t, d, T*dh/2), buf(t, d, T*dh/2), buf(t, d, T*heads*dh)
+	fill(r, q)
+	fill(r, w)
+	fill(r, cs)
+	fill(r, sn)
+	copy(f32s(q2.Bytes()), f32s(q.Bytes()))
+	y16, o16, q16 := buf(t, d, rows*cols), buf(t, d, rows*cols), buf(t, d, T*heads*dh)
+	if err := d.Run(func(e *Encoder) {
+		e.LayerNormMod(x.At(0), y.At(0), s.At(0), rows, cols, cols, cols, 1e-6)
+		e.LayerNormModBF16(x.At(0), y16.At(0), s.At(0), rows, cols, cols, cols, 1e-6)
+		e.SiLUMul(a.At(0), b.At(0), o.At(0), rows, cols, cols, cols, cols)
+		e.SiLUMulBF16(a.At(0), b.At(0), o16.At(0), rows, cols, cols, cols, cols)
+		e.RMSNormRoPEBF16(q.At(0), q16.At(0), w.At(0), cs.At(0), sn.At(0), T, heads, dh, heads*dh, 1e-6, RopePairs)
+		e.RMSNormRoPE(q2.At(0), w.At(0), cs.At(0), sn.At(0), T, heads, dh, heads*dh, 1e-6)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range rows * cols {
+		close("layernorm", bf(y16, i), f32s(y.Bytes())[i])
+		close("silu_mul", bf(o16, i), f32s(o.Bytes())[i])
+	}
+	for i := range T * heads * dh {
+		close("rmsnorm_rope", bf(q16, i), f32s(q2.Bytes())[i])
+	}
+}
