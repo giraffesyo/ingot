@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"sync"
+
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
@@ -17,6 +19,60 @@ type lstmOp struct {
 	n      NodeInfo
 	hidden int
 	dirs   []bool // per direction: reversed?
+	rp     recurPack
+}
+
+// recurPack caches the recurrent weights R [D][rows×H] packed as GEMM A
+// panels, per direction: the per-step product h·Rᵀ runs as (R·hᵀ)ᵀ against
+// them instead of re-packing R every timestep (which dominated small RNNs).
+type recurPack struct {
+	mu  sync.Mutex
+	src *float32
+	n   int
+	p   []*gemm.PackedA
+}
+
+// get returns R's per-direction packs, or nil when a direction does not
+// fit the packed small-M path (then the caller packs per step).
+func (rp *recurPack) get(rf []float32, D, rows, H int) []*gemm.PackedA {
+	if !gemm.PackFits(rows, H) {
+		return nil
+	}
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	if rp.src == &rf[0] && rp.n == len(rf) {
+		return rp.p
+	}
+	p := make([]*gemm.PackedA, D)
+	for d := range p {
+		p[d] = gemm.PackA(false, rows, H, rf[d*rows*H:], H)
+	}
+	rp.p, rp.src, rp.n = p, &rf[0], len(rf)
+	return p
+}
+
+// recurStep writes out[b·rows + j] = beta·out + Σ_k h[b,k]·R[j,k] for the B
+// rows of h, as R·hᵀ on pk (R packed) with scratch hT [H×B] and tmp
+// [rows×B]. (Per-(b, j) SIMD dots against R measured 1.5x slower at B=2.)
+func recurStep(pk *gemm.PackedA, h []float32, B, H, rows int, beta float32, out, hT, tmp []float32) {
+	for b := 0; b < B; b++ {
+		for k := 0; k < H; k++ {
+			hT[k*B+b] = h[b*H+k]
+		}
+	}
+	gemm.SgemmPackedA(pk, B, hT, B, 0, tmp, B, false)
+	for b := 0; b < B; b++ {
+		o := out[b*rows : (b+1)*rows]
+		if beta == 0 {
+			for j := range o {
+				o[j] = tmp[j*B+b]
+			}
+		} else {
+			for j := range o {
+				o[j] += tmp[j*B+b]
+			}
+		}
+	}
 }
 
 func rnnDirections(n NodeInfo) ([]bool, error) {
@@ -86,12 +142,15 @@ func (o *lstmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	xf, wf, rf := x.F32(), w.F32(), r.F32()
 	yf, yhf, ycf := y.F32(), yh.F32(), yc.F32()
 
-	scr := ctx.NewUninit(tensor.F32, T*B*4*H+B*4*H+2*B*H)
+	scr := ctx.NewUninit(tensor.F32, T*B*4*H+B*4*H+2*B*H+B*H+4*H*B)
 	sf := scr.F32()
 	G := sf[:T*B*4*H]
 	gates := sf[T*B*4*H : T*B*4*H+B*4*H]
 	hState := sf[T*B*4*H+B*4*H : T*B*4*H+B*4*H+B*H]
-	cState := sf[T*B*4*H+B*4*H+B*H:]
+	cState := sf[T*B*4*H+B*4*H+B*H : T*B*4*H+B*4*H+2*B*H]
+	hT := sf[T*B*4*H+B*4*H+2*B*H : T*B*4*H+B*4*H+3*B*H]
+	tmp := sf[T*B*4*H+B*4*H+3*B*H:]
+	pks := o.rp.get(rf, D, 4*H, H)
 
 	for d, rev := range o.dirs {
 		wd := wf[d*4*H*I:]
@@ -122,7 +181,11 @@ func (o *lstmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 				t = T - 1 - step
 			}
 			copy(gates, G[t*B*4*H:(t+1)*B*4*H])
-			gemm.SgemmT(false, true, B, 4*H, H, 1, hState, H, rd, H, 1, gates, 4*H)
+			if pks != nil {
+				recurStep(pks[d], hState, B, H, 4*H, 1, gates, hT, tmp)
+			} else {
+				gemm.SgemmT(false, true, B, 4*H, H, 1, hState, H, rd, H, 1, gates, 4*H)
+			}
 			for b := 0; b < B; b++ {
 				g := gates[b*4*H:]
 				if bsum != nil {
@@ -167,6 +230,7 @@ type gruOp struct {
 	hidden int
 	dirs   []bool
 	lbr    bool
+	rp     recurPack
 }
 
 func (o *gruOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
@@ -204,12 +268,15 @@ func (o *gruOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	xf, wf, rf := x.F32(), w.F32(), r.F32()
 	yf, yhf := y.F32(), yh.F32()
 
-	scr := ctx.NewUninit(tensor.F32, T*B*3*H+2*B*3*H+B*H)
+	scr := ctx.NewUninit(tensor.F32, T*B*3*H+2*B*3*H+2*B*H+3*H*B)
 	sf := scr.F32()
 	G := sf[:T*B*3*H]
 	gates := sf[T*B*3*H : T*B*3*H+B*3*H]
 	rg := sf[T*B*3*H+B*3*H : T*B*3*H+2*B*3*H]
-	hState := sf[T*B*3*H+2*B*3*H:]
+	hState := sf[T*B*3*H+2*B*3*H : T*B*3*H+2*B*3*H+B*H]
+	hT := sf[T*B*3*H+2*B*3*H+B*H : T*B*3*H+2*B*3*H+2*B*H]
+	tmp := sf[T*B*3*H+2*B*3*H+2*B*H:]
+	pks := o.rp.get(rf, D, 3*H, H)
 
 	for d, rev := range o.dirs {
 		wd := wf[d*3*H*I:]
@@ -232,7 +299,11 @@ func (o *gruOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			}
 			copy(gates, G[t*B*3*H:(t+1)*B*3*H])
 			// rg = h · Rᵀ (all three recurrent projections).
-			gemm.SgemmT(false, true, B, 3*H, H, 1, hState, H, rd, H, 0, rg, 3*H)
+			if pks != nil {
+				recurStep(pks[d], hState, B, H, 3*H, 0, rg, hT, tmp)
+			} else {
+				gemm.SgemmT(false, true, B, 3*H, H, 1, hState, H, rd, H, 0, rg, 3*H)
+			}
 			for b := 0; b < B; b++ {
 				g := gates[b*3*H:]
 				rr := rg[b*3*H:]
