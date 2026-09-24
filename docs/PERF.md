@@ -2369,3 +2369,48 @@ PARSeq scales worse than batch 1. Two ideas, neither landed:
 This is the largest lever left for transformers: MatMul is 66% of PARSeq
 at batch 1 and 62% at batch 8.
 
+
+## ORT 1.29 comparison, both machines; small-op fixed costs (2026-09-24)
+
+Ratio = ingot / ONNX Runtime 1.29, CPU, same host, defaults. ORT on the
+Zen 5 pod (32-CPU cgroup) must be given a thread count — its default reads
+192 host CPUs and fails to pin — so it is best-of 8 and 16 threads
+(zootime.py / orttime.py N). M5 Pro numbers were taken during a ~1.5x
+slow phase of the machine (both runtimes back to back).
+
+| model | M5 Pro | Zen 5 |
+|---|---|---|
+| OCR det_960 / rec_b8_320 | 0.48 / 0.54 | 0.54 / 0.85 |
+| bertish | 0.86 | 0.74 |
+| vit | 1.07 | 0.90 |
+| parseq_nar | 0.96 | 0.90 |
+| gptish / gptish_1k | 1.31 / 0.92 | 1.24 / 1.36 |
+| mobilenet_v2 | 0.85 | 1.24 |
+| efficientnet_b0 | 0.76 | 1.25 |
+| tiny_conv | ~1.2 | 0.83 |
+| segnet | 1.25 | 1.84 |
+| deconvprobe | 0.94 | 1.79 |
+| opprobe | 1.5 | 2.0 |
+| postprobe | 0.97 | 1.18 |
+| rnnprobe | 1.13 | 2.18 |
+| **resnetish** | **1.5-1.8** | **5.1** |
+
+Fixes this round (all were fixed costs, not FLOPs): im2col task floor and
+per-column spans; Winograd only at >= 8x8 outputs; LSTM/GRU pack R once
+(was re-packed every timestep); ConvTranspose, Resize, instance/group
+norm stop fanning tiny per-plane work out to the pool; TopK selects
+instead of sorting for k <= 32.
+
+NEGATIVE: the same grain change on MaxPool made resnetish slower on BOTH
+machines (Zen 5 243 -> 330 µs, M5 227 vs 162-197): running the pool op
+inline lets workers park, and the next conv pays the wake-up — the
+"region churn" effect from the pool-width entry. Reverted. A change that
+removes a small op's fan-out must be measured on the whole model, not
+the op.
+
+OPEN: resnetish on x86 (5.1x). Its 16-64-channel 3x3 convs over 4-16²
+planes are ~50 µs each at 12 workers on Zen 5 vs ~10 µs on the M5; ORT
+runs them in NCHWc direct kernels. Candidates: an NCHWc direct 3x3
+kernel for dense convs (the blocked layout today covers only depthwise
+and pointwise), or a whole-model width cap for models whose regions are
+all tiny.
