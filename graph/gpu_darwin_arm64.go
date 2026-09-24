@@ -72,7 +72,7 @@ func CompileGPU(g *Graph, opts ...GPUOption) (*GPUSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, prep := range []func() error{dev.Prepare, dev.PrepareConv, dev.PrepareEW, dev.PrepareCNN} {
+	for _, prep := range []func() error{dev.Prepare, dev.PrepareConv, dev.PrepareEW, dev.PrepareCNN, dev.PrepareIGEMM} {
 		if err := prep(); err != nil {
 			return nil, err
 		}
