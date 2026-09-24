@@ -257,7 +257,7 @@ func (o *batchNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	sc, b, mean, vr := in[1].F32(), in[2].F32(), in[3].F32(), in[4].F32()
 	out := ctx.New(tensor.F32, xs...)
 	xf, of := x.F32(), out.F32()
-	par.For(N*C, 1, func(nc, _ int) {
+	par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
 		c := nc % C
 		a := sc[c] / float32(math.Sqrt(float64(vr[c])+float64(o.eps)))
 		bb := b[c] - mean[c]*a
@@ -290,7 +290,7 @@ func (o *instanceNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, e
 	sc, b := in[1].F32(), in[2].F32()
 	out := ctx.New(tensor.F32, xs...)
 	xf, of := x.F32(), out.F32()
-	par.For(N*C, 1, func(nc, _ int) {
+	par.For(N*C, max(1, unaryChunk/max(P, 1)), func(nc, _ int) {
 		c := nc % C
 		src := xf[nc*P : (nc+1)*P]
 		dst := of[nc*P : (nc+1)*P]
@@ -356,7 +356,7 @@ func (o *groupNormOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, erro
 	L := cpg * P
 	out := ctx.NewUninit(tensor.F32, xs...)
 	xf, of := x.F32(), out.F32()
-	par.For(N*G, 1, func(ng, _ int) {
+	par.For(N*G, max(1, unaryChunk/max(L, 1)), func(ng, _ int) {
 		g := ng % G
 		src, dst := xf[ng*L:(ng+1)*L], of[ng*L:(ng+1)*L]
 		mean := float32(chunkedDot(src, nil) / float64(L))
