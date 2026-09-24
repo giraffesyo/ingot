@@ -19,6 +19,7 @@ type VAEConfig struct {
 	AttnScales         []float64 `json:"attn_scales"`
 	TemperalDownsample []bool    `json:"temperal_downsample"`
 	IsResidual         bool      `json:"is_residual"`
+	InChannels         int       `json:"in_channels"`
 	OutChannels        int       `json:"out_channels"`
 	PatchSize          *int      `json:"patch_size"`
 	ScaleFactorSpatial int       `json:"scale_factor_spatial"`
@@ -183,4 +184,124 @@ func UnpackLatents(cfg VAEConfig, x *tensor.Tensor, h, w int) *tensor.Tensor {
 		}
 	}
 	return z
+}
+
+// BuildVAEEncoder builds the image encoder for an H×W image: input "x"
+// [1, in_channels, H, W] in [-1, 1]; output "z" [1, z_dim, H/16, W/16], the
+// latent distribution's mode (its mean — the pipeline encodes with
+// sample_mode="argmax"), not yet normalised. One frame: the temporal
+// downsampling reduces to its first-chunk form (time_conv skipped; the
+// shortcut averages a zero frame in).
+func BuildVAEEncoder(cfg VAEConfig, set *safetensors.Set, H, W int) (g *graph.Graph, err error) {
+	if !cfg.IsResidual || cfg.PatchSize != nil || len(cfg.AttnScales) != 0 {
+		return nil, fmt.Errorf("qwenimage: VAE config variant not implemented")
+	}
+	f := 1 << (len(cfg.DimMult) - 1)
+	if H%f != 0 || W%f != 0 {
+		return nil, fmt.Errorf("qwenimage: VAE encoder input %dx%d not a multiple of %d", W, H, f)
+	}
+	defer catch(&err)
+	b := graph.NewBuilder("qwenimage21_vae_encoder")
+	wt := weights{set: set}
+	e := wt.scope("encoder")
+	dims := []int{cfg.BaseDim}
+	for _, m := range cfg.DimMult {
+		dims = append(dims, cfg.BaseDim*m)
+	}
+	x := b.Input("x", tensor.F32, 1, cfg.InChannels, H, W)
+	x = conv(b.Scope("conv_in"), e.scope("conv_in"), x, 1)
+	h, w := H, W
+	last := len(cfg.DimMult) - 1
+	for i := range last + 1 {
+		in, out := dims[i], dims[i+1]
+		down := i != last
+		ft := 1
+		if down && cfg.TemperalDownsample[i] {
+			ft = 2
+		}
+		bi, wi := b.Scope(fmt.Sprintf("down%d", i)), e.scope(fmt.Sprintf("down_blocks.%d", i))
+		xCopy := x
+		cur := in
+		for j := range cfg.NumResBlocks {
+			x = resBlock(bi.Scope(fmt.Sprintf("res%d", j)), wi.scope(fmt.Sprintf("resnets.%d", j)), x, cur, out)
+			cur = out
+		}
+		fs := 1
+		if down {
+			ds := bi.Scope("downsample")
+			rw := wi.scope("downsampler.resample.1")
+			// ZeroPad2d((0, 1, 0, 1)) then a stride-2 3×3 conv.
+			x = ds.Op("Conv", graph.Attr("strides", []int{2, 2}, "pads", []int{0, 0, 1, 1}),
+				x, ds.Const("weight", rw.f32("weight")), ds.Const("bias", rw.f32("bias")))
+			fs = 2
+		}
+		x = bi.Add(x, avgDown(bi.Scope("shortcut"), xCopy, in, out, ft, fs, h, w))
+		if down {
+			h, w = h/2, w/2
+		}
+	}
+	mid := e.scope("mid_block")
+	C := dims[len(dims)-1]
+	x = resBlock(b.Scope("mid.res0"), mid.scope("resnets.0"), x, C, C)
+	x = attnBlock(b.Scope("mid.attn"), mid.scope("attentions.0"), x, C, h, w)
+	x = resBlock(b.Scope("mid.res1"), mid.scope("resnets.1"), x, C, C)
+	x = rmsNormC(b.Scope("norm_out"), e.f32("norm_out.gamma"), x, C)
+	x = conv(b.Scope("conv_out"), e.scope("conv_out"), b.SiLU(x), 1)
+	x = b.Scope("quant_conv").Conv2d(x, wt.f32("quant_conv.weight"), wt.f32("quant_conv.bias"), 1, 0)
+	b.Output("z", b.Slice(x, 1, 0, int64(cfg.ZDim)))
+	return b.Build()
+}
+
+// avgDown is QwenImage21AvgDown3D for one frame: space-to-depth by fs, a
+// zero frame prepended in time when ft = 2, then each output channel the
+// mean of its group of in·ft·fs²/out consecutive channels.
+func avgDown(b *graph.Builder, x *graph.Value, in, out, ft, fs, h, w int) *graph.Value {
+	factor := ft * fs * fs
+	if factor == 1 && in == out {
+		return x
+	}
+	ho, wo := h/fs, w/fs
+	s2d := x
+	if fs > 1 {
+		s2d = b.Reshape(x, 1, int64(in), int64(ho), int64(fs), int64(wo), int64(fs))
+		s2d = b.Transpose(s2d, 0, 1, 3, 5, 2, 4)
+		s2d = b.Reshape(s2d, 1, int64(in*fs*fs), int64(ho), int64(wo))
+	}
+	src := s2d
+	zero := int64(in * fs * fs) // index of an appended all-zero channel
+	if ft > 1 {
+		src = b.Concat(1, s2d, b.Const("zero_frame", tensor.New(tensor.F32, 1, 1, ho, wo)))
+	}
+	idx := make([]int64, 0, in*factor)
+	for c := range in {
+		for t := range ft {
+			for k := range fs * fs {
+				if ft > 1 && t == 0 { // the padded (first) frame
+					idx = append(idx, zero)
+					continue
+				}
+				idx = append(idx, int64(c*fs*fs+k))
+			}
+		}
+	}
+	y := b.Op("Gather", graph.Attr("axis", 1), src, b.Const("channels", tensor.FromI64(idx, len(idx))))
+	group := in * factor / out
+	y = b.Reshape(y, 1, int64(out), int64(group), int64(ho), int64(wo))
+	return b.Op("ReduceMean", graph.Attr("keepdims", 0), y, b.Ints(2))
+}
+
+// PackLatents normalises encoder output z [1, C, h, w] ((z − mean)/std per
+// channel, the pipeline's _encode_vae_image) and packs it as the DiT's
+// condition tokens [h·w, C].
+func PackLatents(cfg VAEConfig, z *tensor.Tensor) *tensor.Tensor {
+	s := z.Shape()
+	C, hw := s[1], s[2]*s[3]
+	out := tensor.New(tensor.F32, hw, C)
+	src, dst := z.F32(), out.F32()
+	for c := range C {
+		for p := range hw {
+			dst[p*C+c] = (src[c*hw+p] - cfg.LatentsMean[c]) / cfg.LatentsStd[c]
+		}
+	}
+	return out
 }

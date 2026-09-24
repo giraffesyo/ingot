@@ -177,9 +177,95 @@ def pipeline():
          {"prompt": PROMPT, "steps": 4, "hw": [LAT * 16, LAT * 16]})
 
 
+EDIT_PROMPT = "Change the red circle to a blue star and add the word EDIT at the top"
+
+
+def edit_image():
+    """Deterministic 256x256 RGBA condition image (exact size: no resampling)."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGBA", (256, 256))
+    px = img.load()
+    for y in range(256):
+        for x in range(256):
+            px[x, y] = (40 + y // 2, 120 + x // 4, 200 - y // 3, 255)
+    d = ImageDraw.Draw(img)
+    d.ellipse((40, 90, 130, 180), fill=(220, 30, 30, 255))
+    d.rectangle((150, 120, 220, 200), fill=(30, 160, 60, 255))
+    return img
+
+
+def edit():
+    import gc
+    from diffusers import QwenImage21Pipeline
+
+    img = edit_image()
+    os.makedirs(OUT, exist_ok=True)
+    img.save(os.path.join(OUT, "edit_cond.png"))
+    res = 256
+
+    # Stage 1: text encoder over prompt + condition image (float32).
+    pipe = QwenImage21Pipeline.from_pretrained(SNAP, transformer=None, vae=None, torch_dtype=torch.float32)
+    rgb = Image_white(img)
+    templ = pipe.prompt_template_ti2i.format(EDIT_PROMPT)
+    inputs = pipe.processor(text=[templ], images=[rgb], padding=True, padding_side="left", return_tensors="pt")
+    with torch.no_grad():
+        embeds, emb_mask, img_pad = pipe.encode_prompt(EDIT_PROMPT, image=[img])
+        vis = pipe.text_encoder.model.visual(inputs.pixel_values, grid_thw=inputs.image_grid_thw)
+    print(f"edit text: {inputs.input_ids.shape[1]} tokens, grid {inputs.image_grid_thw.tolist()}, embeds {list(embeds.shape)}")
+    f = lambda x: x.float().numpy()
+    stage1 = dict(ids=inputs.input_ids.numpy().astype(np.int64), pix=f(inputs.pixel_values),
+                  grid=inputs.image_grid_thw.numpy().astype(np.int64), embeds=f(embeds[0]),
+                  img_pad=img_pad[0].numpy().astype(np.uint8), merged=f(vis.pooler_output),
+                  deep=[f(x) for x in vis.deepstack_features])
+    del pipe
+    gc.collect()
+
+    # Stage 2: DiT + VAE (float32), the text stage's outputs injected.
+    pipe = QwenImage21Pipeline.from_pretrained(SNAP, text_encoder=None, torch_dtype=torch.float32)
+    pipe.encode_prompt = lambda **kw: (embeds, emb_mask, img_pad)
+    cond = {}
+    enc = pipe._encode_vae_image
+    def enc_hook(image, generator):
+        out = enc(image, generator)
+        cond["latents"] = out.clone()
+        cond["pixels"] = image.clone()
+        return out
+    pipe._encode_vae_image = enc_hook
+    g = torch.Generator().manual_seed(11)
+    lat0 = torch.randn(1, (res // 16) ** 2, pipe.transformer.config.in_channels, generator=g)
+    steps = []
+    def cb(p, i, t, kw):
+        steps.append(kw["latents"].clone())
+        return {}
+    with torch.no_grad():
+        final = pipe(prompt=EDIT_PROMPT, image=img, num_inference_steps=4, latents=lat0, output_resolution=res,
+                     output_type="latent", callback_on_step_end=cb, callback_on_step_end_tensor_inputs=["latents"],
+                     return_dict=False)[0]
+        z = pipe._unpack_latents(final, res, res, pipe.vae_scale_factor)
+        mean = torch.tensor(pipe.vae.config.latents_mean).view(1, -1, 1, 1, 1)
+        std = torch.tensor(pipe.vae.config.latents_std).view(1, -1, 1, 1, 1)
+        image = pipe.vae.decode(z * std + mean, return_dict=False)[0][:, :, 0]
+    cl = cond["latents"][0, :, 0]  # [C, h, w] normalised
+    save("edit",
+         [("input_ids", stage1["ids"]), ("pixel_values", stage1["pix"]), ("image_grid_thw", stage1["grid"]),
+          ("vae_pixels", f(cond["pixels"][0, :, 0])), ("latents0", f(lat0[0]))],
+         [("vision_merged", stage1["merged"])] + [(f"vision_deepstack{i}", d) for i, d in enumerate(stage1["deep"])]
+         + [("prompt_embeds", stage1["embeds"]), ("image_pad_mask", stage1["img_pad"]),
+            ("cond_latents", f(cl.reshape(cl.shape[0], -1).T))]
+         + [(f"latents{i + 1}", f(x[0])) for i, x in enumerate(steps)] + [("image", f(image[0]))],
+         {"prompt": EDIT_PROMPT, "steps": 4, "resolution": res})
+
+
+def Image_white(img):
+    from PIL import Image
+    white = Image.new("RGB", img.size, (255, 255, 255))
+    white.paste(img, mask=img.getchannel("A"))
+    return white
+
+
 if __name__ == "__main__":
     import sys
     torch.set_num_threads(os.cpu_count())
     which = sys.argv[1:] or ["dit", "vae", "pipeline"]
     for name in which:
-        {"dit": dit, "vae": vae, "pipeline": pipeline}[name]()
+        {"dit": dit, "vae": vae, "pipeline": pipeline, "edit": edit}[name]()
