@@ -329,49 +329,70 @@ func (e *Encoder) Dispatch(p *Pipeline, grid, group [3]int, args ...Arg) {
 }
 
 // Stream records dispatches across calls into one command buffer, left
-// open until Flush — for an executor encoding op by op. Its encoder and
-// command buffer are retained past each job's autorelease pool. Not safe
-// for concurrent use.
+// open until Flush — for an executor encoding op by op. Encode queues its
+// callbacks and records them on the device thread in batches (a thread
+// hand-off per call would dominate small kernels); the recorded work only
+// runs at Flush. Its encoder and command buffer are retained past each
+// job's autorelease pool. Not safe for concurrent use.
 type Stream struct {
 	d       *Device
 	cb, enc uintptr
 	err     error
+	queued  []func(e *Encoder)
 	pending int
 }
+
+// streamBatch is how many queued callbacks trigger recording before Flush.
+const streamBatch = 64
 
 // NewStream returns an empty stream on d.
 func (d *Device) NewStream() *Stream { return &Stream{d: d} }
 
-// Encode records fn's dispatches into the open command buffer (opening one
-// if needed). fn runs on the device thread and must not call Device
-// methods. The first error sticks until Flush reports it.
+// Encode queues fn's dispatches for the open command buffer. fn runs later
+// on the device thread and must not call Device methods; it sees only what
+// it captured. The first error sticks until Flush reports it.
 func (s *Stream) Encode(fn func(e *Encoder)) {
-	if s.err != nil {
+	s.queued = append(s.queued, fn)
+	s.pending++
+	if len(s.queued) >= streamBatch {
+		s.d.do(s.record)
+	}
+}
+
+// record encodes the queued callbacks (on the device thread).
+func (s *Stream) record() {
+	if len(s.queued) == 0 {
 		return
 	}
-	s.d.do(func() {
-		if s.enc == 0 {
-			s.cb = send(send(s.d.queue, "commandBuffer"), "retain")
-			s.enc = send(send(s.cb, "computeCommandEncoder"), "retain")
-		}
-		e := &Encoder{enc: s.enc}
-		fn(e)
-		if e.err != nil {
+	if s.enc == 0 {
+		s.cb = send(send(s.d.queue, "commandBuffer"), "retain")
+		s.enc = send(send(s.cb, "computeCommandEncoder"), "retain")
+	}
+	e := &Encoder{enc: s.enc}
+	for i, fn := range s.queued {
+		if s.err == nil {
+			fn(e)
 			s.err = e.err
 		}
-		s.pending++
-	})
+		s.queued[i] = nil
+	}
+	s.queued = s.queued[:0]
 }
 
 // Pending reports whether dispatches are waiting for Flush.
 func (s *Stream) Pending() bool { return s.pending > 0 }
 
-// Flush commits the recorded work, waits for it, and reports the first
+// Flush records what is queued, commits it, waits, and reports the first
 // error since the last Flush.
 func (s *Stream) Flush() error {
-	err := s.err
-	if s.enc != 0 {
+	var err error
+	if s.pending > 0 {
 		s.d.do(func() {
+			s.record()
+			err = s.err
+			if s.enc == 0 {
+				return
+			}
 			send(s.enc, "endEncoding")
 			if err == nil {
 				send(s.cb, "commit")

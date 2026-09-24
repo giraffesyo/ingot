@@ -90,7 +90,7 @@ func BenchmarkModelsGPU(b *testing.B) {
 	if !metal.Available() {
 		b.Skip("no Metal device")
 	}
-	for _, name := range []string{"bertish", "vit", "tiny_transformer", "llmblock", "gptish", "gptish_1k"} {
+	for _, name := range []string{"bertish", "vit", "tiny_transformer", "llmblock", "gptish", "gptish_1k", "mobilenet_v2", "mobilenet_v3_small", "efficientnet_b0", "resnetish", "parseq_nar"} {
 		b.Run(name, func(b *testing.B) {
 			mb, err := os.ReadFile(filepath.Join(modelDir, name+".json"))
 			if err != nil {

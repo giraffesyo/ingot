@@ -48,12 +48,12 @@ func CompileGPU(g *Graph) (*GPUSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, prep := range []func() error{dev.Prepare, dev.PrepareConv, dev.PrepareEW} {
+	for _, prep := range []func() error{dev.Prepare, dev.PrepareConv, dev.PrepareEW, dev.PrepareCNN} {
 		if err := prep(); err != nil {
 			return nil, err
 		}
 	}
-	Optimize(g)
+	optimize(g, false)
 	s, err := CompileRaw(g)
 	if err != nil {
 		return nil, err
