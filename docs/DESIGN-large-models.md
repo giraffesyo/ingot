@@ -83,16 +83,26 @@ rather than importing it. Shape:
   fallback per op. CPU remains the reference: every GPU kernel is tested
   against the CPU/`_ref` path.
 
-Risks to retire with a spike before committing to the design:
-- Calling into libSystem without cgo relies on `//go:cgo_import_dynamic`
-  and `go:linkname` to runtime internals (the system-stack call path).
-  Since Go 1.23 pull-linknames into the runtime are restricted to an
-  allowlist; purego's symbols are on it today, but we would depend on
-  that list, not on a public API. Verify on Go 1.26 first.
-- Callbacks (Metal completion handlers → Go) are harder than calls; use
-  blocking `waitUntilCompleted` until they are needed.
-- Charter: CLAUDE.md says CPU inference; it must be amended (CPU-first,
-  optional GPU backends, still no cgo) before the first GPU kernel lands.
+Spike result (2026-09-23, Go 1.27, M5 Pro) — the risks are retired and the
+FFI lives in `kernels/metal` (darwin/arm64; a stub elsewhere):
+- `syscall.syscalln`, the runtime's libc-call helper, is on the linker's
+  blocklist for non-`syscall` packages, and `runtime.cgocall` throws without
+  cgo. What works: `runtime.entersyscall`/`exitsyscall` (kept linkable by
+  the runtime, "do not change the signature") around a 30-line asm shim
+  that switches SP to a pooled 1 MiB mmap'd C stack, loads x0–x7, and
+  calls the function; x28 (g) is callee-saved in the C ABI. dlopen/dlsym
+  arrive via `//go:cgo_import_dynamic`, which is allowed outside cgo files.
+  Works with CGO_ENABLED=0 and under `-race` (cgo on).
+- Autorelease pools and command encoding are per OS thread: all Metal work
+  runs on one goroutine locked to its thread (first run crashed popping a
+  pool on a different thread than it was pushed).
+- Measured: runtime MSL compile + dispatch + readback correct (saxpy,
+  2²⁰+3 elements, ragged grid); ~148 GB/s at 16M floats; **~270 µs per
+  commit+wait round trip** — the backend must encode a whole graph (or
+  step) into one command buffer, not wait per kernel.
+- Floats and structs ≤16 bytes by value are not supported by the shim;
+  Metal's compute API does not need them.
+- Charter amended (CLAUDE.md): CPU-first, optional GPU backends, no cgo.
 
 ## Order
 
@@ -104,8 +114,9 @@ Risks to retire with a spike before committing to the design:
 3. Unmasked flash attention.
 4. safetensors + bf16 storage.
 5. Graph builder + `models/qwenimage`, block-by-block parity.
-6. GPU: FFI spike (dlopen + one objc_msgSend round trip, CGO_ENABLED=0)
-   → Metal backend → executor placement.
+6. GPU: ~~FFI spike~~ done (`kernels/metal`). Next: GEMM + attention MSL
+   kernels vs the CPU path, then an executor backend that encodes a whole
+   DiT step into one command buffer.
 
 ## Qwen-Image-2.1, measured from the checkpoint (2026-09-23)
 

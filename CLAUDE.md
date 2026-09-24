@@ -6,13 +6,20 @@ consumer, not its purpose.*
 
 ## Mission
 
-Build a **general-purpose ONNX CPU inference runtime in pure Go**: no cgo, no
+Build a **general-purpose inference runtime in pure Go**, CPU-first: no cgo, no
 external runtimes, static binaries, wasm-capable. Accuracy comes from Python-trained
 weights; this repo owns **inference**. It runs any ONNX model that uses supported
 ops — CNNs, ViTs, BERT/transformer encoders, decoder LLM blocks — verified against
-ONNX Runtime. OCR (`models/ocr`, DBNet + PP-OCR) is the first and flagship consumer
-and drives op priorities, but nothing in `tensor/`, `graph/`, `ops/`, `kernels/`
-may be model-specific.
+ONNX Runtime, and models defined in Go over Hugging Face safetensors checkpoints
+(`graph.Builder`), verified against their PyTorch reference. OCR (`models/ocr`,
+DBNet + PP-OCR) is the first and flagship consumer and drives op priorities;
+Qwen-Image-2.1 (`models/qwenimage`) is the first large generative model. Nothing in
+`tensor/`, `graph/`, `ops/`, `kernels/` may be model-specific.
+
+GPU backends are optional accelerators behind the CPU path, never a dependency:
+Apple Metal via `kernels/metal`, reached through an in-tree FFI (no cgo, no
+third-party packages). The CPU path stays the reference every GPU kernel is
+tested against. See docs/DESIGN-large-models.md.
 
 **We are obsessed with performance.** Target: ≤2× ONNX Runtime CPU latency on the
 same hardware. Every kernel ships with a benchmark.
@@ -21,7 +28,8 @@ No regression merges.
 ## Non-negotiables
 
 - `CGO_ENABLED=0` must build and pass everything. No cgo, ever. No `unsafe` outside
-  `tensor/` and `kernels/`.
+  `tensor/` and `kernels/`. System libraries (Metal) are reached only through the
+  `kernels/metal` FFI; no FFI dependency (purego or similar) is allowed.
 - Correctness before speed, but speed is a correctness requirement of the project:
   a kernel without a benchmark and a reference-comparison test does not exist.
 - Every op is verified against an independent oracle: kernels have a pure-Go
@@ -41,16 +49,22 @@ No regression merges.
 ## Architecture (layers, strict dependency direction: top depends on bottom)
 
 ```
-cmd/ocr, cmd/onnxrun       CLIs
+cmd/ocr, cmd/onnxrun,      CLIs
+cmd/qwenimage
 models/ocr                 detection (DBNet++), recognition (SVTR/PARSeq), pre/post-proc, pipeline
+models/qwenimage           Qwen-Image-2.1: text encoder, DiT, VAE, scheduler, pipeline
+tokenizer                  byte-level BPE (HF tokenizer.json)
 graph                      IR, shape inference, optimizer passes (const-fold, conv+BN fusion,
                            layout), memory planner, executor (goroutine-parallel)
 onnx                       protobuf decode of .onnx → graph.IR; op/attribute mapping
+safetensors                mmap'd HF checkpoints (zero-copy views, sharded index)
 ops                        ONNX-semantics ops over tensors (Conv, MatMul, LayerNorm, Attention,
                            Softmax, Gelu, Resize, ...). Thin: dispatch to kernels.
 kernels/{gemm,conv,attn,…} hot loops. Per-arch asm (arm64 NEON, amd64 AVX2/AVX-512)
                            with Go fallback. Pure-Go blocked/packed versions are the
                            first fast path; asm is the second.
+kernels/metal              Apple GPU: cgo-free FFI (entersyscall + private C stack),
+                           objc_msgSend, runtime MSL compile, shared buffers, dispatch
 tensor                     Tensor (dtype, shape, strides, data), DType, arena/pool, views
 bench                      cross-cutting benchmarks + perf harness vs reference numbers
 ```
