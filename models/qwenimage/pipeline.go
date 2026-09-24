@@ -103,9 +103,14 @@ func Generate(dir string, opt Options) (*Result, error) {
 	drop := len(sysIDs)
 	stage("tokenize", t0)
 
+	gpu := opt.Device == "gpu" || ((opt.Device == "" || opt.Device == "auto") && metalAvailable())
+	if !gpu && opt.Device != "" && opt.Device != "auto" && opt.Device != "cpu" {
+		return nil, fmt.Errorf("qwenimage: unknown device %q (cpu, gpu, auto)", opt.Device)
+	}
+
 	// 2. Text encoder → conditioning hidden states.
 	t0 = time.Now()
-	embeds, err := encodeText(dir, ids, drop)
+	embeds, err := encodeText(dir, ids, drop, gpu)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +139,7 @@ func Generate(dir string, opt Options) (*Result, error) {
 	return res, nil
 }
 
-func encodeText(dir string, ids []int64, drop int) (*tensor.Tensor, error) {
+func encodeText(dir string, ids []int64, drop int, gpu bool) (*tensor.Tensor, error) {
 	tdir := filepath.Join(dir, "text_encoder")
 	cfg, err := LoadTextConfig(tdir)
 	if err != nil {
@@ -145,6 +150,14 @@ func encodeText(dir string, ids []int64, drop int) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	defer set.Close()
+	if gpu {
+		m, err := NewMetalTextEncoder(cfg, set)
+		if err != nil {
+			return nil, err
+		}
+		defer m.Close()
+		return m.Encode(ids, drop, cfg.NumHiddenLayers)
+	}
 	te, err := NewTextEncoder(cfg, set)
 	if err != nil {
 		return nil, err
@@ -198,8 +211,7 @@ func denoise(dir string, embeds *tensor.Tensor, lh, lw int, opt Options, logf fu
 		x = x.Clone()
 	}
 	sched := NewSchedule(scfg, opt.Steps, l.Target)
-	gpu := opt.Device == "gpu" || ((opt.Device == "" || opt.Device == "auto") && metalAvailable())
-	if gpu {
+	if gpu := opt.Device == "gpu" || ((opt.Device == "" || opt.Device == "auto") && metalAvailable()); gpu {
 		return denoiseMetal(cfg, set, l, embeds, x, sched, opt.Steps, opt.Fast, logf)
 	}
 	if opt.Device != "" && opt.Device != "auto" && opt.Device != "cpu" {

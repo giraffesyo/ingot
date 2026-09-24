@@ -169,36 +169,12 @@ func NewMetalDiT(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers int) 
 
 // weight wraps name's shard (once) and returns its bf16 [out, in] region.
 func (m *MetalDiT) weight(set *safetensors.Set, name string, out, in int) (metal.Region, error) {
-	mem, off, info, err := set.Locate(name)
-	if err != nil {
-		return metal.Region{}, err
-	}
-	if info.DType != "BF16" || len(info.Shape) != 2 || info.Shape[0] != out || info.Shape[1] != in {
-		return metal.Region{}, fmt.Errorf("qwenimage: %s is %s%v, want BF16[%d %d]", name, info.DType, info.Shape, out, in)
-	}
-	key := unsafe.Pointer(&mem[0])
-	b, ok := m.shards[key]
-	if !ok {
-		if b, err = m.dev.Wrap(mem); err != nil {
-			return metal.Region{}, fmt.Errorf("qwenimage: wrap shard of %s: %w", name, err)
-		}
-		m.shards[key] = b
-	}
-	return b.At(off), nil
+	return wrapWeight(m.dev, m.shards, set, name, out, in)
 }
 
 // f32Buffer copies a small weight (widened to f32) into its own buffer.
 func (m *MetalDiT) f32Buffer(set *safetensors.Set, name string) (*metal.Buffer, error) {
-	t, err := set.F32(name)
-	if err != nil {
-		return nil, err
-	}
-	b, err := m.dev.NewBuffer(4 * t.Numel())
-	if err != nil {
-		return nil, err
-	}
-	copy(f32view(b), t.F32())
-	return b, nil
+	return f32Buffer(m.dev, set, name)
 }
 
 func f32view(b *metal.Buffer) []float32 {

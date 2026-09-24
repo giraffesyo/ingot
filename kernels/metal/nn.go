@@ -59,7 +59,8 @@ kernel void layernorm_mod(device const float* x [[buffer(0)]], device float* y [
 // In place on x [T, ld]: each (t, head) row of dh at column head*dh is
 // RMS-normalised (·w) then rotated as complex pairs (2j, 2j+1) by
 // cos/sin [T, dh/2]. One threadgroup of dh threads per (t, head).
-// p = (heads, dh, ld, 0); f = (eps, ...).
+// p = (heads, dh, ld, mode); mode 0 rotates interleaved pairs, 1 halves
+// (rotate_half, Llama/Qwen); f = (eps, ...).
 kernel void rmsnorm_rope(device float* x [[buffer(0)]], device const float* w [[buffer(1)]],
                          device const float* cs [[buffer(2)]], device const float* sn [[buffer(3)]],
                          constant uint4& p [[buffer(4)]], constant float4& f [[buffer(5)]],
@@ -81,11 +82,34 @@ kernel void rmsnorm_rope(device float* x [[buffer(0)]], device const float* w [[
 	if (tid < dh) row[tid] = v * inv * w[tid];
 	threadgroup_barrier(mem_flags::mem_threadgroup);
 	if (tid < dh) {
-		const uint j = tid / 2;
-		const float c = cs[t * (dh / 2) + j], s = sn[t * (dh / 2) + j];
-		const float re = row[2 * j], im = row[2 * j + 1];
-		xr[tid] = (tid % 2 == 0) ? re * c - im * s : re * s + im * c;
+		const uint hd = dh / 2;
+		if (p.w == 0) { // interleaved pairs (2j, 2j+1)
+			const uint j = tid / 2;
+			const float c = cs[t * hd + j], s = sn[t * hd + j];
+			const float re = row[2 * j], im = row[2 * j + 1];
+			xr[tid] = (tid % 2 == 0) ? re * c - im * s : re * s + im * c;
+		} else { // rotate_half: (j, j + dh/2)
+			const uint j = tid % hd;
+			const float c = cs[t * hd + j], s = sn[t * hd + j];
+			xr[tid] = tid < hd ? row[j] * c - row[j + hd] * s : row[j + hd] * c + row[j] * s;
+		}
 	}
+}
+
+// y[r] = x[r] · rsqrt(mean(x[r]²) + eps) · w over cols; p = (cols, ldx, ldy, 0).
+kernel void rmsnorm_rows(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
+                         device const float* w [[buffer(2)]], constant uint4& p [[buffer(3)]],
+                         constant float4& f [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
+                         uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                         uint lane [[thread_index_in_simdgroup]]) {
+	threadgroup float scratch[NT / 32];
+	const uint n = p.x;
+	device const float* xr = x + row * p.y;
+	device float* yr = y + row * p.z;
+	float acc = 0;
+	for (uint i = tid; i < n; i += NT) acc += xr[i] * xr[i];
+	const float inv = rsqrt(tg_sum(acc, scratch, tid, sg, lane) / n + f.x);
+	for (uint i = tid; i < n; i += NT) yr[i] = xr[i] * inv * w[i];
 }
 
 // In place softmax(scale · row) over cols of each row (stride ld).
@@ -155,6 +179,7 @@ kernel void gated_add(device float* x [[buffer(0)]], device const float* g [[buf
 var nnPSO struct {
 	once                                                               sync.Once
 	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
+	rmsRows                                                            *Pipeline
 	err                                                                error
 }
 
@@ -165,7 +190,8 @@ func (d *Device) nnPipelines() error {
 			dst  **Pipeline
 		}{{"layernorm_mod", &nnPSO.layerNorm}, {"rmsnorm_rope", &nnPSO.rmsRope}, {"softmax_rows", &nnPSO.softmax},
 			{"silu_mul", &nnPSO.siluMul}, {"gated_add", &nnPSO.gateAdd},
-			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather}} {
+			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather},
+			{"rmsnorm_rows", &nnPSO.rmsRows}} {
 			if *k.dst, nnPSO.err = d.Compile(nnSrc, k.name); nnPSO.err != nil {
 				return
 			}
@@ -200,16 +226,34 @@ func (e *Encoder) LayerNormMod(x, y, s Region, rows, cols, ldx, ldy int, eps flo
 	}
 }
 
+// RoPE layouts for RMSNormRoPE.
+const (
+	RopePairs = 0 // rotate channel pairs (2j, 2j+1) — complex view
+	RopeHalf  = 1 // rotate (j, j+dh/2) — rotate_half
+)
+
 // RMSNormRoPE normalises each dh-wide head of x [T, ld] (heads starting at
 // x's offset) with weight w [dh], then rotates channel pairs (2j, 2j+1) by
 // cos/sin [T, dh/2] — in place. dh ≤ 512, even.
 func (e *Encoder) RMSNormRoPE(x, w, cos, sin Region, t, heads, dh, ld int, eps float32) {
+	e.RMSNormRoPEMode(x, w, cos, sin, t, heads, dh, ld, eps, RopePairs)
+}
+
+// RMSNormRoPEMode is RMSNormRoPE with a choice of rotary layout.
+func (e *Encoder) RMSNormRoPEMode(x, w, cos, sin Region, t, heads, dh, ld int, eps float32, mode int) {
 	if dh > 512 || dh%2 != 0 {
 		e.err = fmt.Errorf("metal: RMSNormRoPE head dim %d", dh)
 		return
 	}
 	if e.ready(nnPSO.rmsRope) {
-		e.Dispatch(nnPSO.rmsRope, [3]int{heads * dh, t, 1}, [3]int{dh, 1, 1}, x, w, cos, sin, u32s(heads, dh, ld, 0), f32c(eps))
+		e.Dispatch(nnPSO.rmsRope, [3]int{heads * dh, t, 1}, [3]int{dh, 1, 1}, x, w, cos, sin, u32s(heads, dh, ld, mode), f32c(eps))
+	}
+}
+
+// RMSNormRows: y[r] = x[r] · rsqrt(mean(x[r]²) + eps) · w over rows of cols.
+func (e *Encoder) RMSNormRows(x, y, w Region, rows, cols, ldx, ldy int, eps float32) {
+	if e.ready(nnPSO.rmsRows) {
+		e.Dispatch(nnPSO.rmsRows, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, y, w, u32s(cols, ldx, ldy, 0), f32c(eps))
 	}
 }
 

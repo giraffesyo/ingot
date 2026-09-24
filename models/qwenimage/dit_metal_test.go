@@ -113,3 +113,55 @@ func TestMetalDiTParity(t *testing.T) {
 		compare(t, "fast (bf16): "+c.want, out.F32(), ref.tensor(t, c.want).F32()[c.rows:], 0.15)
 	}
 }
+
+// TestMetalTextEncoder: GPU vs CPU language model on a 2-layer truncation
+// over the reference prompt ids (no full-model run needed).
+func TestMetalTextEncoder(t *testing.T) {
+	if !metal.Available() {
+		t.Skip("no Metal device")
+	}
+	dir := filepath.Join(snapshotDir(t), "text_encoder")
+	ref := loadRef(t, "pipeline")
+	cfg, err := LoadTextConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := safetensors.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	ids := ref.tensor(t, "input_ids").I64()
+	const layers, drop = 2, 14
+	te, err := NewTextEncoder(cfg, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := te.Build(len(ids), drop, layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := graph.Compile(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, _ := te.Embed(ids)
+	cpu, err := s.Run(map[string]*tensor.Tensor{"x": x})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewMetalTextEncoder(cfg, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	gpu, err := m.Encode(ids, drop, layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var maxw float64
+	for _, v := range cpu["hidden"].F32() {
+		maxw = max(maxw, float64(abs32(v)))
+	}
+	compare(t, "text encoder, 2 layers (GPU vs CPU)", gpu.F32(), cpu["hidden"].F32(), 1e-4*maxw)
+}
