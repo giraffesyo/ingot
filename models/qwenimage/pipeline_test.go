@@ -116,3 +116,25 @@ func TestDenoiseParity(t *testing.T) {
 	}
 	compare(t, "image", img["image"].F32(), ref.tensor(t, "image").F32(), 5e-3)
 }
+
+// TestGenerateParity is the whole pipeline from the prompt text: tokenizer →
+// text encoder → DiT (reference noise) → VAE, against diffusers' image.
+func TestGenerateParity(t *testing.T) {
+	fullModel(t)
+	snap := snapshotDir(t)
+	ref := loadRef(t, "pipeline")
+	hw := ref.Meta["hw"].([]any)
+	res, err := Generate(snap, Options{
+		Prompt:  ref.Meta["prompt"].(string),
+		Width:   int(hw[1].(float64)),
+		Height:  int(hw[0].(float64)),
+		Steps:   int(ref.Meta["steps"].(float64)),
+		Latents: ref.tensor(t, "latents0"),
+		Log:     t.Logf,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("peak RSS %.1f GB", peakRSSGB())
+	compare(t, "image", res.Float.F32(), ref.tensor(t, "image").F32(), 5e-3)
+}
