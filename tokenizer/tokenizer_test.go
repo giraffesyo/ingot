@@ -20,9 +20,9 @@ func TestSplit(t *testing.T) {
 		{"I'm don't WE'LL", []string{"I", "'m", " don", "'t", " WE", "'LL"}},
 		{"abc123", []string{"abc", "1", "2", "3"}},
 		{"a  b", []string{"a", " ", " b"}},             // \s+(?!\S) keeps the last space for the word
-		{"end   ", []string{"end", "   "}},              // trailing run at end of text
-		{"x\n\ny", []string{"x", "\n\n", "y"}},          // \s*[\r\n]+
-		{"x \n y", []string{"x", " \n", " y"}},          // whitespace up to the last newline
+		{"end   ", []string{"end", "   "}},             // trailing run at end of text
+		{"x\n\ny", []string{"x", "\n\n", "y"}},         // \s*[\r\n]+
+		{"x \n y", []string{"x", " \n", " y"}},         // whitespace up to the last newline
 		{"hi!!\n\nok", []string{"hi", "!!\n\n", "ok"}}, // punctuation absorbs trailing newlines
 		{"a ...b", []string{"a", " ...", "b"}},
 		{"$5.00", []string{"$", "5", ".", "0", "0"}},
