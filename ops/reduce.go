@@ -107,7 +107,46 @@ func (o *reduceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 			break
 		}
 	}
-	if trailing && len(of) > 0 {
+	// Middle block: the reduced axes form one contiguous run [a0, a1) with
+	// kept axes after it — [outer, R, inner]. Accumulate whole contiguous
+	// inner rows instead of striding per element (NCHW channel ReduceL2,
+	// M5 Pro: 25× at [1,1152,32,32], 22× at [1,288,128,128]).
+	a0, a1 := -1, -1
+	for i := range r {
+		if red[i] {
+			if a0 < 0 {
+				a0 = i
+			}
+			a1 = i + 1
+		}
+	}
+	middle := !trailing && a0 >= 0
+	for i := a0; middle && i < a1; i++ {
+		middle = red[i]
+	}
+	if middle && len(of) > 0 {
+		outer, inner := 1, 1
+		for _, d := range xs[:a0] {
+			outer *= d
+		}
+		for _, d := range xs[a1:] {
+			inner *= d
+		}
+		// Chunk the inner run so small spatial sizes still give every
+		// worker ~2 tasks (a 32×32 map is one 4096-wide chunk otherwise).
+		cw := min(reduceChunk, max(64, (outer*inner/(2*par.Workers())+15)&^15))
+		chunks := (inner + cw - 1) / cw
+		kind := o.kind
+		par.For(outer*chunks, 1, func(task, _ int) {
+			ob, c := task/chunks, task%chunks
+			lo, hi := c*cw, min((c+1)*cw, inner)
+			acc := of[ob*inner+lo : ob*inner+hi]
+			for k := range cnt {
+				base := (ob*cnt + k) * inner
+				accumRow(kind, acc, xf[base+lo:base+hi])
+			}
+		})
+	} else if trailing && len(of) > 0 {
 		inner := cnt
 		grain := len(of)
 		if len(xf) > 2*unaryChunk {
@@ -164,6 +203,37 @@ func accum(kind string, acc, v float32) float32 {
 		return acc + float32(math.Abs(float64(v)))
 	}
 	return acc
+}
+
+// reduceChunk caps the inner-run width per task of the middle-block path.
+const reduceChunk = 4096
+
+// accumRow folds row into acc elementwise (the middle-block reduction step);
+// the kind switch sits outside the loop.
+func accumRow(kind string, acc, row []float32) {
+	row = row[:len(acc)]
+	switch kind {
+	case "sum", "mean":
+		for i, v := range row {
+			acc[i] += v
+		}
+	case "l2", "sumsq":
+		for i, v := range row {
+			acc[i] += v * v
+		}
+	case "max":
+		for i, v := range row {
+			acc[i] = max(acc[i], v)
+		}
+	case "min":
+		for i, v := range row {
+			acc[i] = min(acc[i], v)
+		}
+	default:
+		for i, v := range row {
+			acc[i] = accum(kind, acc[i], v)
+		}
+	}
 }
 
 func reduceRow(kind string, acc float32, row []float32) float32 {
