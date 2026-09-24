@@ -197,8 +197,12 @@
       session scratch, buffer custody for views (Reshape & friends now
       zero-copy), pooled par tasks — toy transformers −9…−16%, GC STW 54→19%
       of samples; allocs/run: bertish 444→154, rec 774→254
-- [ ] in-place ops; static memory planner; remaining per-op allocs (result
-      slice + closure per op; rec_int8 quant chunking closures ~900/run)
+- [x] view headers from the pool (Pool.View/PutView): allocs/run bertish
+      77→33, gptish 123→91; reshape shapes no longer escape
+- [ ] remaining per-op allocs: one par.For closure per parallel op (~0.1% of
+      run time even on parseq — measured, deprioritised); a static memory
+      planner (the liveness-driven pool already reuses buffers; a planner
+      needs static shapes)
 - [x] SME probes + Sgemm (kernels/sme, pure Go WORD-encoded): FMOPA peak 2.17
       TFLOPS/core; pre-packed Sgemm 700 GFLOPS 1T (7.4× NEON); signal-mask
       guard (ZA dies on signal delivery — GC-storm regression test); dispatch
@@ -330,7 +334,14 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       bf16 mode (graph.GPUBF16, device "gpu-bf16": 1.2-1.6x f32, corpus
       CER equal to CPU); whole OCR pipeline per device (cmd/ocr -device):
       1920x1080 page CPU 88 ms, GPU 64, GPU bf16 57
-- [ ] resnetish-class models on x86 (5x ORT on Zen 5; see PERF.md
-      2026-09-24): NCHWc direct kernels for dense 3x3 convs
-- [ ] CPU perf: per-step time at 1024² (0.69 TFLOPS at 256 tokens)
-- [ ] RMSNorm / RoPE / adaLN fused ops (profile first)
+- [x] dense KxK conv in the blocked layout (ops.ConvDenseBlk, amd64
+      default): kernel 2-3x on <= 8x8 planes; resnetish Zen 5 -6-10%
+- [ ] resnetish on x86 still ~4x ORT: per-op fan-out at 12 workers (149 µs
+      at 2-4 workers vs 214 at 12) — per-model width cap chosen at compile
+- [x] CPU DiT step: bf16 packs stay bf16 (widened per panel): 256 tokens
+      2.6 s, 1.4 TFLOPS, peak RSS 37→29 GB (was swapping); SME at MT for
+      these GEMMs measured and declined (parity with packed NEON)
+- [x] RMSNorm / RoPE / adaLN fused ops: profiled — non-GEMM ops are ~4% of
+      a CPU DiT step, not worth fusing now
+- [x] GPU executor: fused bias/act epilogues (-6% det), per-batch command
+      buffer commits (-12% gptish/mobilenet_v2), dispatch counts
