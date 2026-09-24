@@ -10,7 +10,9 @@ import (
 // gpuOp is a node's Metal implementation. prepare validates the inputs,
 // allocates the outputs from the session pool (uninitialised: the kernels
 // overwrite them) and returns the encoding; ok false (before allocating
-// anything) sends the node to its CPU op.
+// anything) sends the node to its CPU op. The encoding runs later (the
+// stream records in batches): it must capture sizes and regions by value,
+// never read tensors, which the pool may have recycled by then.
 type gpuOp interface {
 	prepare(c *gpuCtx, st *step, in []*tensor.Tensor) (outs []*tensor.Tensor, enc func(e *metal.Encoder), ok bool)
 }
@@ -126,11 +128,29 @@ func gpuOpFor(n *Node) gpuOp {
 			return transposeGPU{perm: a.Ints("perm", nil)}
 		case "Gather":
 			return gatherGPU{axis: int(a.Int("axis", 0))}
+		case "Conv":
+			return newConvGPU(a)
+		case "MaxPool":
+			return newPoolGPU(a, true)
+		case "AveragePool":
+			return newPoolGPU(a, false)
+		case "GlobalAveragePool":
+			return globalAvgPoolGPU{}
+		case "HardSwish":
+			return actGPU{act: metal.ActHardSwish}
+		case "HardSigmoid":
+			return actGPU{act: metal.ActHardSigmoid, alpha: a.Float("alpha", 0.2), beta: a.Float("beta", 0.5)}
+		case "LeakyRelu":
+			return actGPU{act: metal.ActLeakyRelu, alpha: a.Float("alpha", 0.01)}
+		case "Clip":
+			return newClipGPU(a)
 		case "Concat":
 			return concatGPU{axis: int(a.Int("axis", 0))}
 		}
 	case "ingot":
 		switch n.OpType {
+		case "HardSwish":
+			return actGPU{act: metal.ActHardSwish}
 		case "Gelu":
 			return unaryGPU{metal.UnGeluErf}
 		case "SiLU":
@@ -323,6 +343,7 @@ func (o matmulGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 		return nil, nil, false
 	}
 	gelu := o.gelu
+	nout := out.Numel()
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		for bi := range batch {
 			e.Gemm(metal.Gemm{M: M, N: N, K: K,
@@ -330,12 +351,12 @@ func (o matmulGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 				B: metal.Region{B: rs[1].B, Off: rs[1].Off + 4*bi*K*N},
 				C: metal.Region{B: ro[0].B, Off: ro[0].Off + 4*bi*M*N}})
 		}
-		rows := out.Numel() / N
+		rows := nout / N
 		if bias != nil {
 			e.AddBias(ro[0], rs[2], rows, N, N)
 		}
 		if gelu {
-			e.Unary(metal.UnGeluErf, ro[0], ro[0], out.Numel())
+			e.Unary(metal.UnGeluErf, ro[0], ro[0], nout)
 		}
 	}, true
 }
@@ -488,11 +509,15 @@ func (c *gpuCtx) layerNorm(x, add, scale, bias *tensor.Tensor, D int, eps float3
 		c.release(outs...)
 		return nil, nil, false
 	}
+	nx, nadd := x.Numel(), 0
+	if add != nil {
+		nadd = add.Numel()
+	}
 	return outs, func(e *metal.Encoder) {
 		src := rs[0]
 		dst := ro[0]
 		if add != nil {
-			e.Binary(metal.OpAdd, rs[0], rs[1], ro[0], x.Numel(), x.Numel(), add.Numel())
+			e.Binary(metal.OpAdd, rs[0], rs[1], ro[0], nx, nx, nadd)
 			src, dst = ro[0], ro[1]
 		}
 		e.LayerNormMod(src, dst, rScale, rows, D, D, D, eps)
@@ -577,17 +602,45 @@ func (o reduceMeanGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*ten
 		}
 		axes = in[1].I64()
 	}
-	if len(xs) == 0 || len(axes) != 1 || !lastAxis(int(axes[0]), len(xs)) {
+	// The reduced axes must be a trailing block: a mean over each row of
+	// the flattened [rows, D] view.
+	r := len(xs)
+	seen := make([]bool, r)
+	for _, ax := range axes {
+		a := int(ax)
+		if a < 0 {
+			a += r
+		}
+		if a < 0 || a >= r || seen[a] {
+			return nil, nil, false
+		}
+		seen[a] = true
+	}
+	k := len(axes)
+	if r == 0 || k == 0 {
 		return nil, nil, false
 	}
-	D := xs[len(xs)-1]
+	for a := range r {
+		if seen[a] != (a >= r-k) {
+			return nil, nil, false
+		}
+	}
+	D := 1
+	for _, d := range xs[r-k:] {
+		D *= d
+	}
+	if D == 0 {
+		return nil, nil, false
+	}
 	rx, ok := c.regions(x)
 	if !ok {
 		return nil, nil, false
 	}
-	oshape := append([]int{}, xs[:len(xs)-1]...)
+	oshape := append([]int{}, xs[:r-k]...)
 	if o.keep {
-		oshape = append(oshape, 1)
+		for range k {
+			oshape = append(oshape, 1)
+		}
 	}
 	out := c.out(oshape...)
 	ro, ok := c.regions(out)

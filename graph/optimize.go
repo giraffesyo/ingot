@@ -33,7 +33,12 @@ import (
 //
 // Every rewrite keeps the consumer's output Value (so graph outputs and names
 // survive) and only fires when intermediate values have a single consumer.
-func Optimize(g *Graph) map[string]int {
+func Optimize(g *Graph) map[string]int { return optimize(g, true) }
+
+// optimize runs the passes; cpuLayout enables the CPU-only rewrites
+// (squeeze-excite islands, nChw8c blocked convolutions) that a GPU
+// executor cannot place.
+func optimize(g *Graph, cpuLayout bool) map[string]int {
 	stats := map[string]int{}
 	for changed := true; changed; {
 		changed = false
@@ -44,7 +49,9 @@ func Optimize(g *Graph) map[string]int {
 		changed = foldConvAffine(g, stats) || changed
 		changed = fuseConvAct(g, stats) || changed
 		changed = foldPostAffine(g, stats) || changed
-		changed = fuseSE(g, stats) || changed
+		if cpuLayout {
+			changed = fuseSE(g, stats) || changed
+		}
 		changed = foldQDQAffine(g, stats) || changed
 		changed = fuseQLUT(g, stats) || changed
 		changed = fuseLayerNorm(g, stats) || changed
@@ -55,8 +62,10 @@ func Optimize(g *Graph) map[string]int {
 		changed = fuseAddLayerNorm(g, stats) || changed
 	}
 	propagateShapes(g)
-	assignBlockedLayout(g, stats)
-	fuseBlkResidual(g, stats)
+	if cpuLayout {
+		assignBlockedLayout(g, stats)
+		fuseBlkResidual(g, stats)
+	}
 	renumber(g)
 	return stats
 }

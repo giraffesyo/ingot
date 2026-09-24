@@ -1,0 +1,230 @@
+//go:build darwin && arm64
+
+package metal
+
+import (
+	"encoding/binary"
+	"fmt"
+	"math"
+	"sync"
+)
+
+// NCHW convolution, pooling and activation kernels for executing ONNX
+// graphs on the GPU (f32).
+const cnnSrc = `
+#include <metal_stdlib>
+using namespace metal;
+
+// Conv geometry: a = (C, H, W, OW), b = (KH, KW, SH, SW), c = (DH, DW, PT, PL).
+
+// cols[k, j] = x[c, oy·SH - PT + ky·DH, ox·SW - PL + kx·DW] (0 outside) for
+// k = (c·KH + ky)·KW + kx and output pixel p = p0 + j (j < pc); one image's
+// channels x [C, H, W]. d = (p0, pc, K, 0).
+kernel void im2col_nchw(device const float* x [[buffer(0)]], device float* cols [[buffer(1)]],
+                        constant uint4& a [[buffer(2)]], constant uint4& b [[buffer(3)]],
+                        constant uint4& c [[buffer(4)]], constant uint4& d [[buffer(5)]],
+                        uint2 i [[thread_position_in_grid]]) {
+	const uint j = i.x, k = i.y;
+	if (j >= d.y || k >= d.z) return;
+	const uint p = d.x + j, oy = p / a.w, ox = p % a.w;
+	const uint kx = k % b.y, ky = (k / b.y) % b.x, ch = k / (b.x * b.y);
+	const int iy = int(oy * b.z + ky * c.x) - int(c.z), ix = int(ox * b.w + kx * c.y) - int(c.w);
+	float v = 0;
+	if (iy >= 0 && iy < int(a.y) && ix >= 0 && ix < int(a.z)) v = x[(ch * a.y + uint(iy)) * a.z + uint(ix)];
+	cols[k * d.y + j] = v;
+}
+
+// Direct convolution (grouped / depthwise): one thread per output element of
+// out [N, M, OH, OW]; w [M, Cg, KH, KW]. e = (Cg, Mg, M, OH), f = (hasBias,
+// N, 0, 0).
+kernel void conv_direct(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                        device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
+                        constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
+                        constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
+                        constant uint4& f [[buffer(8)]], uint3 i [[thread_position_in_grid]]) {
+	const uint OW = a.w, OH = e.w, p = i.x, m = i.y, n = i.z;
+	if (p >= OH * OW || m >= e.z || n >= f.y) return;
+	const uint oy = p / OW, ox = p % OW, g = m / e.y, Cg = e.x;
+	const int y0 = int(oy * b.z) - int(c.z), x0 = int(ox * b.w) - int(c.w);
+	device const float* wm = w + m * Cg * b.x * b.y;
+	device const float* xn = x + (n * a.x + g * Cg) * a.y * a.z;
+	float acc = f.x != 0 ? bias[m] : 0.0f;
+	for (uint ch = 0; ch < Cg; ch++) {
+		device const float* xc = xn + ch * a.y * a.z;
+		for (uint ky = 0; ky < b.x; ky++) {
+			const int iy = y0 + int(ky * c.x);
+			if (iy < 0 || iy >= int(a.y)) continue;
+			for (uint kx = 0; kx < b.y; kx++) {
+				const int ix = x0 + int(kx * c.y);
+				if (ix < 0 || ix >= int(a.z)) continue;
+				acc += xc[uint(iy) * a.z + uint(ix)] * wm[(ch * b.x + ky) * b.y + kx];
+			}
+		}
+	}
+	o[((n * e.z + m) * OH + oy) * OW + ox] = acc;
+}
+
+// 2-D max / average pooling over planes x [NC, H, W] → o [NC, OH, OW].
+// a = (H, W, OH, OW), b = (KH, KW, SH, SW), c = (PT, PL, PB, PR),
+// d = (max, countIncludePad, 0, 0).
+kernel void pool2d(device const float* x [[buffer(0)]], device float* o [[buffer(1)]],
+                   constant uint4& a [[buffer(2)]], constant uint4& b [[buffer(3)]],
+                   constant uint4& c [[buffer(4)]], constant uint4& d [[buffer(5)]],
+                   uint2 i [[thread_position_in_grid]]) {
+	const uint p = i.x, nc = i.y;
+	if (p >= a.z * a.w) return;
+	const int H = int(a.x), W = int(a.y);
+	const int y0 = int((p / a.w) * b.z) - int(c.x), x0 = int((p % a.w) * b.w) - int(c.y);
+	device const float* xp = x + nc * a.x * a.y;
+	float m = -INFINITY, s = 0;
+	int cnt = 0;
+	for (int ky = max(y0, 0); ky < min(y0 + int(b.x), H); ky++) {
+		for (int kx = max(x0, 0); kx < min(x0 + int(b.y), W); kx++) {
+			const float v = xp[ky * W + kx];
+			m = max(m, v);
+			s += v;
+			cnt++;
+		}
+	}
+	float r;
+	if (d.x != 0) {
+		r = m;
+	} else {
+		if (d.y != 0) {
+			const int hA = max(y0, -int(c.x)), hB = min(y0 + int(b.x), H + int(c.z));
+			const int wA = max(x0, -int(c.y)), wB = min(x0 + int(b.y), W + int(c.w));
+			cnt = (hB - hA) * (wB - wA);
+		}
+		r = cnt > 0 ? s / float(cnt) : 0.0f;
+	}
+	o[nc * a.z * a.w + p] = r;
+}
+
+// o[i] = act(x[i])·scale + shift; p = (n, act), q = (alpha, beta, scale, shift).
+kernel void act_ew(device const float* x [[buffer(0)]], device float* o [[buffer(1)]],
+                   constant uint4& p [[buffer(2)]], constant float4& q [[buffer(3)]],
+                   uint i [[thread_position_in_grid]]) {
+	if (i >= p.x) return;
+	float v = x[i];
+	switch (p.y) {
+	case 1: v = max(v, 0.0f); break;                                          // relu
+	case 2: v = v * clamp(v / 6.0f + 0.5f, 0.0f, 1.0f); break;                // hardswish
+	case 3: v = clamp(q.x * v + q.y, 0.0f, 1.0f); break;                      // hardsigmoid
+	case 4: v = 1.0f / (1.0f + exp(-v)); break;                               // sigmoid
+	case 5: v = v / (1.0f + exp(-v)); break;                                  // silu
+	case 6: v = min(max(v, q.x), q.y); break;                                 // clip
+	case 7: v = v >= 0 ? v : q.x * v; break;                                  // leakyrelu
+	default: break;
+	}
+	o[i] = v * q.z + q.w;
+}
+`
+
+// Activation codes for Act.
+const (
+	ActNone = iota
+	ActRelu
+	ActHardSwish
+	ActHardSigmoid
+	ActSigmoid
+	ActSiLU
+	ActClip
+	ActLeakyRelu
+)
+
+var cnnPSO struct {
+	once                        sync.Once
+	im2col, direct, pool2d, act *Pipeline
+	err                         error
+}
+
+// PrepareCNN compiles the convolution, pooling and activation kernels.
+func (d *Device) PrepareCNN() error {
+	cnnPSO.once.Do(func() {
+		for _, k := range []struct {
+			name string
+			dst  **Pipeline
+		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act}} {
+			if *k.dst, cnnPSO.err = d.Compile(cnnSrc, k.name); cnnPSO.err != nil {
+				return
+			}
+		}
+	})
+	return cnnPSO.err
+}
+
+// ConvGeom is a 2-D convolution's shape: input [N, C, H, W], weights
+// [M, C/Group, KH, KW], output [N, M, OH, OW].
+type ConvGeom struct {
+	N, C, H, W, M, OH, OW int
+	KH, KW, SH, SW        int
+	DH, DW, PT, PL        int
+	Group                 int
+}
+
+func (g ConvGeom) args() (Arg, Arg, Arg) {
+	return u32s(g.C, g.H, g.W, g.OW), u32s(g.KH, g.KW, g.SH, g.SW), u32s(g.DH, g.DW, g.PT, g.PL)
+}
+
+// Im2ColNCHW writes cols [C·KH·KW, pc] for output pixels [p0, p0+pc) of
+// one image x [C, H, W] (g.N and g.Group are ignored; g.C is the image's
+// channel count).
+func (e *Encoder) Im2ColNCHW(x, cols Region, g ConvGeom, p0, pc int) {
+	K := g.C * g.KH * g.KW
+	if p0 < 0 || pc <= 0 || p0+pc > g.OH*g.OW {
+		e.err = fmt.Errorf("metal: Im2ColNCHW pixels [%d, %d) of %d", p0, p0+pc, g.OH*g.OW)
+		return
+	}
+	if e.ready(cnnPSO.im2col) {
+		a, b, c := g.args()
+		e.Dispatch(cnnPSO.im2col, [3]int{pc, K, 1}, [3]int{64, 4, 1}, x, cols, a, b, c, u32s(p0, pc, K, 0))
+	}
+}
+
+// ConvDirect computes the whole convolution out = conv(x, w) (+ bias) one
+// thread per output element — for grouped and depthwise convolutions,
+// whose per-group GEMMs are too small. bias may be the zero Region.
+func (e *Encoder) ConvDirect(x, w, bias, out Region, g ConvGeom) {
+	if g.Group <= 0 || g.C%g.Group != 0 || g.M%g.Group != 0 {
+		e.err = fmt.Errorf("metal: ConvDirect C=%d M=%d group=%d", g.C, g.M, g.Group)
+		return
+	}
+	hasBias := 1
+	if bias.B == nil {
+		bias, hasBias = w, 0
+	}
+	if e.ready(cnnPSO.direct) {
+		a, b, c := g.args()
+		e.Dispatch(cnnPSO.direct, [3]int{g.OH * g.OW, g.M, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
+			u32s(g.C/g.Group, g.M/g.Group, g.M, g.OH), u32s(hasBias, g.N, 0, 0))
+	}
+}
+
+// Pool2D is max (or average) pooling of planes x [planes, H, W] into out
+// [planes, OH, OW]; pads = (top, left, bottom, right). includePad selects
+// ONNX count_include_pad (window clipped to the padded extent).
+func (e *Encoder) Pool2D(x, out Region, planes, h, w, oh, ow, kh, kw, sh, sw int, pads [4]int, isMax, includePad bool) {
+	if e.ready(cnnPSO.pool2d) {
+		e.Dispatch(cnnPSO.pool2d, [3]int{oh * ow, planes, 1}, [3]int{64, 1, 1}, x, out,
+			u32s(h, w, oh, ow), u32s(kh, kw, sh, sw), u32s(pads[0], pads[1], pads[2], pads[3]), u32s(b2i(isMax), b2i(includePad), 0, 0))
+	}
+}
+
+// Act writes out[i] = act(x[i])·scale + shift for i < n (out may alias x);
+// alpha and beta parameterise hardsigmoid, clip and leakyrelu.
+func (e *Encoder) Act(act int, x, out Region, n int, alpha, beta, scale, shift float32) {
+	if e.ready(cnnPSO.act) {
+		q := make([]byte, 0, 16)
+		for _, v := range [4]float32{alpha, beta, scale, shift} {
+			q = binary.LittleEndian.AppendUint32(q, math.Float32bits(v))
+		}
+		e.Dispatch(cnnPSO.act, [3]int{n, 1, 1}, [3]int{256, 1, 1}, x, out, u32s(n, act), q)
+	}
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
