@@ -68,6 +68,33 @@ func TestEW(t *testing.T) {
 			check("unary", f32s(uo.Bytes())[i], fn(float64(uf[i])), 2e-6)
 		}
 	}
+	// Per-row scalar broadcast ([6, 35] * [6, 1]) and Copy2D / GatherRowsConst.
+	rs := buf(t, d, 6)
+	rsf := fill(r, rs)
+	ob := buf(t, d, n)
+	c2 := buf(t, d, 6*50)
+	gi := buf(t, d, 3*35)
+	s.Encode(func(e *Encoder) {
+		e.BinaryBcast(OpMul, a.At(0), rs.At(0), ob.At(0), n, 1, n, 35, 6)
+		e.Copy2D(a.At(0), c2.At(4*10), 6, 35, 35, 50)
+		e.GatherRowsConst(a.At(0), gi.At(0), []uint32{5, 0, 2}, 35)
+	})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		check("row broadcast", f32s(ob.Bytes())[i], float64(af[i])*float64(rsf[i/35]), 1e-6)
+		if f32s(c2.Bytes())[(i/35)*50+10+i%35] != af[i] {
+			t.Fatal("copy2d")
+		}
+	}
+	for k, src := range []int{5, 0, 2} {
+		for c := range 35 {
+			if f32s(gi.Bytes())[k*35+c] != af[src*35+c] {
+				t.Fatal("gather const")
+			}
+		}
+	}
 	s.Encode(func(e *Encoder) { e.Transpose(x.At(0), xt.At(0), dims, perm) })
 	s.Encode(func(e *Encoder) { e.ReduceRows(rr.At(0), ro.At(0), 7, 333, 333, true) })
 	if err := s.Flush(); err != nil {
