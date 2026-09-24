@@ -114,9 +114,13 @@ FFI lives in `kernels/metal` (darwin/arm64; a stub elsewhere):
 3. Unmasked flash attention.
 4. safetensors + bf16 storage.
 5. Graph builder + `models/qwenimage`, block-by-block parity.
-6. GPU: ~~FFI spike~~ done (`kernels/metal`). Next: GEMM + attention MSL
-   kernels vs the CPU path, then an executor backend that encodes a whole
-   DiT step into one command buffer.
+6. GPU: done for Qwen-Image (2026-09-24) — see ROADMAP phase 6. GEMMs use
+   Metal 4's matmul2d tensor ops (the matrix units: 7.6 TFLOPS f32×bf16,
+   20.6 bf16×bf16 on the M5 Pro); weights are the mapped checkpoint
+   wrapped with newBufferWithBytesNoCopy (zero copies, no packing); each
+   DiT step / text-encoder pass / VAE decode is one command buffer. The
+   Metal path is model-level (models/qwenimage over kernels/metal);
+   executor-level placement for arbitrary graphs is still open.
 
 ## Qwen-Image-2.1, measured from the checkpoint (2026-09-23)
 
