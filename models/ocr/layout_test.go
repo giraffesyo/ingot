@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/giraffesyo/ingot/kernels/metal"
 )
 
 const layoutDir = "../../testdata/layout"
@@ -131,6 +133,44 @@ func TestLayoutTruth(t *testing.T) {
 		t.Logf("%s: found %d/%d truth regions", pg.Image, found, len(pg.Regions))
 		if found < len(pg.Regions)-1 {
 			t.Errorf("%s: found only %d of %d regions", pg.Image, found, len(pg.Regions))
+		}
+	}
+}
+
+// TestLayoutGPU: the layout model on a GPUSession reads the pages exactly
+// like the CPU (same regions, labels and order; boxes within 2 px). Runs
+// without GPUSession.Check, so queued-work hazards surface here.
+func TestLayoutGPU(t *testing.T) {
+	if !metal.Available() {
+		t.Skip("no GPU backend")
+	}
+	cpu := layoutDetector(t)
+	gpu, err := NewLayoutDetector(filepath.Join(layoutDir, "pp_doc_layoutv3.onnx"), "gpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pg := range loadLayoutJSON(t, "ref.json") {
+		img := loadPage(t, pg.Image)
+		want, err := cpu.Detect(img)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := gpu.Detect(img)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s: gpu %d regions, cpu %d", pg.Image, len(got), len(want))
+		}
+		for i := range got {
+			if got[i].Label != want[i].Label || got[i].Order != want[i].Order {
+				t.Fatalf("%s region %d: gpu %s/%d, cpu %s/%d", pg.Image, i, got[i].Label, got[i].Order, want[i].Label, want[i].Order)
+			}
+			for k := range 4 {
+				if math.Abs(got[i].Box[k]-want[i].Box[k]) > 2 {
+					t.Fatalf("%s region %d: gpu box %v, cpu %v", pg.Image, i, got[i].Box, want[i].Box)
+				}
+			}
 		}
 	}
 }

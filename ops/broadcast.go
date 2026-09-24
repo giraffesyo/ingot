@@ -80,7 +80,7 @@ func binaryF32(ctx *Ctx, a, b *tensor.Tensor, fn func(x, y float32) float32) (*t
 		}
 		return out, nil
 	}
-	if len(bf) == 1 {
+	if len(bf) == 1 && len(bs) <= len(as) { // a higher-rank scalar-sized b still broadcasts the rank
 		out := ctx.New(tensor.F32, as...)
 		of := out.F32()
 		y := bf[0]
@@ -89,7 +89,7 @@ func binaryF32(ctx *Ctx, a, b *tensor.Tensor, fn func(x, y float32) float32) (*t
 		}
 		return out, nil
 	}
-	if len(af) == 1 {
+	if len(af) == 1 && len(as) <= len(bs) {
 		out := ctx.NewUninit(tensor.F32, bs...)
 		of := out.F32()
 		x := af[0]

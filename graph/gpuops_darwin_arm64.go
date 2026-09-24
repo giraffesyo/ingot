@@ -142,6 +142,8 @@ func gpuOpFor(n *Node) gpuOp {
 			return resizeGPU{attrs: a, name: n.Name}
 		case "Expand":
 			return expandGPU{}
+		case "Identity":
+			return identityGPU{}
 		case "Slice":
 			if a.Has("starts") { // opset < 10: attributes
 				return nil
@@ -1025,6 +1027,27 @@ func (expandGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.CopyND(rx[0], ro[0], oshape, sx) }, true
 	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.BinaryBcast(metal.OpMin, rx[0], rx[0], ro[0], n, dx, mx, dx, mx) }, true
+}
+
+// identityGPU is Identity on f32: a copy (the CPU op clones too).
+type identityGPU struct{}
+
+func (identityGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) < 1 || in[0] == nil || !allF32(in[0]) || in[0].Numel() == 0 {
+		return nil, nil, false
+	}
+	rx, ok := c.regions(in[0])
+	if !ok {
+		return nil, nil, false
+	}
+	out := c.out(in[0].Shape()...)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	n := in[0].Numel()
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.Copy2D(rx[0], ro[0], 1, n, n, n) }, true
 }
 
 // sliceGPU is Slice (opset ≥ 10: parameters as integer inputs, read on the

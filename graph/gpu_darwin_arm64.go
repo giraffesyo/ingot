@@ -4,6 +4,9 @@ package graph
 
 import (
 	"fmt"
+	"math"
+	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -60,6 +63,21 @@ type GPUSession struct {
 	Profile  bool
 	OpTime   map[string]time.Duration
 	NodeTime map[*Node]time.Duration
+	// Check, when set, flushes after every GPU node, re-runs the node's
+	// CPU op on the same inputs and records nodes whose outputs differ
+	// (relative max error above 1e-3 of the output scale) in Mismatches —
+	// a diagnostic for GPU op bugs, not for production runs.
+	Check      bool
+	Mismatches []Mismatch
+}
+
+// Mismatch is a GPU node whose output disagreed with its CPU op (Check).
+type Mismatch struct {
+	Node   *Node
+	Output int
+	MaxAbs float64 // largest |gpu − cpu|
+	Scale  float64 // largest |cpu|
+	Detail string  // shape / dtype disagreement, if any
 }
 
 // CompileGPU optimizes g and compiles it for the GPU (darwin/arm64 with
@@ -96,8 +114,16 @@ func CompileGPU(g *Graph, opts ...GPUOption) (*GPUSession, error) {
 		o(gs)
 	}
 	gs.gops = make([]gpuOp, len(s.steps))
+	skip := map[string]bool{} // INGOT_GPU_SKIP=OpType,...: keep those on the CPU (bisecting)
+	for _, t := range strings.Split(os.Getenv("INGOT_GPU_SKIP"), ",") {
+		if t != "" {
+			skip[t] = true
+		}
+	}
 	for i, st := range s.steps {
-		gs.gops[i] = gpuOpFor(st.node)
+		if !skip[st.node.OpType] && !skip["*"] {
+			gs.gops[i] = gpuOpFor(st.node)
+		}
 	}
 	return gs, nil
 }
@@ -123,7 +149,9 @@ func (s *GPUSession) Close() {
 
 // viewOps return views of their input and never allocate: they may run on
 // the CPU while GPU work is pending.
-var viewOps = map[string]bool{"Reshape": true, "Squeeze": true, "Unsqueeze": true, "Flatten": true, "Identity": true}
+// (Identity is not one: its CPU op copies — it runs as a GPU copy, see
+// identityGPU, or flushes like any data-reading CPU node.)
+var viewOps = map[string]bool{"Reshape": true, "Squeeze": true, "Unsqueeze": true, "Flatten": true}
 
 // metaOps read only their input's shape.
 var metaOps = map[string]bool{"Shape": true, "Size": true}
@@ -170,6 +198,50 @@ func (s *GPUSession) region(t *tensor.Tensor) (metal.Region, bool) {
 		s.wraps[key] = b
 	}
 	return b.At(off), true
+}
+
+// checkNode compares a flushed GPU node's outputs with its CPU op (Check).
+func (s *GPUSession) checkNode(st *step, in, gpu []*tensor.Tensor) {
+	cpu, err := st.op.Run(&ops.Ctx{Pool: tensor.NewPool()}, in)
+	if err != nil {
+		s.Mismatches = append(s.Mismatches, Mismatch{Node: st.node, Detail: "cpu op: " + err.Error()})
+		return
+	}
+	for k := range min(len(cpu), len(gpu)) {
+		c, g := cpu[k], gpu[k]
+		if c == nil || g == nil {
+			continue
+		}
+		if !c.Shape().Equal(g.Shape()) || c.DType() != g.DType() {
+			s.Mismatches = append(s.Mismatches, Mismatch{Node: st.node, Output: k,
+				Detail: fmt.Sprintf("gpu %s%v, cpu %s%v", g.DType(), g.Shape(), c.DType(), c.Shape())})
+			continue
+		}
+		if c.DType() != tensor.F32 {
+			continue
+		}
+		var maxAbs, scale float64
+		for i, v := range c.F32() {
+			w := g.F32()[i]
+			cv, gv := float64(v), float64(w)
+			if cv == gv || math.IsNaN(cv) && math.IsNaN(gv) { // incl. matching ±Inf
+				if !math.IsInf(cv, 0) && !math.IsNaN(cv) {
+					scale = math.Max(scale, math.Abs(cv))
+				}
+				continue
+			}
+			d := math.Abs(gv - cv)
+			if d > maxAbs || math.IsNaN(d) {
+				maxAbs = d
+			}
+			if !math.IsInf(cv, 0) && !math.IsNaN(cv) {
+				scale = math.Max(scale, math.Abs(cv))
+			}
+		}
+		if maxAbs > 1e-3*math.Max(scale, 1e-6) || math.IsNaN(maxAbs) {
+			s.Mismatches = append(s.Mismatches, Mismatch{Node: st.node, Output: k, MaxAbs: maxAbs, Scale: scale})
+		}
+	}
 }
 
 // profileRepeat is how many times Profile encodes each GPU node.
@@ -286,6 +358,13 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 				s.stream.Encode(enc)
 				placed = true
 				s.GPUSteps++
+				if s.Check {
+					if err := flush(); err != nil {
+						return nil, fmt.Errorf("graph: gpu: %w", err)
+					}
+					gen++
+					s.checkNode(st, in, outs)
+				}
 				if s.Profile {
 					// Repeat the node (encodings are idempotent: every node
 					// overwrites its outputs) so its time is measured at

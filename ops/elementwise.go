@@ -50,6 +50,11 @@ func (o *binaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 // that need the generic broadcasting path.
 func binaryFast(ctx *Ctx, a, b *tensor.Tensor, kind byte) *tensor.Tensor {
 	af, bf := a.F32(), b.F32()
+	// The scalar cases below write the other operand's shape: only right
+	// when that operand has the higher rank ([] · [1] broadcasts to [1]).
+	if (len(bf) == 1 && b.Shape().Rank() > a.Shape().Rank()) || (len(af) == 1 && a.Shape().Rank() > b.Shape().Rank()) {
+		return nil
+	}
 	switch {
 	case a.Shape().Equal(b.Shape()):
 		out := ctx.NewUninit(tensor.F32, a.Shape()...)
