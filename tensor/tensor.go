@@ -239,6 +239,32 @@ func FromI64(data []int64, shape ...int) *Tensor {
 	return t
 }
 
+// FromBytes wraps raw little-endian storage (no copy) — e.g. a memory-mapped
+// weight file — as a tensor of the given dtype and shape. buf must hold
+// exactly numel·dt.Size() bytes and be Aligned for dt, since the typed
+// accessors reinterpret it in place.
+func FromBytes(dt DType, buf []byte, shape ...int) *Tensor {
+	s := Shape(shape)
+	if len(buf) != s.Numel()*dt.Size() {
+		panic(fmt.Sprintf("tensor: %d bytes != numel %d × %d for shape %v", len(buf), s.Numel(), dt.Size(), s))
+	}
+	if !Aligned(dt, buf) {
+		panic(fmt.Sprintf("tensor: %s storage not %d-byte aligned", dt, dt.Size()))
+	}
+	t := &Tensor{dtype: dt}
+	t.setShape(shape)
+	t.buf = buf[:len(buf):len(buf)]
+	return t
+}
+
+// Aligned reports whether buf's start is aligned for dt's typed accessors.
+func Aligned(dt DType, buf []byte) bool {
+	if len(buf) == 0 {
+		return true
+	}
+	return uintptr(unsafe.Pointer(&buf[0]))%uintptr(dt.Size()) == 0
+}
+
 // Scalar returns a rank-0 f32 tensor.
 func Scalar(v float32) *Tensor {
 	t := New(F32)

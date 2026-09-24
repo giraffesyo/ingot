@@ -51,3 +51,27 @@ func TestShape(t *testing.T) {
 		t.Fatal(s.String())
 	}
 }
+
+func TestFromBytes(t *testing.T) {
+	buf := make([]byte, 4*6+1)
+	aligned := buf[:24]
+	if !Aligned(F32, aligned) {
+		t.Skip("allocator returned an unaligned []byte")
+	}
+	x := FromBytes(F32, aligned, 2, 3)
+	x.F32()[4] = 1.5
+	if y := FromBytes(F32, aligned, 6); y.F32()[4] != 1.5 {
+		t.Fatal("FromBytes must not copy")
+	}
+	mustPanic := func(name string, f func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s: want panic", name)
+			}
+		}()
+		f()
+	}
+	mustPanic("size", func() { FromBytes(F32, aligned[:20], 2, 3) })
+	mustPanic("align", func() { FromBytes(F32, buf[1:25], 2, 3) })
+}
