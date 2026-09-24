@@ -24,7 +24,7 @@ import (
 // and no CJK — so PARSeq recognises words, not lines; the PP-OCR Recognizer
 // remains the line recogniser.
 type Parseq struct {
-	sess    *graph.Session
+	sess    graph.Runner
 	inName  string
 	outName string
 	charset []rune // output class i+1 -> charset[i]; class 0 is EOS
@@ -39,6 +39,11 @@ const (
 // NewParseq loads a PARSeq ONNX export and its charset file (the training
 // charset as one line, in output-class order).
 func NewParseq(modelPath, charsetPath string) (*Parseq, error) {
+	return NewParseqOn(modelPath, charsetPath, "cpu")
+}
+
+// NewParseqOn loads PARSeq for a device (see graph.CompileOn).
+func NewParseqOn(modelPath, charsetPath, device string) (*Parseq, error) {
 	m, err := onnx.DecodeFile(modelPath)
 	if err != nil {
 		return nil, err
@@ -50,7 +55,7 @@ func NewParseq(modelPath, charsetPath string) (*Parseq, error) {
 	if len(g.Inputs) != 1 || len(g.Outputs) != 1 {
 		return nil, fmt.Errorf("parseq: expected 1 input/1 output, got %d/%d", len(g.Inputs), len(g.Outputs))
 	}
-	s, err := graph.Compile(g)
+	s, err := graph.CompileOn(g, device)
 	if err != nil {
 		return nil, err
 	}

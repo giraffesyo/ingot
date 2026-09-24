@@ -13,7 +13,7 @@ import (
 // whether the crop is upside-down (rotated 180°). Rotation is applied by
 // relabelling the box corners — no pixel work.
 type Classifier struct {
-	sess    *graph.Session
+	sess    graph.Runner
 	inName  string
 	outName string
 	// Thresh: rotate only when P(180°) is at least this (PP-OCR default 0.9 —
@@ -28,8 +28,11 @@ const (
 	clsW = 192
 )
 
-// NewClassifier loads a PP-OCR direction classifier from an ONNX file.
-func NewClassifier(path string) (*Classifier, error) {
+// NewClassifier loads a PP-OCR direction classifier from an ONNX file (CPU).
+func NewClassifier(path string) (*Classifier, error) { return NewClassifierOn(path, "cpu") }
+
+// NewClassifierOn loads the classifier for a device (see graph.CompileOn).
+func NewClassifierOn(path, device string) (*Classifier, error) {
 	m, err := onnx.DecodeFile(path)
 	if err != nil {
 		return nil, err
@@ -38,7 +41,7 @@ func NewClassifier(path string) (*Classifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := graph.Compile(g)
+	s, err := graph.CompileOn(g, device)
 	if err != nil {
 		return nil, err
 	}

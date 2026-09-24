@@ -47,13 +47,20 @@ type Result struct {
 	Conf float64
 }
 
-// NewPipeline loads detection + recognition models and the char dictionary.
+// NewPipeline loads detection + recognition models and the char dictionary
+// (CPU).
 func NewPipeline(detPath, recPath, dictPath string) (*Pipeline, error) {
-	d, err := NewDetector(detPath)
+	return NewPipelineOn(detPath, recPath, dictPath, "cpu", "cpu")
+}
+
+// NewPipelineOn loads the pipeline with detection and recognition each on
+// a device (see graph.CompileOn).
+func NewPipelineOn(detPath, recPath, dictPath, detDevice, recDevice string) (*Pipeline, error) {
+	d, err := NewDetectorOn(detPath, detDevice)
 	if err != nil {
 		return nil, err
 	}
-	r, err := NewRecognizer(recPath, dictPath)
+	r, err := NewRecognizerOn(recPath, dictPath, recDevice)
 	if err != nil {
 		return nil, err
 	}

@@ -58,6 +58,8 @@ func TestConv(t *testing.T) {
 		{N: 1, C: 16, H: 9, W: 11, M: 24, KH: 1, KW: 1, SH: 1, SW: 1, DH: 1, DW: 1, Group: 1},
 		{N: 2, C: 8, H: 12, W: 10, M: 8, KH: 3, KW: 3, SH: 2, SW: 2, DH: 1, DW: 1, PT: 1, PL: 1, Group: 8},
 		{N: 1, C: 12, H: 7, W: 9, M: 6, KH: 5, KW: 3, SH: 1, SW: 2, DH: 2, DW: 1, PT: 2, PL: 0, Group: 3},
+		{N: 2, C: 6, H: 13, W: 17, M: 6, KH: 5, KW: 5, SH: 2, SW: 1, DH: 1, DW: 1, PT: 2, PL: 2, Group: 6},
+		{N: 1, C: 5, H: 11, W: 23, M: 5, KH: 3, KW: 7, SH: 1, SW: 2, DH: 2, DW: 2, PT: 1, PL: 3, Group: 5},
 	} {
 		t.Run(fmt.Sprintf("%dx%dx%dx%d_k%dx%d_s%d%d_d%d%d_g%d", g.N, g.C, g.H, g.W, g.KH, g.KW, g.SH, g.SW, g.DH, g.DW, g.Group), func(t *testing.T) {
 			// Symmetric pads in these cases: bottom/right = top/left.
@@ -73,6 +75,9 @@ func TestConv(t *testing.T) {
 			cols := buf(t, d, K*pc)
 			err := d.Run(func(e *Encoder) {
 				e.ConvDirect(x.At(0), w.At(0), b.At(0), yd.At(0), g)
+				if DepthwiseOK(g) {
+					e.ConvDepthwise(x.At(0), w.At(0), b.At(0), yb.At(0), g)
+				}
 				if g.Group != 1 {
 					return
 				}
@@ -93,7 +98,7 @@ func TestConv(t *testing.T) {
 			}
 			tol := 1e-5 * math.Sqrt(float64(K)) * 4
 			for name, y := range map[string]*Buffer{"direct": yd, "im2col": yg, "blocked": yb} {
-				if name != "direct" && g.Group != 1 {
+				if name == "im2col" && g.Group != 1 || name == "blocked" && g.Group != 1 && !DepthwiseOK(g) {
 					continue
 				}
 				for i, v := range f32s(y.Bytes()) {
@@ -383,4 +388,55 @@ func bufB(b *testing.B, d *Device, floats int) *Buffer {
 	}
 	b.Cleanup(buf.Release)
 	return buf
+}
+
+// BenchmarkConvDepthwise: the direct kernel on depthwise convs (PP-OCR
+// recognizer / detector shapes).
+func BenchmarkConvDepthwise(b *testing.B) {
+	d := openDev(b)
+	if err := d.PrepareCNN(); err != nil {
+		b.Fatal(err)
+	}
+	for _, g := range []ConvGeom{
+		{N: 8, C: 240, H: 12, W: 134, M: 240, KH: 5, KW: 5, SH: 1, SW: 1, DH: 1, DW: 1, PT: 2, PL: 2, Group: 240, OH: 12, OW: 134},
+		{N: 1, C: 192, H: 60, W: 60, M: 192, KH: 5, KW: 5, SH: 1, SW: 1, DH: 1, DW: 1, PT: 2, PL: 2, Group: 192, OH: 60, OW: 60},
+	} {
+		x, w, y := bufB(b, d, g.N*g.C*g.H*g.W), bufB(b, d, g.M*g.KH*g.KW), bufB(b, d, g.N*g.M*g.OH*g.OW)
+		b.Run(fmt.Sprintf("n%d_c%d_%dx%d_k%d", g.N, g.C, g.H, g.W, g.KH), func(b *testing.B) {
+			for b.Loop() {
+				d.Run(func(e *Encoder) { e.ConvDirect(x.At(0), w.At(0), Region{}, y.At(0), g) })
+			}
+			b.ReportMetric(float64(g.N*g.M*g.OH*g.OW*g.KH*g.KW*2)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+		b.Run(fmt.Sprintf("n%d_c%d_%dx%d_k%d/dw", g.N, g.C, g.H, g.W, g.KH), func(b *testing.B) {
+			for b.Loop() {
+				d.Run(func(e *Encoder) { e.ConvDepthwise(x.At(0), w.At(0), Region{}, y.At(0), g) })
+			}
+			b.ReportMetric(float64(g.N*g.M*g.OH*g.OW*g.KH*g.KW*2)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+	}
+}
+
+// BenchmarkRoundTrip is one empty command buffer: the fixed cost inside
+// every Device.Run-based kernel benchmark.
+func BenchmarkRoundTrip(b *testing.B) {
+	d := openDev(b)
+	for b.Loop() {
+		d.Run(func(e *Encoder) {})
+	}
+}
+
+// BenchmarkCopyBandwidth: a plain 2-D copy of 12 MB (the bandwidth
+// reference for memory-bound kernels).
+func BenchmarkCopyBandwidth(b *testing.B) {
+	d := openDev(b)
+	if err := d.PrepareEW(); err != nil {
+		b.Fatal(err)
+	}
+	const rows, cols = 1920, 1608
+	x, y := bufB(b, d, rows*cols), bufB(b, d, rows*cols)
+	for b.Loop() {
+		d.Run(func(e *Encoder) { e.Copy2D(x.At(0), y.At(0), rows, cols, cols, cols) })
+	}
+	b.ReportMetric(2*4*rows*cols*float64(b.N)/b.Elapsed().Seconds()/1e9, "GB/s")
 }
