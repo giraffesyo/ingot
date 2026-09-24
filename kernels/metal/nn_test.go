@@ -303,3 +303,53 @@ func TestSoftmaxMaskedGather(t *testing.T) {
 		}
 	}
 }
+
+// TestGemmBF16Activations: CastBF16 + bf16×bf16 GEMMs (NT, NN, NN-acc) vs
+// a float64 oracle over the same bf16-rounded operands.
+func TestGemmBF16Activations(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(7, 7))
+	const M, N, K = 70, 96, 130
+	a, a16 := buf(t, d, M*K), buf(t, d, M*K)
+	w16, c := buf(t, d, N*K), buf(t, d, M*N)
+	af := fill(r, a)
+	wv := make([]float64, N*K)
+	wb := w16.Bytes()
+	for i := range wv {
+		bits := uint16(math.Float32bits(r.Float32()*2-1) >> 16)
+		wb[2*i], wb[2*i+1] = byte(bits), byte(bits>>8)
+		wv[i] = float64(math.Float32frombits(uint32(bits) << 16))
+	}
+	// The same bf16 values double as an NN operand viewed as [K, N].
+	c2 := buf(t, d, M*N)
+	if err := d.Run(func(e *Encoder) {
+		e.CastBF16(a.At(0), a16.At(0), M, K, K, K)
+		e.Gemm(Gemm{M: M, N: N, K: K, A: a16.At(0), B: w16.At(0), C: c.At(0), TransB: true, BF16: true, ABF16: true})
+		e.Gemm(Gemm{M: M, N: N, K: K / 2, A: a16.At(0), LDA: K, B: w16.At(0), C: c2.At(0), BF16: true, ABF16: true})
+		e.Gemm(Gemm{M: M, N: N, K: K - K/2, A: a16.At(2 * (K / 2)), LDA: K, B: w16.At(2 * (K / 2) * N), C: c2.At(0),
+			BF16: true, ABF16: true, Accumulate: true})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a16v := func(i int) float64 { // what CastBF16 produced (round to nearest even)
+		b := a16.Bytes()
+		return float64(math.Float32frombits(uint32(b[2*i])<<16 | uint32(b[2*i+1])<<24))
+	}
+	for i := range M * K {
+		if got, x := a16v(i), float64(af[i]); math.Abs(got-x) > math.Abs(x)/256 {
+			t.Fatalf("cast[%d] = %g from %g", i, got, x)
+		}
+	}
+	cf, c2f := f32s(c.Bytes()), f32s(c2.Bytes())
+	for i := range M {
+		for j := range N {
+			var nt, nn float64
+			for p := range K {
+				nt += a16v(i*K+p) * wv[j*K+p]
+				nn += a16v(i*K+p) * wv[p*N+j]
+			}
+			near(t, "NT bb", cf[i*N+j], nt, 1e-5*math.Sqrt(K))
+			near(t, "NN bb (split, accumulated)", c2f[i*N+j], nn, 1e-5*math.Sqrt(K))
+		}
+	}
+}

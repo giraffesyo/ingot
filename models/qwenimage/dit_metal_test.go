@@ -88,4 +88,28 @@ func TestMetalDiTParity(t *testing.T) {
 		compare(t, mode+": step1 target rows", step("hidden_states", 0.7), ref.tensor(t, "out_step1").F32()[l.Prefix*C:], 5e-4)
 		compare(t, mode+": step2 cached", step("hidden_states_step2", 0.4), ref.tensor(t, "out_step2_cached").F32(), 5e-4)
 	}
+
+	// Fast mode: bf16 GEMM inputs. Error grows to bf16's ~3 significant
+	// digits (tolerance 1% of the output range).
+	f, err := NewMetalDiT(cfg, set, l, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	f.Fast = true
+	if err := f.Prefix(enc.Reshape(enc.Shape()[1:]...), nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		in, want string
+		t0       float32
+		rows     int
+	}{{"hidden_states", "out_step1", 0.7, l.Prefix * C}, {"hidden_states_step2", "out_step2_cached", 0.4, 0}} {
+		x := ref.tensor(t, c.in)
+		out, err := f.Step(x.Reshape(x.Shape()[1:]...), c.t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compare(t, "fast (bf16): "+c.want, out.F32(), ref.tensor(t, c.want).F32()[c.rows:], 0.15)
+	}
 }

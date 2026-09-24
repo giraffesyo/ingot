@@ -30,6 +30,7 @@ func main() {
 	steps := flag.Int("steps", 40, "denoising steps")
 	seed := flag.Uint64("seed", 42, "noise seed")
 	device := flag.String("device", "auto", "DiT device: auto (GPU when available), gpu, cpu")
+	fast := flag.Bool("fast", true, "GPU: bf16 GEMM inputs (~2x faster, outputs within ~1%); -fast=false for f32")
 	model := flag.String("model", "", "Qwen-Image-2.1 snapshot directory (default: the HF cache)")
 	flag.Parse()
 
@@ -55,7 +56,7 @@ func main() {
 	}
 	t0 := time.Now()
 	res, err := qwenimage.Generate(dir, qwenimage.Options{
-		Prompt: *prompt, Width: w, Height: h, Steps: *steps, Seed: *seed, Device: *device,
+		Prompt: *prompt, Width: w, Height: h, Steps: *steps, Seed: *seed, Device: *device, Fast: *fast,
 		Log: func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	})
 	if err != nil {

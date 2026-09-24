@@ -153,9 +153,9 @@ kernel void gated_add(device float* x [[buffer(0)]], device const float* g [[buf
 `
 
 var nnPSO struct {
-	once                                                              sync.Once
+	once                                                               sync.Once
 	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
-	err                                                               error
+	err                                                                error
 }
 
 func (d *Device) nnPipelines() error {
