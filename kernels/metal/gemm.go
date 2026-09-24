@@ -22,9 +22,14 @@ const gemmSrc = `
 using namespace metal;
 using namespace mpp::tensor_ops;
 
-// d = (M, N, K), ld = (lda, ldb, ldc) in elements.
+// d = (M, N, K), ld = (lda, ldb, ldc) in elements; batch z offsets each
+// operand by sb = (strideA, strideB, strideC) elements.
 template <bool NT, typename TA, typename TB, matmul2d_descriptor::mode MODE>
-void gemm(device TA* A, device TB* B, device float* C, uint4 d, uint4 ld, uint2 tg) {
+void gemm(device TA* A, device TB* B, device float* C, uint4 d, uint4 ld, uint4 sb, uint3 tg3) {
+	A += tg3.z * sb.x;
+	B += tg3.z * sb.y;
+	C += tg3.z * sb.z;
+	const uint2 tg = tg3.xy;
 	using ext = dextents<int32_t, 2>;
 	tensor<device TA, ext, tensor_inline> tA(A, ext(d.z, d.x), array<int32_t, 2>{1, int(ld.x)});
 	tensor<device float, ext, tensor_inline> tC(C, ext(d.y, d.x), array<int32_t, 2>{1, int(ld.z)});
@@ -44,8 +49,8 @@ void gemm(device TA* A, device TB* B, device float* C, uint4 d, uint4 ld, uint2 
 }
 #define GEMM(name, NT, TA, TB, MODE) \
 kernel void name(device TA* A [[buffer(0)]], device TB* B [[buffer(1)]], device float* C [[buffer(2)]], \
-                 constant uint4& d [[buffer(3)]], constant uint4& ld [[buffer(4)]], \
-                 uint2 tg [[threadgroup_position_in_grid]]) { gemm<NT, TA, TB, matmul2d_descriptor::mode::MODE>(A, B, C, d, ld, tg); }
+                 constant uint4& d [[buffer(3)]], constant uint4& ld [[buffer(4)]], constant uint4& sb [[buffer(5)]], \
+                 uint3 tg [[threadgroup_position_in_grid]]) { gemm<NT, TA, TB, matmul2d_descriptor::mode::MODE>(A, B, C, d, ld, sb, tg); }
 GEMM(gemm_nt_f32, true, float, float, multiply)
 GEMM(gemm_nt_bf16, true, float, bfloat, multiply)
 GEMM(gemm_nn_f32, false, float, float, multiply)
@@ -67,12 +72,16 @@ kernel void cast_bf16(device const float* src [[buffer(0)]], device bfloat* dst 
 // (PyTorch Linear weights, or K for Q·Kᵀ); otherwise [K,N]. BF16 selects a
 // bf16 B. ABF16 selects a bf16 A as well (then B must be bf16: the matrix
 // units' fast path, ~2.6x f32 A); C is always f32 and accumulation f32.
-// Accumulate adds into C (NN only) instead of overwriting it.
+// Accumulate adds into C (NN only) instead of overwriting it. Batch > 1
+// runs that many GEMMs in one dispatch, operand i of batch b at element
+// offset b·Stride (0 shares the operand, e.g. weights).
 type Gemm struct {
 	M, N, K                         int
 	A, B, C                         Region
 	LDA, LDB, LDC                   int // 0 = packed (K, K or N, N)
 	TransB, BF16, ABF16, Accumulate bool
+	Batch                           int
+	StrideA, StrideB, StrideC       int
 }
 
 var gemmPSO struct {
@@ -153,20 +162,22 @@ func (e *Encoder) Gemm(g Gemm) {
 		e.err = fmt.Errorf("metal: Accumulate needs NN")
 		return
 	}
-	span := func(r Region, rows, cols, ld, esz int) error {
-		if need := r.Off + ((rows-1)*ld+cols)*esz; need > r.B.n {
+	batch := max(g.Batch, 1)
+	span := func(r Region, rows, cols, ld, esz, stride int) error {
+		if need := r.Off + ((batch-1)*stride+(rows-1)*ld+cols)*esz; need > r.B.n {
 			return fmt.Errorf("metal: gemm %d×%d×%d: operand needs %d bytes, buffer has %d", g.M, g.N, g.K, need, r.B.n)
 		}
 		return nil
 	}
-	for _, err := range []error{span(g.A, g.M, g.K, lda, aesz), span(g.B, bRows, bCols, ldb, esz), span(g.C, g.M, g.N, ldc, 4)} {
+	for _, err := range []error{span(g.A, g.M, g.K, lda, aesz, g.StrideA), span(g.B, bRows, bCols, ldb, esz, g.StrideB),
+		span(g.C, g.M, g.N, ldc, 4, g.StrideC)} {
 		if err != nil {
 			e.err = err
 			return
 		}
 	}
-	e.Dispatch(p, [3]int{(g.N + 63) / 64 * 128, (g.M + 63) / 64, 1}, [3]int{128, 1, 1},
-		g.A, g.B, g.C, u32s(g.M, g.N, g.K, 0), u32s(lda, ldb, ldc, 0))
+	e.Dispatch(p, [3]int{(g.N + 63) / 64 * 128, (g.M + 63) / 64, batch}, [3]int{128, 1, 1},
+		g.A, g.B, g.C, u32s(g.M, g.N, g.K, 0), u32s(lda, ldb, ldc, 0), u32s(g.StrideA, g.StrideB, g.StrideC, 0))
 }
 
 // CastBF16 writes dst = bf16(src) over [rows, cols] (row strides in
