@@ -196,6 +196,18 @@ func (t *Tensor) I16() []int16 {
 	return unsafe.Slice((*int16)(unsafe.Pointer(&t.buf[t.offset*2])), n)
 }
 
+// BF16 returns the raw bfloat16 storage as bit patterns (contiguous tensors
+// only); widen with math.Float32frombits(uint32(v) << 16).
+func (t *Tensor) BF16() []uint16 {
+	t.mustDType(BF16)
+	t.mustContiguous()
+	n := t.Numel()
+	if n == 0 {
+		return nil
+	}
+	return unsafe.Slice((*uint16)(unsafe.Pointer(&t.buf[t.offset*2])), n)
+}
+
 // Bool returns the underlying bool storage (contiguous tensors only).
 func (t *Tensor) Bool() []bool {
 	t.mustDType(Bool)

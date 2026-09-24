@@ -1,6 +1,7 @@
 package gemm
 
 import (
+	"math"
 	"sync"
 
 	"github.com/giraffesyo/ingot/kernels/par"
@@ -882,4 +883,39 @@ func SgemmPackedB(m int, alpha float32, a []float32, lda int, pb *PackedB, beta 
 	for i0 := 0; i0 < m; i0 += MC {
 		g.smallM(min(MC, m-i0), n, k, a[i0*lda:], nil, c[i0*ldc:], firstOverwrite, workers)
 	}
+}
+
+// PackBBF16 is PackB for bfloat16 weights (bit patterns): each KC×NR panel is
+// widened to f32 into scratch and packed with the f32 panel packers, so the
+// result is bit-identical to PackB over the widened matrix — without ever
+// materialising it. Panels pack in parallel.
+func PackBBF16(transB bool, k, n int, b []uint16, ldb int) *PackedB {
+	nkb := (k + KC - 1) / KC
+	np := (n + NR - 1) / NR
+	p := &PackedB{k: k, n: n, np: np, data: make([]float32, nkb*np*KC*NR)}
+	par.For(nkb*np, 1, func(task, _ int) {
+		kb, jp := task/np, task%np
+		p0, j0 := kb*KC, jp*NR
+		kc, nr := min(KC, k-p0), min(NR, n-j0)
+		var scratch [KC * NR]float32
+		dst := p.data[(kb*np+jp)*KC*NR:]
+		if transB { // panel rows j0.., cols p0.. of the stored [n×k]
+			for c := range nr {
+				row := b[(j0+c)*ldb+p0 : (j0+c)*ldb+p0+kc]
+				for i, v := range row {
+					scratch[c*kc+i] = math.Float32frombits(uint32(v) << 16)
+				}
+			}
+			packBPanelT(kc, nr, scratch[:], kc, dst)
+			return
+		}
+		for r := range kc {
+			row := b[(p0+r)*ldb+j0 : (p0+r)*ldb+j0+nr]
+			for i, v := range row {
+				scratch[r*nr+i] = math.Float32frombits(uint32(v) << 16)
+			}
+		}
+		packBPanel(kc, nr, scratch[:], nr, dst)
+	})
+	return p
 }
