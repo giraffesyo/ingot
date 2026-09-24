@@ -25,6 +25,9 @@ func BenchmarkSgemm(b *testing.B) {
 		{"rec_m480_n240_k480", 480, 240, 480},
 		{"conv3x3_m24_n25600_k864", 24, 25600, 864},
 		{"pw_m96_n25600_k96", 96, 25600, 96},
+		{"dit_attn_m256_n3072_k3072", 256, 3072, 3072},
+		{"dit_mlp_m256_n12288_k3072", 256, 12288, 3072},
+		{"dit_down_m256_n3072_k12288", 256, 3072, 12288},
 	} {
 		a := make([]float32, sh.m*sh.k)
 		bm := make([]float32, sh.k*sh.n)
@@ -47,6 +50,16 @@ func BenchmarkSgemm(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				sme.SgemmPacked(pa, sh.n, bm, sh.n, c, sh.n, true)
+			}
+			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+		})
+		// The fair baseline for weights: NEON with B packed once (what the
+		// model paths run). Unpacked "neon" below re-packs B per call.
+		b.Run(sh.name+"/neon-packed", func(b *testing.B) {
+			pb := gemm.PackB(false, sh.k, sh.n, bm, sh.n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				gemm.SgemmPackedB(sh.m, 1, a, sh.k, pb, 0, c, sh.n)
 			}
 			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})

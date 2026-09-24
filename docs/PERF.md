@@ -2434,3 +2434,18 @@ per-region adaptive width is on the do-not-retry list). Default on amd64
 only; Apple measurement is inconclusive today (machine loaded ~3x) and the
 blocked layout never paid there. INGOT_BLK_DENSE=0/1 overrides;
 TestResNetishDenseBlocked forces it on every platform.
+
+## NEGATIVE: SME for the DiT's large GEMMs at MT (2026-09-24)
+
+Qwen-Image DiT GEMMs (M=256 tokens, K=3072-9216, N=3072-12288) looked like
+an SME win: sme.SgemmPacked at 8-12 workers ran 1.2-1.5 TFLOPS vs 0.4-0.6
+for "neon" in BenchmarkSgemm. That baseline re-packs B every call; the
+model's bf16 weights are packed once (gemm.PackBBF16 → SgemmPackedB), and
+packed NEON runs the same shapes at 1.6-1.7 TFLOPS. Like for like (both
+packed, same process, best of 5): SME +13% at N=9216, parity at 3072², and
+−15-20% at K=9216. A full SME route (one pack per weight, kind chosen at
+first use; oracle-tested) was built and reverted. BenchmarkSgemm now has
+dit_* shapes and a neon-packed column so the fair comparison is the
+default. The CPU DiT step's gap is elsewhere: GEMMs run ~0.85 TFLOPS in
+the model vs 1.65 isolated — investigate on a quiet machine (this round
+ran at load average 18-29 from unrelated jobs).
