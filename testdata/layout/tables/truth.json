@@ -1,0 +1,221 @@
+[
+ {
+  "image": "table_0.png",
+  "rows": [
+   [
+    {
+     "text": "model",
+     "colspan": 1
+    },
+    {
+     "text": "cpu ms",
+     "colspan": 1
+    },
+    {
+     "text": "gpu ms",
+     "colspan": 1
+    },
+    {
+     "text": "ratio",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "detector",
+     "colspan": 1
+    },
+    {
+     "text": "17.4",
+     "colspan": 1
+    },
+    {
+     "text": "12.0",
+     "colspan": 1
+    },
+    {
+     "text": "1.45",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "recognizer",
+     "colspan": 1
+    },
+    {
+     "text": "72.0",
+     "colspan": 1
+    },
+    {
+     "text": "59.0",
+     "colspan": 1
+    },
+    {
+     "text": "1.22",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "parseq",
+     "colspan": 1
+    },
+    {
+     "text": "9.5",
+     "colspan": 1
+    },
+    {
+     "text": "6.0",
+     "colspan": 1
+    },
+    {
+     "text": "1.58",
+     "colspan": 1
+    }
+   ]
+  ]
+ },
+ {
+  "image": "table_1.png",
+  "rows": [
+   [
+    {
+     "text": "name",
+     "colspan": 1
+    },
+    {
+     "text": "value",
+     "colspan": 1
+    },
+    {
+     "text": "unit",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "width",
+     "colspan": 1
+    },
+    {
+     "text": "1920",
+     "colspan": 1
+    },
+    {
+     "text": "px",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "height",
+     "colspan": 1
+    },
+    {
+     "text": "1080",
+     "colspan": 1
+    },
+    {
+     "text": "px",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "dpi",
+     "colspan": 1
+    },
+    {
+     "text": "300",
+     "colspan": 1
+    },
+    {
+     "text": "in",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "pages",
+     "colspan": 1
+    },
+    {
+     "text": "12",
+     "colspan": 1
+    },
+    {
+     "text": "count",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "size",
+     "colspan": 1
+    },
+    {
+     "text": "4.2",
+     "colspan": 1
+    },
+    {
+     "text": "MB",
+     "colspan": 1
+    }
+   ]
+  ]
+ },
+ {
+  "image": "table_2.png",
+  "rows": [
+   [
+    {
+     "text": "latency by device",
+     "colspan": 3
+    }
+   ],
+   [
+    {
+     "text": "model",
+     "colspan": 1
+    },
+    {
+     "text": "cpu",
+     "colspan": 1
+    },
+    {
+     "text": "gpu",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "vit",
+     "colspan": 1
+    },
+    {
+     "text": "92",
+     "colspan": 1
+    },
+    {
+     "text": "44",
+     "colspan": 1
+    }
+   ],
+   [
+    {
+     "text": "bert",
+     "colspan": 1
+    },
+    {
+     "text": "61",
+     "colspan": 1
+    },
+    {
+     "text": "51",
+     "colspan": 1
+    }
+   ]
+  ]
+ }
+]
