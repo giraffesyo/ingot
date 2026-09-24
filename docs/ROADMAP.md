@@ -275,7 +275,17 @@
       synthetic 10-20 px corpus loses 12 points exact-match when 1-px strokes
       are interpolated across 3-4×; OCR_CROP_UPMAX / OCR_CROP_NEAREST knobs).
       Still open: ICDAR15 / TotalText (detection e2e), Union14M.
-- [ ] layout analysis, reading order, tables, multilingual, handwriting
+- [x] layout analysis + reading order: PP-DocLayoutV3 (ocr.LayoutDetector;
+      25 classes, model-predicted order) — exact parity with RapidLayout,
+      34/34 ground-truth regions; runs on CPU or GPU
+- [x] tables: SLANet-plus structure + OCR cell matching (ocr.TableRecognizer)
+      — tokens identical to RapidTable, 44/44 cells exact incl. colspans
+- [x] document pipeline: ocr.DocPipeline + cmd/ocr -format md|json (layout,
+      text per region, tables; 99.6-100% character accuracy on the pages)
+- [x] multilingual recognition: PP-OCRv5 recognizers (zh/ja/ko/ru/Latin/
+      Arabic; RTL output in logical order); 7 of 8 languages >= 95%
+- [ ] handwriting; real-document evaluation sets (DocLayNet / PubTabNet
+      samples); vertical CJK text
 - [x] wasm target: js/wasm and wasip1/wasm build; the FULL test surface runs
       under node — kernels, ops, graph (zoo conformance vs ORT refs), and the
       OCR pipeline incl. corpus accuracy gates — on the scalar fallbacks. CI
