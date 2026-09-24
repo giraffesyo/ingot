@@ -146,7 +146,7 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		for j := 0; dup2 && j < OW; j++ {
 			dup2 = rx[j] == j>>1
 		}
-		par.For(N*C, 1, func(nc, _ int) {
+		par.For(N*C, max(1, unaryChunk/max(OH*OW, 1)), func(nc, _ int) {
 			src := xf[nc*H*W : (nc+1)*H*W]
 			dst := of[nc*OH*OW : (nc+1)*OH*OW]
 			if dup2 {
@@ -168,7 +168,7 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		})
 	case "linear":
 		y0, y1, wy, x0, x1, wx := tp.Y0, tp.Y1, tp.WY, tp.X0, tp.X1, tp.WX
-		par.For(N*C, 1, func(nc, _ int) {
+		par.For(N*C, max(1, unaryChunk/max(OH*OW, 1)), func(nc, _ int) {
 			src := xf[nc*H*W : (nc+1)*H*W]
 			dst := of[nc*OH*OW : (nc+1)*OH*OW]
 			for i := 0; i < OH; i++ {

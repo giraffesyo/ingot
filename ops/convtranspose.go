@@ -115,6 +115,13 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 		pk = o.packed
 		o.packMu.Unlock()
 	}
+	// Tiny problems (a few µs per group) run their scatter loops on the
+	// caller: one chunk never wakes the pool, whose fan-out cost more than
+	// the work (deconvprobe: 52 µs, nearly all pool wake-ups).
+	grain := 1
+	if KK*HW*CinG < 2*convTaskMACs {
+		grain = 1 << 30
+	}
 	for n := 0; n < N; n++ {
 		for g := 0; g < G; g++ {
 			if pk != nil {
@@ -129,7 +136,7 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 				// [c*rows, (c+1)*rows) and hence output rows [c*rows*sh, ...).
 				rows := max(1, (32768 / max(1, KH*KW*W)))
 				nChunks := (H + rows - 1) / rows
-				par.For(CoutG*nChunks, 1, func(t, _ int) {
+				par.For(CoutG*nChunks, grain, func(t, _ int) {
 					ocg, ch := t/nChunks, t%nChunks
 					ih0 := ch * rows
 					ih1 := min(ih0+rows, H)
@@ -200,7 +207,7 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 			}
 			// Overlapping taps: scatter-accumulate, one task per output plane so
 			// writes never race.
-			par.For(CoutG, 1, func(ocg, _ int) {
+			par.For(CoutG, grain, func(ocg, _ int) {
 				oc := g*CoutG + ocg
 				op := of[(n*Cout+oc)*OH*OW : (n*Cout+oc+1)*OH*OW]
 				var b float32

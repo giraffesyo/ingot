@@ -49,6 +49,12 @@ func (o *topKOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	vals := ctx.NewUninit(tensor.F32, os...)
 	idxs := ctx.NewUninit(tensor.I64, os...)
 	xf, vf, ifc := x.F32(), vals.F32(), idxs.I64()
+	if k <= topKSelectMax {
+		o.selectK(xf, vf, ifc, outer, inner, n, k)
+		outs := ctx.OutPad(2, vals)
+		outs[1] = idxs
+		return outs, nil
+	}
 	ord := make([]int, n)
 	for oi := 0; oi < outer; oi++ {
 		for ii := 0; ii < inner; ii++ {
@@ -77,6 +83,50 @@ func (o *topKOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	outs := ctx.OutPad(2, vals)
 	outs[1] = idxs
 	return outs, nil
+}
+
+// topKSelectMax: up to this k, TopK keeps a sorted k-buffer per row
+// (O(n·k), no allocation) instead of sorting the whole row.
+const topKSelectMax = 32
+
+// selectK is TopK by insertion into a sorted buffer of the k best: better
+// value first, ties to the lower index (the same order as the sort path).
+func (o *topKOp) selectK(xf, vf []float32, ifc []int64, outer, inner, n, k int) {
+	var bv [topKSelectMax]float32
+	var bi [topKSelectMax]int
+	better := func(v float32, i int, w float32, j int) bool {
+		if v == w {
+			return i < j
+		}
+		if o.largest {
+			return v > w
+		}
+		return v < w
+	}
+	for oi := 0; oi < outer; oi++ {
+		for ii := 0; ii < inner; ii++ {
+			base := oi*n*inner + ii
+			m := 0
+			for j := 0; j < n; j++ {
+				v := xf[base+j*inner]
+				if m == k && (k == 0 || !better(v, j, bv[m-1], bi[m-1])) {
+					continue
+				}
+				p := min(m, k-1)
+				for p > 0 && better(v, j, bv[p-1], bi[p-1]) {
+					bv[p], bi[p] = bv[p-1], bi[p-1]
+					p--
+				}
+				bv[p], bi[p] = v, j
+				m = min(m+1, k)
+			}
+			dst := oi*k*inner + ii
+			for j := 0; j < k; j++ {
+				vf[dst+j*inner] = bv[j]
+				ifc[dst+j*inner] = int64(bi[j])
+			}
+		}
+	}
 }
 
 // nmsOp: ONNX NonMaxSuppression (opset 10/11). Inputs boxes [B,S,4],
