@@ -44,7 +44,9 @@ func (o *convOp) winogradOK(G, Cg, Mg, KH, KW, OH, OW int) bool {
 	return winogradEnabled &&
 		KH == 3 && KW == 3 && G == 1 &&
 		o.strides == [2]int{1, 1} && o.dilations == [2]int{1, 1} &&
-		Cg >= 16 && Cg <= gemm.KC && OH >= 4 && OW >= 4 &&
+		// ≥ 8×8 outputs: below that the input/output transforms cost more
+		// than the multiplies they save (64×4×4→64: 39 µs vs im2col 23).
+		Cg >= 16 && Cg <= gemm.KC && OH >= 8 && OW >= 8 &&
 		!gemm.PrefersSME(Mg, OH*OW, Cg*9)
 }
 
