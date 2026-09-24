@@ -145,7 +145,7 @@ func (d *Device) PrepareIGEMM() error {
 // act(v + bias)·Scale + Shift (Act codes as for Encoder.Act; Scale 0 is
 // treated as 1).
 type ConvEpilogue struct {
-	Act                        int
+	Act                       int
 	Alpha, Beta, Scale, Shift float32
 }
 
