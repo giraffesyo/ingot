@@ -308,12 +308,14 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       VAE (1024² decode 20 s -> 4.7 s); peak RSS 0.9 GB (CPU path 36 GB);
       parity 2.5e-3 image; fast mode (bf16 GEMM inputs) 1024² 4.57 s/step
       ≈ the PyTorch MPS reference
-- [ ] GPU flash attention (matmul2d on cooperative tensors) — S is still
-      materialised per head (~1 s of every 4.6 s step at 1024²)
-- [ ] fuse the remaining bf16 casts into their producers (LN, RoPE, SiLU)
+- [x] GPU flash attention on matmul2d cooperative tensors (BQ=16: 14.7
+      TFLOPS, 2x the unfused chain); per-row key limits for block-causal
+      prefixes; 1024² step 4.57 -> 3.9 s (PyTorch MPS ~4.5)
+- [x] bf16 producers (LN, RoPE, SiLU·mul write GEMM operands directly)
+- [x] image editing: vision tower, multimodal text encoder (image tokens,
+      deepstack, 3D M-RoPE), VAE encoder, condition-aware layout — all on
+      the GPU; parity 1.5e-4 (f32) vs diffusers; CLI -image
 - [ ] executor-level GPU placement for ONNX graphs (today the Metal path is
       model-level, in models/qwenimage)
 - [ ] CPU perf: per-step time at 1024² (0.69 TFLOPS at 256 tokens)
-- [ ] editing mode: Qwen3-VL vision tower (27-layer ViT, deepstack), VAE
-      encoder, condition-image layout
 - [ ] RMSNorm / RoPE / adaLN fused ops (profile first)
