@@ -16,6 +16,9 @@ func BenchmarkConv3x3(b *testing.B) {
 		{"det58_96x160x160_to24", 96, 160, 160, 24},
 		{"det55_96x80x80_to24", 96, 80, 80, 24},
 		{"res_16x16x16_to16", 16, 16, 16, 16},
+		{"res_32x8x8_to32", 32, 8, 8, 32},
+		{"res_64x4x4_to64", 64, 4, 4, 64},
+		{"res_32x16x16_to32", 32, 16, 16, 32},
 		{"res_64x56x56_to64", 64, 56, 56, 64},
 	} {
 		x := tensor.New(tensor.F32, 1, c.Cin, c.H, c.W)

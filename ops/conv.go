@@ -236,6 +236,10 @@ func (o *convOp) im2colConv(ctx *Ctx, xf, wf, bias, of []float32, N, C, G, Cg, M
 	if want := 2 * par.Workers(); N*G*((OH+rows-1)/rows) < want && OH > 1 {
 		rows = max(1, min(rows, (OH*N*G+want-1)/want))
 	}
+	// ...but never below ~convTaskMACs of work per task: finer tasks cost
+	// more in fan-out and straggler tails than they add (resnetish's 7x7/2
+	// stem split into 36 one-row tasks of ~1 µs: 89 µs; 8 tasks: 37 µs).
+	rows = min(OH, max(rows, (convTaskMACs+Mg*K*OW-1)/max(1, Mg*K*OW)))
 	nChunks := (OH + rows - 1) / rows
 	tasks := N * G * nChunks
 	// Tiny convs (a few µs of work in total) are not worth waking the pool:
@@ -349,10 +353,62 @@ func (o *convOp) im2colPar(x, col []float32, C, H, W, KH, KW, OH, OW int, pads [
 // im2colRows writes the column matrix restricted to output rows [oh0,oh1):
 // col[k][(oh-oh0)*OW+ow], serially.
 func (o *convOp) im2colRows(x, col []float32, C, H, W, KH, KW, OW, oh0, oh1 int, pads [4]int) {
+	sh, sw := o.strides[0], o.strides[1]
+	dh, dw := o.dilations[0], o.dilations[1]
+	pt, pl := pads[0], pads[1]
 	pc := (oh1 - oh0) * OW
-	K := C * KH * KW
-	for k := 0; k < K; k++ {
-		o.im2colRow(x, col[k*pc:(k+1)*pc], k, H, W, KH, KW, OW, oh0, oh1, pads)
+	// Per kernel column: the in-bounds output columns [lo, hi) and the input
+	// column of output column 0 — computed once, not per (k, row).
+	type span struct{ lo, hi, start int }
+	var spanBuf [16]span
+	spans := spanBuf[:0]
+	if KW > len(spanBuf) {
+		spans = make([]span, 0, KW)
+	}
+	for kw := 0; kw < KW; kw++ {
+		start := kw*dw - pl
+		lo := 0
+		if start < 0 {
+			lo = min(OW, (-start+sw-1)/sw)
+		}
+		hi := OW
+		if start+(OW-1)*sw >= W {
+			hi = max(lo, (W-1-start)/sw+1)
+		}
+		spans = append(spans, span{lo, hi, start})
+	}
+	k := 0
+	for c := 0; c < C; c++ {
+		xc := x[c*H*W : (c+1)*H*W]
+		for kh := 0; kh < KH; kh++ {
+			for kw := 0; kw < KW; kw++ {
+				sp := spans[kw]
+				row := col[k*pc : (k+1)*pc]
+				k++
+				for oh := oh0; oh < oh1; oh++ {
+					ih := oh*sh + kh*dh - pt
+					dst := row[(oh-oh0)*OW : (oh-oh0+1)*OW]
+					if ih < 0 || ih >= H {
+						clear(dst)
+						continue
+					}
+					src := xc[ih*W : (ih+1)*W]
+					clear(dst[:sp.lo])
+					if sp.hi > sp.lo {
+						d := dst[sp.lo:sp.hi]
+						if sw == 1 {
+							copy(d, src[sp.start+sp.lo:])
+						} else {
+							s := src[sp.start+sp.lo*sw : sp.start+(sp.hi-1)*sw+1]
+							for j, i := 0, 0; j < len(d); j, i = j+1, i+sw {
+								d[j] = s[i]
+							}
+						}
+					}
+					clear(dst[sp.hi:])
+				}
+			}
+		}
 	}
 }
 
@@ -387,14 +443,26 @@ func (o *convOp) im2colRow(x, row []float32, k, H, W, KH, KW, OW, oh0, oh1 int, 
 			}
 			continue
 		}
-		for ow := 0; ow < OW; ow++ {
-			iw := ow*sw + kw*dw - pl
-			if iw < 0 || iw >= W {
-				dst[ow] = 0
-			} else {
-				dst[ow] = src[iw]
+		// Strided window: clip the in-bounds column range once, then a
+		// branch-free strided copy (iw = start + ow·sw).
+		start := kw*dw - pl
+		lo := 0
+		if start < 0 {
+			lo = min(OW, (-start+sw-1)/sw)
+		}
+		hi := OW
+		if last := start + (OW-1)*sw; last >= W {
+			hi = max(lo, (W-1-start)/sw+1)
+		}
+		clear(dst[:lo])
+		if hi > lo {
+			s := src[start+lo*sw : start+(hi-1)*sw+1]
+			d := dst[lo:hi]
+			for j := range d {
+				d[j] = s[j*sw]
 			}
 		}
+		clear(dst[hi:])
 	}
 }
 
