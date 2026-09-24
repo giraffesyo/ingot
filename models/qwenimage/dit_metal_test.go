@@ -165,3 +165,40 @@ func TestMetalTextEncoder(t *testing.T) {
 	}
 	compare(t, "text encoder, 2 layers (GPU vs CPU)", gpu.F32(), cpu["hidden"].F32(), 1e-4*maxw)
 }
+
+// TestMetalVAEParity decodes the reference latent on the GPU.
+func TestMetalVAEParity(t *testing.T) {
+	if !metal.Available() {
+		t.Skip("no Metal device")
+	}
+	dir := filepath.Join(snapshotDir(t), "vae")
+	ref := loadRef(t, "vae_dec")
+	cfg, err := LoadVAEConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := safetensors.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	z := ref.tensor(t, "z") // [1, C, 1, h, w] → NHWC [h·w, C]
+	zs := z.Shape()
+	C, h, w := zs[1], zs[3], zs[4]
+	nhwc := tensor.New(tensor.F32, h*w, C)
+	for c := range C {
+		for p := range h * w {
+			nhwc.F32()[p*C+c] = z.F32()[c*h*w+p]
+		}
+	}
+	v, err := NewMetalVAE(cfg, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	img, err := v.Decode(nhwc, h, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compare(t, "image (GPU VAE)", img.F32(), ref.tensor(t, "image").F32(), 1e-3)
+}

@@ -32,3 +32,14 @@ func (*MetalTextEncoder) Encode([]int64, int, int) (*tensor.Tensor, error) {
 	return nil, errors.New("unavailable")
 }
 func (*MetalTextEncoder) Close() {}
+
+// MetalVAE is unavailable off darwin/arm64.
+type MetalVAE struct{}
+
+func NewMetalVAE(VAEConfig, *safetensors.Set) (*MetalVAE, error) {
+	return nil, errors.New("qwenimage: Metal VAE needs darwin/arm64")
+}
+func (*MetalVAE) Decode(*tensor.Tensor, int, int) (*tensor.Tensor, error) {
+	return nil, errors.New("unavailable")
+}
+func (*MetalVAE) Close() {}

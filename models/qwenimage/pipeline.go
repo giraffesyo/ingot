@@ -128,7 +128,7 @@ func Generate(dir string, opt Options) (*Result, error) {
 
 	// 4. VAE decode.
 	t0 = time.Now()
-	img, err := decode(dir, x, lh, lw)
+	img, err := decode(dir, x, lh, lw, gpu)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +271,7 @@ func denoiseMetal(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, embeds, x *
 	return x, nil
 }
 
-func decode(dir string, x *tensor.Tensor, lh, lw int) (*tensor.Tensor, error) {
+func decode(dir string, x *tensor.Tensor, lh, lw int, gpu bool) (*tensor.Tensor, error) {
 	vdir := filepath.Join(dir, "vae")
 	cfg, err := LoadVAEConfig(vdir)
 	if err != nil {
@@ -282,6 +282,19 @@ func decode(dir string, x *tensor.Tensor, lh, lw int) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	defer set.Close()
+	if gpu {
+		v, err := NewMetalVAE(cfg, set)
+		if err != nil {
+			return nil, err
+		}
+		defer v.Close()
+		z := x.Clone() // packed [h·w, C] is NHWC; denormalise per channel
+		c := cfg.ZDim
+		for i, val := range z.F32() {
+			z.F32()[i] = val*cfg.LatentsStd[i%c] + cfg.LatentsMean[i%c]
+		}
+		return v.Decode(z, lh, lw)
+	}
 	s, err := compile(BuildVAEDecoder(cfg, set, lh, lw))
 	if err != nil {
 		return nil, err
