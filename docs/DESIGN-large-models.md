@@ -24,7 +24,7 @@ per resolution.
 
 ### 1. Ops (start here — needed on every path)
 - `Sin`, `Cos` (timestep sinusoidal embeddings, RoPE tables).
-- `GroupNormalization` (VAE; opset 18 per-group and opset 21 per-channel
+- `GroupNormalization` (SD-family VAEs — not Qwen-Image-2.1, see below; opset 18 per-group and opset 21 per-channel
   scale/bias semantics). Also re-fuse the common
   Reshape→InstanceNorm→Reshape→Mul→Add export pattern to one op.
 - `Einsum` (common subset: batched matmul / transpose forms → MatMul),
@@ -98,17 +98,86 @@ Risks to retire with a spike before committing to the design:
 
 1. Ops: Sin, Cos, GroupNormalization — done (2026-09-23); Einsum,
    ScatterND, GatherND and the GroupNorm export-pattern re-fusion next.
-2. Inspect the local Qwen-Image-2.1 configs → exact dims, memory, FLOPs;
-   export one DiT block + VAE decoder to ONNX for a parity target.
+2. ~~Inspect the local Qwen-Image-2.1 configs~~ done (below). Next: dump
+   reference activations (one DiT block, VAE decoder) from the PyTorch
+   pipeline as parity targets.
 3. Unmasked flash attention.
 4. safetensors + bf16 storage.
 5. Graph builder + `models/qwenimage`, block-by-block parity.
 6. GPU: FFI spike (dlopen + one objc_msgSend round trip, CGO_ENABLED=0)
    → Metal backend → executor placement.
 
-## Cost envelope (rough — refine from the real configs)
+## Qwen-Image-2.1, measured from the checkpoint (2026-09-23)
 
-1024² ≈ 4K image tokens; 2·7e9·4K ≈ 6e13 FLOP/step (+ attention); ×2 CFG
-×40 steps ≈ 5e15 FLOP/image. At the measured ~0.75–1 TFLOPS f32 MT GEMM on
-the M5 Pro that is ~1 h/image on CPU. The fair comparison is the PyTorch
-pipeline forced to `cpu`, not the ~3 min GPU run.
+Read from the local HF snapshot (safetensors headers + configs) and the
+diffusers 0.37.0.dev0 reference source.
+
+| component | params | stored | notes |
+|---|---|---|---|
+| DiT `QwenImage21Transformer2DModel` | 7.115B | bf16, 14.2 GB | 32 single-stream blocks, d=4096, 32 heads × 128, SwiGLU 12288, no biases |
+| text encoder Qwen3-VL-8B | 8.767B | bf16, 17.5 GB | LM 36 layers, GQA 32/8, M-RoPE [24,20,20] θ=5e6; vision tower 0.58B (edit mode only); lm_head 0.62B unused |
+| VAE `AutoencoderKLQwenImage21` | 0.338B | **f32**, 1.35 GB | Wan-2.2-style, 2D convs only, 16× spatial, z=64 |
+
+**DiT block:** LayerNorm (no affine) → `x·(1+scale)`; Q/K/V projections;
+per-head RMSNorm on Q and K; 3-axis RoPE (frame/height/width = 16/56/56,
+interleaved pairs); attention; `x + tanh(gate)·out`; same for the MLP
+(`out(silu(gate(x)) · proj(x))`). Modulation (`[16384, 4096]`) is **one
+projection shared by all 32 blocks**. Timestep embedding: 256-dim cos/sin →
+2 linears. Text path: zero-centred RMSNorm → linear → GELU(tanh) → linear.
+Text encoder output = last decoder layer's hidden state *before* the final
+norm — the final norm and lm_head are never run.
+
+**Attention structure:** block-causal over [text, condition images, target
+image] — text causal, each image block bidirectional within itself.
+`causal_condition` modulates prefix tokens from t=0, so the prefix is
+timestep-independent: step 1 computes the prefix K/V once (per layer,
+post-RoPE), steps 2..N run **only the target tokens** as plain unmasked
+attention over [cached prefix, target] (plus a key-padding mask). This is
+the DESIGN-kvcache.md machinery generalised from T=1 decode to T=4096
+"decode" — the flash path for unmasked attention is what it needs.
+
+**VAE decoder:** RMS_norm is a per-pixel L2 normalisation over channels
+(`F.normalize(x, dim=1)·√C·γ`), *not* GroupNorm; upsampling is nearest 2×
++ 3×3 conv; residual shortcuts are repeat-interleave + reshape/permute
+pixel shuffles; one single-head attention (d=1152) in the mid block at
+latent resolution. Every op already exists in `ops/`.
+
+**Pipeline defaults:** 40 steps, no CFG (`true_cfg_scale=1`: the model is
+meant to be sampled without guidance — one DiT pass per step),
+FlowMatchEuler with dynamic exponential shift (seq-len 256→8192 maps
+shift 0.5→0.9, terminal 0.02). Output resolution 1024 default, 2048
+supported.
+
+**Op coverage:** everything the three networks use is already supported
+or is a reshape of something supported (the vision tower's Conv3d patch
+embed has stride = kernel → reshape + MatMul). GroupNormalization is *not*
+needed by this model. The real work is items 2–5 above: native weights
++ model definitions, unmasked flash attention at 4K–16K tokens, prefix-KV
+reuse, tokenizer/scheduler.
+
+## Cost envelope (from the real dims)
+
+DiT linear cost: 436 MFLOP per token per block → 13.96 GFLOP/token.
+Latent is image/16 per side with patch 1: 1024² → 4096 target tokens,
+2048² → 16384.
+
+| case | per step | 40 steps | CPU @ ~0.9 TFLOPS |
+|---|---|---|---|
+| T2I 1024², ~200 text tokens | 5.7e13 linear + 0.9e13 attn ≈ 6.6e13 | 2.7e15 | ~50 min |
+| edit 1024² + one 1024² reference (prefix ≈ 4.3K) | ≈ 7.5e13 | 3.1e15 | ~55 min |
+| T2I 2048² | 2.3e14 + 1.4e14 ≈ 3.7e14 | 1.5e16 | ~4.5 h |
+
+Text encoder (~7.6B active × 2 × few-hundred tokens ≈ 5e12) and VAE decode
+are seconds, not minutes. The user's PyTorch run (edit, 1024², 40 steps,
+DiT on MPS, KV cache on) takes ~3 min ≈ 17 TFLOPS effective on the GPU —
+a ~20× gap to CPU at our measured GEMM throughput, which is the case for
+the Metal backend. bf16 storage does not speed up CPU compute on Apple
+silicon (widen-to-f32 kernel; M=4096 GEMMs are compute-bound), it only
+saves memory.
+
+**Memory:** bf16 resident: DiT 14.2 + text encoder 15.1 (text-only, no
+lm_head) + VAE 1.35 + prefix KV cache (32 layers × 4.3K tokens × 4096 × 2 ×
+f32 = 4.5 GB) ≈ 35 GB with everything loaded. Running the stages
+sequentially (encode text → free → DiT → free → VAE) peaks at ~20 GB bf16,
+or ~33 GB even with f32 DiT weights — so stage-sequential loading is a
+cheaper first milestone than native bf16.
