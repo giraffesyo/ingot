@@ -37,41 +37,44 @@ static float tg_max(float v, threadgroup float* scratch, uint tid, uint sg, uint
 	return t;
 }
 
-// p = (cols, ldx, ldy, 0); f = (eps, ...). y = (x - mean) / sqrt(var + eps) * s.
-kernel void layernorm_mod(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
-                          device const float* s [[buffer(2)]], constant uint4& p [[buffer(3)]],
-                          constant float4& f [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
-                          uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
-                          uint lane [[thread_index_in_simdgroup]]) {
-	threadgroup float scratch[NT / 32];
+// p = (cols, ldx, ldy, 0); f = (eps, ...). y = (x - mean) / sqrt(var + eps) * s,
+// written as T (f32, or bf16 straight into a GEMM operand).
+template <typename T>
+void layernorm_mod_t(device const float* x, device T* y, device const float* s, constant uint4& p,
+                     constant float4& f, uint row, uint tid, uint sg, uint lane, threadgroup float* scratch) {
 	const uint n = p.x;
 	device const float* xr = x + row * p.y;
-	device float* yr = y + row * p.z;
+	device T* yr = y + row * p.z;
 	float acc = 0;
 	for (uint i = tid; i < n; i += NT) acc += xr[i];
 	const float mean = tg_sum(acc, scratch, tid, sg, lane) / n;
 	acc = 0;
 	for (uint i = tid; i < n; i += NT) { float d = xr[i] - mean; acc += d * d; }
 	const float inv = rsqrt(tg_sum(acc, scratch, tid, sg, lane) / n + f.x);
-	for (uint i = tid; i < n; i += NT) yr[i] = (xr[i] - mean) * inv * s[i];
+	for (uint i = tid; i < n; i += NT) yr[i] = T((xr[i] - mean) * inv * s[i]);
 }
+#define LN(name, T) \
+kernel void name(device const float* x [[buffer(0)]], device T* y [[buffer(1)]], device const float* s [[buffer(2)]], \
+                 constant uint4& p [[buffer(3)]], constant float4& f [[buffer(4)]], uint row [[threadgroup_position_in_grid]], \
+                 uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], \
+                 uint lane [[thread_index_in_simdgroup]]) { \
+	threadgroup float scratch[NT / 32]; \
+	layernorm_mod_t<T>(x, y, s, p, f, row, tid, sg, lane, scratch); }
+LN(layernorm_mod, float)
+LN(layernorm_mod_bf16, bfloat)
 
 // In place on x [T, ld]: each (t, head) row of dh at column head*dh is
 // RMS-normalised (·w) then rotated as complex pairs (2j, 2j+1) by
 // cos/sin [T, dh/2]. One threadgroup of dh threads per (t, head).
 // p = (heads, dh, ld, mode); mode 0 rotates interleaved pairs, 1 halves
 // (rotate_half, Llama/Qwen); f = (eps, ...).
-kernel void rmsnorm_rope(device float* x [[buffer(0)]], device const float* w [[buffer(1)]],
-                         device const float* cs [[buffer(2)]], device const float* sn [[buffer(3)]],
-                         constant uint4& p [[buffer(4)]], constant float4& f [[buffer(5)]],
-                         uint2 g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                         uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                         uint2 nthr2 [[threads_per_threadgroup]]) {
-	const uint nthr = nthr2.x;
-	threadgroup float scratch[NT / 32];
-	threadgroup float row[512];
+template <typename T>
+void rmsnorm_rope_t(device float* x, device T* out, device const float* w, device const float* cs,
+                    device const float* sn, constant uint4& p, constant float4& f, uint2 g, uint tid,
+                    uint sg, uint lane, uint nthr, threadgroup float* scratch, threadgroup float* row) {
 	const uint dh = p.y, t = g.y, h = g.x;
 	device float* xr = x + t * p.z + h * dh;
+	device T* orow = out + t * p.z + h * dh;
 	float v = tid < dh ? xr[tid] : 0.0f;
 	float ss = simd_sum(v * v);
 	if (lane == 0) scratch[sg] = ss;
@@ -87,14 +90,25 @@ kernel void rmsnorm_rope(device float* x [[buffer(0)]], device const float* w [[
 			const uint j = tid / 2;
 			const float c = cs[t * hd + j], s = sn[t * hd + j];
 			const float re = row[2 * j], im = row[2 * j + 1];
-			xr[tid] = (tid % 2 == 0) ? re * c - im * s : re * s + im * c;
+			orow[tid] = T((tid % 2 == 0) ? re * c - im * s : re * s + im * c);
 		} else { // rotate_half: (j, j + dh/2)
 			const uint j = tid % hd;
 			const float c = cs[t * hd + j], s = sn[t * hd + j];
-			xr[tid] = tid < hd ? row[j] * c - row[j + hd] * s : row[j + hd] * c + row[j] * s;
+			orow[tid] = T(tid < hd ? row[j] * c - row[j + hd] * s : row[j + hd] * c + row[j] * s);
 		}
 	}
 }
+#define RR(name, T) \
+kernel void name(device float* x [[buffer(0)]], device const float* w [[buffer(1)]], device const float* cs [[buffer(2)]], \
+                 device const float* sn [[buffer(3)]], constant uint4& p [[buffer(4)]], constant float4& f [[buffer(5)]], \
+                 device T* out [[buffer(6)]], uint2 g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
+                 uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], \
+                 uint2 nthr2 [[threads_per_threadgroup]]) { \
+	threadgroup float scratch[NT / 32]; \
+	threadgroup float row[512]; \
+	rmsnorm_rope_t<T>(x, out, w, cs, sn, p, f, g, tid, sg, lane, nthr2.x, scratch, row); }
+RR(rmsnorm_rope, float)
+RR(rmsnorm_rope_bf16, bfloat)
 
 // y[r] = x[r] · rsqrt(mean(x[r]²) + eps) · w over cols; p = (cols, ldx, ldy, 0).
 kernel void rmsnorm_rows(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
@@ -179,13 +193,16 @@ kernel void gather_rows(device const float* src [[buffer(0)]], device float* dst
 
 // out[r, c] = silu(a[r, c]) · b[r, c] over [rows, cols] with row strides
 // p = (cols, lda, ldb, ldo).
-kernel void silu_mul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],
-                     device float* o [[buffer(2)]], constant uint4& p [[buffer(3)]],
-                     uint2 i [[thread_position_in_grid]]) {
+template <typename T>
+void silu_mul_t(device const float* a, device const float* b, device T* o, constant uint4& p, uint2 i) {
 	if (i.x >= p.x) return;
 	const float v = a[i.y * p.y + i.x];
-	o[i.y * p.w + i.x] = v / (1.0f + exp(-v)) * b[i.y * p.z + i.x];
+	o[i.y * p.w + i.x] = T(v / (1.0f + exp(-v)) * b[i.y * p.z + i.x]);
 }
+kernel void silu_mul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* o [[buffer(2)]],
+                     constant uint4& p [[buffer(3)]], uint2 i [[thread_position_in_grid]]) { silu_mul_t<float>(a, b, o, p, i); }
+kernel void silu_mul_bf16(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device bfloat* o [[buffer(2)]],
+                          constant uint4& p [[buffer(3)]], uint2 i [[thread_position_in_grid]]) { silu_mul_t<bfloat>(a, b, o, p, i); }
 
 // x[r, c] += g[c] · y[r, c]; p = (cols, ldx, ldy, 0).
 kernel void gated_add(device float* x [[buffer(0)]], device const float* g [[buffer(1)]],
@@ -199,7 +216,7 @@ kernel void gated_add(device float* x [[buffer(0)]], device const float* g [[buf
 var nnPSO struct {
 	once                                                               sync.Once
 	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
-	rmsRows, softmaxBF16                                               *Pipeline
+	rmsRows, softmaxBF16, layerNormBF16, rmsRopeBF16, siluMulBF16      *Pipeline
 	err                                                                error
 }
 
@@ -211,7 +228,9 @@ func (d *Device) nnPipelines() error {
 		}{{"layernorm_mod", &nnPSO.layerNorm}, {"rmsnorm_rope", &nnPSO.rmsRope}, {"softmax_rows", &nnPSO.softmax},
 			{"silu_mul", &nnPSO.siluMul}, {"gated_add", &nnPSO.gateAdd},
 			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather},
-			{"rmsnorm_rows", &nnPSO.rmsRows}, {"softmax_rows_bf16", &nnPSO.softmaxBF16}} {
+			{"rmsnorm_rows", &nnPSO.rmsRows}, {"softmax_rows_bf16", &nnPSO.softmaxBF16},
+			{"layernorm_mod_bf16", &nnPSO.layerNormBF16}, {"rmsnorm_rope_bf16", &nnPSO.rmsRopeBF16},
+			{"silu_mul_bf16", &nnPSO.siluMulBF16}} {
 			if *k.dst, nnPSO.err = d.Compile(nnSrc, k.name); nnPSO.err != nil {
 				return
 			}
@@ -266,7 +285,34 @@ func (e *Encoder) RMSNormRoPEMode(x, w, cos, sin Region, t, heads, dh, ld int, e
 		return
 	}
 	if e.ready(nnPSO.rmsRope) {
-		e.Dispatch(nnPSO.rmsRope, [3]int{heads * dh, t, 1}, [3]int{dh, 1, 1}, x, w, cos, sin, u32s(heads, dh, ld, mode), f32c(eps))
+		e.Dispatch(nnPSO.rmsRope, [3]int{heads * dh, t, 1}, [3]int{dh, 1, 1}, x, w, cos, sin, u32s(heads, dh, ld, mode), f32c(eps), x)
+	}
+}
+
+// LayerNormModBF16 is LayerNormMod writing bf16 (a GEMM's activation
+// operand) instead of f32.
+func (e *Encoder) LayerNormModBF16(x, y, s Region, rows, cols, ldx, ldy int, eps float32) {
+	if e.ready(nnPSO.layerNormBF16) {
+		e.Dispatch(nnPSO.layerNormBF16, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, y, s, u32s(cols, ldx, ldy, 0), f32c(eps))
+	}
+}
+
+// RMSNormRoPEBF16 is RMSNormRoPEMode reading f32 x and writing the result
+// as bf16 into out (same layout), leaving x untouched.
+func (e *Encoder) RMSNormRoPEBF16(x, out, w, cos, sin Region, t, heads, dh, ld int, eps float32, mode int) {
+	if dh > 512 || dh%2 != 0 {
+		e.err = fmt.Errorf("metal: RMSNormRoPE head dim %d", dh)
+		return
+	}
+	if e.ready(nnPSO.rmsRopeBF16) {
+		e.Dispatch(nnPSO.rmsRopeBF16, [3]int{heads * dh, t, 1}, [3]int{dh, 1, 1}, x, w, cos, sin, u32s(heads, dh, ld, mode), f32c(eps), out)
+	}
+}
+
+// SiLUMulBF16 is SiLUMul writing bf16.
+func (e *Encoder) SiLUMulBF16(a, b, o Region, rows, cols, lda, ldb, ldo int) {
+	if e.ready(nnPSO.siluMulBF16) {
+		e.Dispatch(nnPSO.siluMulBF16, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, a, b, o, u32s(cols, lda, ldb, ldo))
 	}
 }
 
