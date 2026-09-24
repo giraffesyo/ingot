@@ -1,0 +1,362 @@
+[
+ {
+  "image": "page_0.png",
+  "regions": [
+   {
+    "label": "header",
+    "box": [
+     60,
+     30,
+     193,
+     48
+    ],
+    "text": "ingot technical report"
+   },
+   {
+    "label": "doc_title",
+    "box": [
+     60,
+     90,
+     727,
+     128
+    ],
+    "text": "A Pure Go Runtime for Document Models"
+   },
+   {
+    "label": "paragraph_title",
+    "box": [
+     60,
+     158,
+     202,
+     186
+    ],
+    "text": "Introduction"
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     200,
+     919,
+     302
+    ],
+    "text": "And scheduler writes and place workers packed with place results the across with the. And each the of the the runs busy its and whole across whole processor. Across the while layer every runs packed measured busy model writes step and workers. Packed while and the that in the graph of writes whole so inputs scheduler."
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     324,
+     914,
+     400
+    ],
+    "text": "Of kernels step and place that model layer keeps the its the that reads. Layer model the weights weights every results reads its inputs layer keeps the packed. So of of each of the inputs network on measured the the every writes. In with scheduler packed and place packed on inputs whole reads network its inputs."
+   },
+   {
+    "label": "paragraph_title",
+    "box": [
+     60,
+     422,
+     146,
+     450
+    ],
+    "text": "Method"
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     464,
+     938,
+     566
+    ],
+    "text": "Weights the so workers each model weights with its busy whole keeps the runs. The weights and kernels the across of that reads layer layer of weights workers. The measured the busy pipeline pipeline across writes on workers results keeps on reads. With the the each and across measured packed processor the scheduler packed reads results."
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     588,
+     935,
+     690
+    ],
+    "text": "Busy of inputs every the the runs place kernels measured its kernels inputs busy. In that while with layer on and results scheduler whole across across layer so. Weights weights model layer so inputs and measured every runs with that pipeline while. Keeps on of pipeline on and of graph while workers on workers runs model."
+   },
+   {
+    "label": "number",
+    "box": [
+     480,
+     1250,
+     524,
+     1268
+    ],
+    "text": "page 1"
+   }
+  ]
+ },
+ {
+  "image": "page_1.png",
+  "regions": [
+   {
+    "label": "header",
+    "box": [
+     60,
+     30,
+     193,
+     48
+    ],
+    "text": "ingot technical report"
+   },
+   {
+    "label": "doc_title",
+    "box": [
+     60,
+     90,
+     435,
+     124
+    ],
+    "text": "Two Column Layout Study"
+   },
+   {
+    "label": "paragraph_title",
+    "box": [
+     60,
+     154,
+     138,
+     180
+    ],
+    "text": "Results"
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     192,
+     468,
+     286
+    ],
+    "text": "Results the each runs model busy the layer results layer each step. On layer layer and the pipeline runs on of the of results. Layer inputs model in keeps the across graph reads reads workers the."
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     306,
+     480,
+     400
+    ],
+    "text": "Busy layer of of the network kernels inputs of reads workers writes. And writes the of while place model each busy of results model. And network in across graph in kernels the pipeline each the across."
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     420,
+     477,
+     514
+    ],
+    "text": "Packed while processor of graph and in measured step its graph kernels. Packed the once packed weights reads and workers step weights on on. In the runs layer so processor network and results so weights inputs."
+   },
+   {
+    "label": "paragraph_title",
+    "box": [
+     520,
+     154,
+     635,
+     180
+    ],
+    "text": "Discussion"
+   },
+   {
+    "label": "text",
+    "box": [
+     520,
+     192,
+     927,
+     286
+    ],
+    "text": "Reads the while in step across and step layer runs so busy. Runs so keeps the each whole keeps model whole on its writes. Packed model so measured the every the network and the the the."
+   },
+   {
+    "label": "text",
+    "box": [
+     520,
+     306,
+     936,
+     400
+    ],
+    "text": "Whole the pipeline layer packed packed results kernels with the results the. Runs with and so the the while place across processor its and. Of inputs reads on and writes packed the the reads scheduler keeps."
+   },
+   {
+    "label": "text",
+    "box": [
+     520,
+     420,
+     931,
+     514
+    ],
+    "text": "Whole place of writes step whole weights the whole network weights measured. Reads of each the step kernels model the place of runs and. Of scheduler inputs so in model weights layer once runs with the."
+   },
+   {
+    "label": "number",
+    "box": [
+     480,
+     1250,
+     524,
+     1268
+    ],
+    "text": "page 2"
+   }
+  ]
+ },
+ {
+  "image": "page_2.png",
+  "regions": [
+   {
+    "label": "header",
+    "box": [
+     60,
+     30,
+     193,
+     48
+    ],
+    "text": "ingot technical report"
+   },
+   {
+    "label": "paragraph_title",
+    "box": [
+     60,
+     90,
+     282,
+     118
+    ],
+    "text": "Benchmark Results"
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     132,
+     936,
+     208
+    ],
+    "text": "Of on results the while while and in workers of and and while scheduler. That scheduler the processor while place scheduler kernels each graph reads across weights each. The the while so keeps in packed inputs the network place the busy reads."
+   },
+   {
+    "label": "table",
+    "box": [
+     100,
+     238,
+     900,
+     438
+    ],
+    "text": "[[\"model\", \"cpu ms\", \"gpu ms\", \"ratio\"], [\"detector\", \"17.4\", \"12.0\", \"1.45\"], [\"recognizer\", \"72.0\", \"59.0\", \"1.22\"], [\"parseq\", \"9.5\", \"6.0\", \"1.58\"], [\"mobilenet\", \"1.7\", \"1.3\", \"1.31\"]]"
+   },
+   {
+    "label": "figure_title",
+    "box": [
+     100,
+     450,
+     388,
+     472
+    ],
+    "text": "Table 1: Forward latency per model."
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     502,
+     939,
+     578
+    ],
+    "text": "Model the runs while its the keeps network in of processor layer the writes. Inputs its so measured results in on of once results while step the packed. Inputs across model kernels on model runs packed the and the that step the."
+   },
+   {
+    "label": "number",
+    "box": [
+     480,
+     1250,
+     524,
+     1268
+    ],
+    "text": "page 3"
+   }
+  ]
+ },
+ {
+  "image": "page_3.png",
+  "regions": [
+   {
+    "label": "header",
+    "box": [
+     60,
+     30,
+     193,
+     48
+    ],
+    "text": "ingot technical report"
+   },
+   {
+    "label": "paragraph_title",
+    "box": [
+     60,
+     90,
+     200,
+     118
+    ],
+    "text": "Architecture"
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     132,
+     932,
+     208
+    ],
+    "text": "Measured across in the in workers network place across kernels packed while once model. Reads the inputs while across processor the weights the the the weights while weights. The across workers on and the the with step busy step packed weights packed."
+   },
+   {
+    "label": "image",
+    "box": [
+     200,
+     238,
+     800,
+     538
+    ],
+    "text": ""
+   },
+   {
+    "label": "figure_title",
+    "box": [
+     220,
+     550,
+     450,
+     572
+    ],
+    "text": "Figure 1: The runtime layers."
+   },
+   {
+    "label": "text",
+    "box": [
+     60,
+     602,
+     925,
+     704
+    ],
+    "text": "The on measured on of kernels reads the once inputs the on packed its. The model the packed keeps the pipeline network place the of place packed layer. Results the model runs scheduler across place keeps results the packed with network weights. With processor that the workers every on writes layer the step its writes once."
+   },
+   {
+    "label": "number",
+    "box": [
+     480,
+     1250,
+     524,
+     1268
+    ],
+    "text": "page 4"
+   }
+  ]
+ }
+]

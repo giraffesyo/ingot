@@ -21,7 +21,7 @@ func (o *binaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		return nil, o.n.Errorf("expected 2 inputs")
 	}
 	a, b := in[0], in[1]
-	if a.DType() == tensor.I64 && b.DType() == tensor.I64 {
+	if a.DType() == b.DType() && (a.DType() == tensor.I64 || a.DType() == tensor.I32) {
 		return o.runI64(ctx, a, b)
 	}
 	if a.DType() != tensor.F32 || b.DType() != tensor.F32 {
@@ -263,7 +263,7 @@ func (o *binaryOp) runI64(ctx *Ctx, a, b *tensor.Tensor) ([]*tensor.Tensor, erro
 	out := ctx.New(tensor.I64, os...)
 	ast := broadcastStrides(a.Shape(), os)
 	bst := broadcastStrides(b.Shape(), os)
-	ai, bi, oi := a.I64(), b.I64(), out.I64()
+	ai, bi, oi := asI64(a), asI64(b), out.I64()
 	idx := make([]int, len(os))
 	for k := range oi {
 		offA, offB := 0, 0
@@ -285,6 +285,10 @@ func (o *binaryOp) runI64(ctx *Ctx, a, b *tensor.Tensor) ([]*tensor.Tensor, erro
 				return nil, o.n.Errorf("integer division by zero")
 			}
 			r = x / y
+		case "Max":
+			r = max(x, y)
+		case "Min":
+			r = min(x, y)
 		default:
 			return nil, o.n.Errorf("int64 not supported for %s", o.n.OpType)
 		}
@@ -296,6 +300,16 @@ func (o *binaryOp) runI64(ctx *Ctx, a, b *tensor.Tensor) ([]*tensor.Tensor, erro
 			}
 			idx[d] = 0
 		}
+	}
+	if a.DType() == tensor.I32 { // same dtype in, same dtype out
+		o32 := ctx.NewUninit(tensor.I32, os...)
+		for i, v := range oi {
+			o32.I32()[i] = int32(v)
+		}
+		if ctx.Pool != nil {
+			ctx.Pool.Put(out)
+		}
+		return ctx.Out(o32), nil
 	}
 	return ctx.Out(out), nil
 }

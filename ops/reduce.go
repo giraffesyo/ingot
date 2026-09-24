@@ -17,8 +17,8 @@ type reduceOp struct {
 
 func (o *reduceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	x := in[0]
-	if x.DType() != tensor.F32 {
-		return nil, o.n.Errorf("only f32 (got %s)", x.DType())
+	if x.DType() != tensor.F32 && x.DType() != tensor.I64 && x.DType() != tensor.I32 {
+		return nil, o.n.Errorf("only f32, i64, i32 (got %s)", x.DType())
 	}
 	xs := x.Shape()
 	r := len(xs)
@@ -73,6 +73,9 @@ func (o *reduceOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 			ostr[i] = kst[ki]
 			ki++
 		}
+	}
+	if x.DType() != tensor.F32 {
+		return o.runInt(ctx, x, red, oshape, ostr)
 	}
 	out := ctx.New(tensor.F32, oshape...)
 	of := out.F32()
@@ -363,4 +366,67 @@ func init() {
 				last: n.Attrs.Int("select_last_index", 0) == 1, isMax: isMax}, nil
 		})
 	}
+}
+
+// runInt reduces an integer tensor exactly (int64 accumulation): max, min,
+// sum, prod and mean (integer division, truncating); the norm kinds are
+// float-only.
+func (o *reduceOp) runInt(ctx *Ctx, x *tensor.Tensor, red []bool, oshape tensor.Shape, ostr []int) ([]*tensor.Tensor, error) {
+	xs := x.Shape()
+	xi := asI64(x)
+	no := oshape.Numel()
+	acc := make([]int64, no)
+	var init int64
+	switch o.kind {
+	case "max":
+		init = math.MinInt64
+	case "min":
+		init = math.MaxInt64
+	case "prod":
+		init = 1
+	case "sum", "mean":
+	default:
+		return nil, o.n.Errorf("Reduce%s on %s not supported", o.kind, x.DType())
+	}
+	for i := range acc {
+		acc[i] = init
+	}
+	cnt := 1
+	for i, d := range xs {
+		if red[i] {
+			cnt *= d
+		}
+	}
+	coord := make([]int, len(xs))
+	for _, v := range xi {
+		oi := 0
+		for d, c := range coord {
+			oi += c * ostr[d]
+		}
+		switch o.kind {
+		case "max":
+			acc[oi] = max(acc[oi], v)
+		case "min":
+			acc[oi] = min(acc[oi], v)
+		case "prod":
+			acc[oi] *= v
+		default:
+			acc[oi] += v
+		}
+		incCoord(coord, xs)
+	}
+	if o.kind == "mean" && cnt > 0 {
+		for i := range acc {
+			acc[i] /= int64(cnt)
+		}
+	}
+	out := ctx.NewUninit(x.DType(), oshape...)
+	if x.DType() == tensor.I64 {
+		copy(out.I64(), acc)
+	} else {
+		for i, v := range acc {
+			out.I32()[i] = int32(v)
+		}
+	}
+	return ctx.Out(out), nil
 }
