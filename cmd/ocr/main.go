@@ -1,10 +1,14 @@
-// Command ocr runs the OCR pipeline on an image. Currently: text detection
-// (DBNet), drawing detected boxes to an output PNG.
+// Command ocr runs the OCR pipeline on an image: text detection (DBNet) and
+// recognition, drawing detected boxes to an output PNG. With -format md or
+// json it reads the page as a document instead — layout regions in reading
+// order (PP-DocLayoutV3), their text, and tables (SLANet-plus).
 //
 //	ocr -det testdata/ocr/det.onnx -in image.png -out boxes.png
+//	ocr -in page.png -format md
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
@@ -30,7 +34,21 @@ func main() {
 	boxThr := flag.Float64("boxthr", 0.6, "box score threshold")
 	norec := flag.Bool("norec", false, "detection only")
 	device := flag.String("device", "cpu", "device for every model: cpu, gpu (Metal), gpu-bf16 (faster, bf16 weight products) or auto")
+	format := flag.String("format", "lines", "output: lines (boxes + text), md or json (document: layout, reading order, tables)")
+	layout := flag.String("layout", "testdata/layout/pp_doc_layoutv3.onnx", "layout model (PP-DocLayoutV3) for -format md|json")
+	table := flag.String("table", "testdata/layout/slanet-plus.onnx", "table structure model (SLANet-plus) for -format md|json; empty disables")
 	flag.Parse()
+	if *format == "md" || *format == "json" {
+		if err := document(*inPath, *det, *rec, *dict, *layout, *table, *device, *format); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *format != "lines" {
+		fmt.Fprintf(os.Stderr, "unknown -format %q (lines, md, json)\n", *format)
+		os.Exit(2)
+	}
 
 	img, err := loadImage(*inPath)
 	if err != nil {
@@ -87,6 +105,39 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("wrote", *outPath)
+}
+
+// document reads the page as a structured document and prints it.
+func document(in, det, rec, dict, layout, table, device, format string) error {
+	img, err := loadImage(in)
+	if err != nil {
+		return fmt.Errorf("load: %w", err)
+	}
+	p, err := ocr.NewPipelineOn(det, rec, dict, device, device)
+	if err != nil {
+		return fmt.Errorf("ocr models: %w", err)
+	}
+	l, err := ocr.NewLayoutDetector(layout, device)
+	if err != nil {
+		return fmt.Errorf("layout model: %w", err)
+	}
+	dp := &ocr.DocPipeline{OCR: p, Layout: l}
+	if table != "" {
+		if dp.Tables, err = ocr.NewTableRecognizer(table, device); err != nil {
+			return fmt.Errorf("table model: %w", err)
+		}
+	}
+	doc, err := dp.Run(img)
+	if err != nil {
+		return err
+	}
+	if format == "md" {
+		fmt.Print(doc.Markdown())
+		return nil
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(doc)
 }
 
 func loadImage(path string) (image.Image, error) {
