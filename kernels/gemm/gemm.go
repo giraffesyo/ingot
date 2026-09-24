@@ -304,7 +304,7 @@ func (g *gemmCtx) smallMSweep(m, k, workers int) {
 	g.phase = phaseSmallM
 	// Pairing halves the task count: only pair when enough pairs remain to
 	// keep every worker busy (or the sweep is single-threaded anyway).
-	g.pairMode = g.pb != nil && g.alpha == 1 && pairKernel() && g.nPanels >= 2 &&
+	g.pairMode = g.pb != nil && g.pb.data16 == nil && g.alpha == 1 && pairKernel() && g.nPanels >= 2 &&
 		(workers == 1 || (g.nPanels+1)/2 >= 2*workers)
 	units := g.nPanels
 	if g.pairMode {
@@ -425,7 +425,10 @@ func (g *gemmCtx) smallMTask(t, w int) {
 	for kb := 0; kb < nkb; kb++ {
 		p0 := kb * KC
 		kc := min(KC, g.kc-p0)
-		if g.pb != nil {
+		if g.pb != nil && g.pb.data16 != nil {
+			o := (kb*g.pb.np + jp) * KC * NR
+			widenPanel(bp, g.pb.data16[o:o+kc*NR])
+		} else if g.pb != nil {
 			bp = g.pb.data[(kb*g.pb.np+jp)*KC*NR:]
 		} else if g.transB {
 			packBPanelT(kc, nr, g.bsrc[jp*NR*g.ldb+p0:], g.ldb, bp)
@@ -827,6 +830,11 @@ func PackAPanels(m, k int, a []float32, lda int) []float32 {
 type PackedB struct {
 	k, n, np int
 	data     []float32
+	// data16, when set instead of data, holds the same panels as bf16 bits
+	// (PackBBF16: half the memory of a multi-GB checkpoint); the sweep
+	// widens each panel into per-worker f32 scratch before the kernel runs
+	// every A panel over it.
+	data16 []uint16
 }
 
 // Rows and Cols return the logical dimensions of the packed matrix.
@@ -886,19 +894,19 @@ func SgemmPackedB(m int, alpha float32, a []float32, lda int, pb *PackedB, beta 
 }
 
 // PackBBF16 is PackB for bfloat16 weights (bit patterns): each KC×NR panel is
-// widened to f32 into scratch and packed with the f32 panel packers, so the
-// result is bit-identical to PackB over the widened matrix — without ever
-// materialising it. Panels pack in parallel.
+// widened to f32 into scratch, packed with the f32 panel packers, and stored
+// back as bf16 bits — the same panels as PackB over the widened matrix, at
+// half the memory; the GEMM widens each panel on use. Panels pack in
+// parallel.
 func PackBBF16(transB bool, k, n int, b []uint16, ldb int) *PackedB {
 	nkb := (k + KC - 1) / KC
 	np := (n + NR - 1) / NR
-	p := &PackedB{k: k, n: n, np: np, data: make([]float32, nkb*np*KC*NR)}
+	p := &PackedB{k: k, n: n, np: np, data16: make([]uint16, nkb*np*KC*NR)}
 	par.For(nkb*np, 1, func(task, _ int) {
 		kb, jp := task/np, task%np
 		p0, j0 := kb*KC, jp*NR
 		kc, nr := min(KC, k-p0), min(NR, n-j0)
-		var scratch [KC * NR]float32
-		dst := p.data[(kb*np+jp)*KC*NR:]
+		var scratch, panel [KC * NR]float32
 		if transB { // panel rows j0.., cols p0.. of the stored [n×k]
 			for c := range nr {
 				row := b[(j0+c)*ldb+p0 : (j0+c)*ldb+p0+kc]
@@ -906,16 +914,30 @@ func PackBBF16(transB bool, k, n int, b []uint16, ldb int) *PackedB {
 					scratch[c*kc+i] = math.Float32frombits(uint32(v) << 16)
 				}
 			}
-			packBPanelT(kc, nr, scratch[:], kc, dst)
-			return
-		}
-		for r := range kc {
-			row := b[(p0+r)*ldb+j0 : (p0+r)*ldb+j0+nr]
-			for i, v := range row {
-				scratch[r*nr+i] = math.Float32frombits(uint32(v) << 16)
+			packBPanelT(kc, nr, scratch[:], kc, panel[:])
+		} else {
+			for r := range kc {
+				row := b[(p0+r)*ldb+j0 : (p0+r)*ldb+j0+nr]
+				for i, v := range row {
+					scratch[r*nr+i] = math.Float32frombits(uint32(v) << 16)
+				}
 			}
+			packBPanel(kc, nr, scratch[:], nr, panel[:])
 		}
-		packBPanel(kc, nr, scratch[:], nr, dst)
+		// Every packed value is a widened bf16 (or a zero pad): its top 16
+		// bits are exact.
+		dst := p.data16[(kb*np+jp)*KC*NR : (kb*np+jp+1)*KC*NR]
+		for i := range dst {
+			dst[i] = uint16(math.Float32bits(panel[i]) >> 16)
+		}
 	})
 	return p
+}
+
+// widenPanel writes the f32 form of a bf16 panel.
+func widenPanel(dst []float32, src []uint16) {
+	dst = dst[:len(src)]
+	for i, v := range src {
+		dst[i] = math.Float32frombits(uint32(v) << 16)
+	}
 }
