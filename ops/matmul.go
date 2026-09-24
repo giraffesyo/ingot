@@ -6,7 +6,9 @@ import (
 	"github.com/giraffesyo/ingot/kernels/vek"
 	"github.com/giraffesyo/ingot/tensor"
 	"os"
+	"runtime"
 	"sync"
+	"weak"
 )
 
 // gemmOp: Y = alpha*op(A)·op(B) + beta*C, A [M×K], B [K×N], C broadcastable to [M×N].
@@ -22,8 +24,9 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		return nil, o.n.Errorf("need A and B")
 	}
 	a, b := in[0], in[1]
-	if a.DType() != tensor.F32 || b.DType() != tensor.F32 || a.Shape().Rank() != 2 || b.Shape().Rank() != 2 {
-		return nil, o.n.Errorf("need 2-D f32 A and B, got %v %v", a, b)
+	bf16B := b.DType() == tensor.BF16 && !o.transA
+	if a.DType() != tensor.F32 || (b.DType() != tensor.F32 && !bf16B) || a.Shape().Rank() != 2 || b.Shape().Rank() != 2 {
+		return nil, o.n.Errorf("need 2-D f32 A and f32 (or bf16 weight) B, got %v %v", a, b)
 	}
 	M, K := a.Dim(0), a.Dim(1)
 	if o.transA {
@@ -65,6 +68,10 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 			return nil, o.n.Errorf("cannot broadcast C %v to [%d,%d]", cs, M, N)
 		}
 		beta = o.beta
+	}
+	if bf16B {
+		gemm.SgemmPackedB(M, o.alpha, a.F32(), a.Dim(1), packedBF16(b, o.transB, K, N), beta, of, N)
+		return ctx.Out(out), nil
 	}
 	if !o.transA {
 		if pb := o.bCache.get(o.transB, K, N, b.F32(), b.Dim(1)); pb != nil {
@@ -164,6 +171,36 @@ func (c *bCache) getBF16(b []float32) *gemm.BPackedB {
 		return nil
 	}
 	return c.bf
+}
+
+// bf16Packs shares the f32 packing of bf16 weights across ops and
+// sessions: a model split into several graphs over the same checkpoint
+// (Qwen-Image's DiT prefix and target passes) packs each weight once. Keys
+// hold the weight tensor weakly and a cleanup drops the entry when it is
+// collected, so a pack lives exactly as long as its weight and a recycled
+// address can never alias a stale one.
+var bf16Packs sync.Map // bf16PackKey → *bf16Pack
+
+type bf16PackKey struct {
+	w      weak.Pointer[tensor.Tensor]
+	transB bool
+}
+
+type bf16Pack struct {
+	once sync.Once
+	pb   *gemm.PackedB
+}
+
+// packedBF16 returns the shared f32 packing of the bf16 weight b.
+func packedBF16(b *tensor.Tensor, transB bool, k, n int) *gemm.PackedB {
+	key := bf16PackKey{weak.Make(b), transB}
+	v, loaded := bf16Packs.LoadOrStore(key, &bf16Pack{})
+	if !loaded {
+		runtime.AddCleanup(b, func(k bf16PackKey) { bf16Packs.Delete(k) }, key)
+	}
+	e := v.(*bf16Pack)
+	e.once.Do(func() { e.pb = gemm.PackBBF16(transB, k, n, b.BF16(), b.Dim(1)) })
+	return e.pb
 }
 
 // matmulOp: NumPy-style matmul with batch broadcasting. An optional third
