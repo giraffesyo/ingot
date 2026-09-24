@@ -283,8 +283,7 @@ func (m *MetalDiT) Step(x *tensor.Tensor, t float32) (*tensor.Tensor, error) {
 						C: w.s.At(0), LDC: SW, TransB: true, BF16: true, ABF16: true})
 					e.Gemm(metal.Gemm{M: T, N: T, K: dh, A: w.q16.At(h2), LDA: D, B: w.k16.At(h2), LDB: D,
 						C: w.s.At(4 * P), LDC: SW, TransB: true, BF16: true, ABF16: true})
-					e.SoftmaxRows(w.s.At(0), T, SW, SW, scale)
-					e.CastBF16(w.s.At(0), w.s16.At(0), T, SW, SW, SW)
+					e.SoftmaxRowsBF16(w.s.At(0), w.s16.At(0), T, SW, SW, SW, scale)
 					e.Gemm(metal.Gemm{M: T, N: dh, K: P, A: w.s16.At(0), LDA: SW, B: m.vp16[li].At(h2), LDB: D,
 						C: w.o.At(ho), LDC: D, BF16: true, ABF16: true})
 					e.Gemm(metal.Gemm{M: T, N: dh, K: T, A: w.s16.At(2 * P), LDA: SW, B: w.v16.At(h2), LDB: D,
