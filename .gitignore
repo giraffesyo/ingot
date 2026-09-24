@@ -23,3 +23,5 @@ det_boxes.png
 __pycache__/
 # IIIT5K word-recognition benchmark (fetched by tools/export/iiit5k.py; CVIT license).
 /testdata/iiit5k/
+# Qwen-Image-2.1 reference activations (tools/export/qwenimage21_ref.py; derived from licence-bound weights).
+/testdata/qwenimage21/
