@@ -154,3 +154,53 @@ func TestExpand(t *testing.T) {
 	out := run(t, op, x, i64t([]int{2}, 3, 4))[0]
 	eqF32(t, "expand", out, []int{3, 4}, []float32{1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3})
 }
+
+// TestConcatInnerAxis: an innermost-axis concat over many rows (the small-
+// row batched path) with unequal widths, vs a direct oracle.
+func TestConcatInnerAxis(t *testing.T) {
+	const rows = 70001
+	widths := []int{1, 3, 2}
+	var in []*tensor.Tensor
+	for i, w := range widths {
+		x := tensor.New(tensor.F32, rows, w)
+		for j := range x.F32() {
+			x.F32()[j] = float32(i*1000000 + j)
+		}
+		in = append(in, x)
+	}
+	out := run(t, mkOp(t, "Concat", 4, Attrs{"axis": {Kind: KindInt, I: -1}}, 3, 1), in...)[0]
+	W := 6
+	if !out.Shape().Equal(tensor.Shape{rows, W}) {
+		t.Fatalf("shape %v", out.Shape())
+	}
+	for r := range rows {
+		c := 0
+		for i, w := range widths {
+			for k := range w {
+				if got, want := out.F32()[r*W+c], float32(i*1000000+r*w+k); got != want {
+					t.Fatalf("[%d,%d] = %g, want %g", r, c, got, want)
+				}
+				c++
+			}
+		}
+	}
+}
+
+// BenchmarkConcat times the RoPE-shaped innermost concat ([T, H, 64, 1] ×
+// 2 → [T, H, 64, 2] at T=1024, H=32).
+func BenchmarkConcat(b *testing.B) {
+	a, c := tensor.New(tensor.F32, 1024, 32, 64, 1), tensor.New(tensor.F32, 1024, 32, 64, 1)
+	bld, _ := Lookup("", "Concat", 13)
+	op, _ := bld(NodeInfo{Name: "c", OpType: "Concat", Version: 13, NumIn: 2, NumOut: 1, Attrs: Attrs{"axis": {Kind: KindInt, I: 3}}})
+	ctx := &Ctx{Pool: tensor.NewPool()}
+	b.Run("shape=1024x32x64x1+1", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			out, err := op.Run(ctx, []*tensor.Tensor{a, c})
+			if err != nil {
+				b.Fatal(err)
+			}
+			ctx.Pool.Put(out[0])
+		}
+	})
+}
