@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/giraffesyo/ingot/kernels/metal"
@@ -58,7 +59,7 @@ func tiled(imgs []image.Image, w, h int) image.Image {
 
 func pipelineOn(tb testing.TB, detDev, recDev string) *Pipeline {
 	tb.Helper()
-	if (detDev == "gpu" || recDev == "gpu") && !metal.Available() {
+	if (strings.HasPrefix(detDev, "gpu") || strings.HasPrefix(recDev, "gpu")) && !metal.Available() {
 		tb.Skip("no GPU backend")
 	}
 	if _, err := os.Stat(detDir + "/det.onnx"); err != nil {
@@ -109,7 +110,7 @@ func TestPipelineGPU(t *testing.T) {
 func BenchmarkPipelineDevice(b *testing.B) {
 	imgs := corpusImages(b)
 	page := tiled(imgs, 1920, 1080)
-	for _, dev := range [][2]string{{"cpu", "cpu"}, {"gpu", "cpu"}, {"gpu", "gpu"}} {
+	for _, dev := range [][2]string{{"cpu", "cpu"}, {"gpu", "cpu"}, {"gpu", "gpu"}, {"gpu-bf16", "gpu-bf16"}} {
 		p := pipelineOn(b, dev[0], dev[1])
 		name := fmt.Sprintf("det=%s,rec=%s", dev[0], dev[1])
 		b.Run("corpus/"+name, func(b *testing.B) {
@@ -128,5 +129,24 @@ func BenchmarkPipelineDevice(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// TestCorpusDevices scores the corpus per device against its ground truth:
+// the f32 GPU must score exactly like the CPU; bf16 may cost at most 0.5
+// points of CER and 1 point of detection F1.
+func TestCorpusDevices(t *testing.T) {
+	corpus := loadCorpus(t)
+	base := evalCorpus(t, pipelineOn(t, "cpu", "cpu"), corpus, nil)
+	base.log(t, "cpu: ")
+	for _, dev := range []string{"gpu", "gpu-bf16"} {
+		m := evalCorpus(t, pipelineOn(t, dev, dev), corpus, nil)
+		m.log(t, dev+": ")
+		if dev == "gpu" && m != base {
+			t.Errorf("gpu scores %+v, cpu %+v", m, base)
+		}
+		if m.cer() > base.cer()+0.005 || m.f1() < base.f1()-0.01 {
+			t.Errorf("%s: CER %.4f (cpu %.4f), F1 %.4f (cpu %.4f)", dev, m.cer(), base.cer(), m.f1(), base.f1())
+		}
 	}
 }

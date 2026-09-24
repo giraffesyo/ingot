@@ -71,6 +71,8 @@ func TestConv(t *testing.T) {
 			xf, wf, bf := fill(r, x), fill(r, w), fill(r, b)
 			want := convRef(xf, wf, bf, g)
 			yd, yg, yb := buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P)
+			// bf16 path: bf16 weights and columns, bf16×bf16 GEMM.
+			yh, wh, colsH := buf(t, d, g.N*g.M*P), buf(t, d, (g.M*K+1)/2), buf(t, d, (K*P+1)/2)
 			pc := (P + 2) / 3 // three pixel chunks
 			cols := buf(t, d, K*pc)
 			err := d.Run(func(e *Encoder) {
@@ -90,13 +92,34 @@ func TestConv(t *testing.T) {
 						e.Gemm(Gemm{M: g.M, N: c, K: K, A: w.At(0), B: cols.At(0), LDB: c, C: yg.At(4 * (yn + p0)), LDC: P})
 					}
 				}
+				e.CastBF16(w.At(0), wh.At(0), g.M, K, K, K)
+				for n := range g.N {
+					e.Im2ColNCHWBF16(x.At(4*n*g.C*g.H*g.W), colsH.At(0), g, 0, P)
+					e.Gemm(Gemm{M: g.M, N: P, K: K, A: wh.At(0), B: colsH.At(0), C: yh.At(4 * n * g.M * P), ABF16: true, BF16: true})
+				}
 				n := g.N * g.M * P
 				e.BinaryBcast(OpAdd, yg.At(0), b.At(0), yg.At(0), n, 1, n, P, g.M)
+				e.BinaryBcast(OpAdd, yh.At(0), b.At(0), yh.At(0), n, 1, n, P, g.M)
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			tol := 1e-5 * math.Sqrt(float64(K)) * 4
+			if g.Group == 1 {
+				ax, aw := make([]float32, len(xf)), make([]float32, len(wf))
+				for i, v := range xf {
+					ax[i] = float32(math.Abs(float64(v)))
+				}
+				for i, v := range wf {
+					aw[i] = float32(math.Abs(float64(v)))
+				}
+				bound := convRef(ax, aw, nil, g)
+				for i, v := range f32s(yh.Bytes()) {
+					if math.Abs(float64(v)-want[i]) > bound[i]/128+1e-6 {
+						t.Fatalf("bf16 [%d] = %g, want %g (bound %g)", i, v, want[i], bound[i]/128)
+					}
+				}
+			}
 			for name, y := range map[string]*Buffer{"direct": yd, "im2col": yg, "blocked": yb} {
 				if name == "im2col" && g.Group != 1 || name == "blocked" && g.Group != 1 && !DepthwiseOK(g) {
 					continue

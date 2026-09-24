@@ -20,10 +20,8 @@ using namespace metal;
 // cols[k, j] = x[c, oy·SH - PT + ky·DH, ox·SW - PL + kx·DW] (0 outside) for
 // k = (c·KH + ky)·KW + kx and output pixel p = p0 + j (j < pc); one image's
 // channels x [C, H, W]. d = (p0, pc, K, 0).
-kernel void im2col_nchw(device const float* x [[buffer(0)]], device float* cols [[buffer(1)]],
-                        constant uint4& a [[buffer(2)]], constant uint4& b [[buffer(3)]],
-                        constant uint4& c [[buffer(4)]], constant uint4& d [[buffer(5)]],
-                        uint2 i [[thread_position_in_grid]]) {
+template <typename T>
+void im2col(device const float* x, device T* cols, uint4 a, uint4 b, uint4 c, uint4 d, uint2 i) {
 	const uint j = i.x, k = i.y;
 	if (j >= d.y || k >= d.z) return;
 	const uint p = d.x + j, oy = p / a.w, ox = p % a.w;
@@ -31,8 +29,17 @@ kernel void im2col_nchw(device const float* x [[buffer(0)]], device float* cols 
 	const int iy = int(oy * b.z + ky * c.x) - int(c.z), ix = int(ox * b.w + kx * c.y) - int(c.w);
 	float v = 0;
 	if (iy >= 0 && iy < int(a.y) && ix >= 0 && ix < int(a.z)) v = x[(ch * a.y + uint(iy)) * a.z + uint(ix)];
-	cols[k * d.y + j] = v;
+	cols[k * d.y + j] = T(v);
 }
+kernel void im2col_nchw(device const float* x [[buffer(0)]], device float* cols [[buffer(1)]],
+                        constant uint4& a [[buffer(2)]], constant uint4& b [[buffer(3)]],
+                        constant uint4& c [[buffer(4)]], constant uint4& d [[buffer(5)]],
+                        uint2 i [[thread_position_in_grid]]) { im2col(x, cols, a, b, c, d, i); }
+// The same, writing bf16 columns (the bf16 GEMM's B operand).
+kernel void im2col_nchw_bf16(device const float* x [[buffer(0)]], device bfloat* cols [[buffer(1)]],
+                             constant uint4& a [[buffer(2)]], constant uint4& b [[buffer(3)]],
+                             constant uint4& c [[buffer(4)]], constant uint4& d [[buffer(5)]],
+                             uint2 i [[thread_position_in_grid]]) { im2col(x, cols, a, b, c, d, i); }
 
 // Direct convolution (grouped / depthwise): one thread per output element of
 // out [N, M, OH, OW]; w [M, Cg, KH, KW]. e = (Cg, Mg, M, OH), f = (hasBias,
@@ -322,7 +329,7 @@ const (
 var cnnPSO struct {
 	once                        sync.Once
 	im2col, direct, pool2d, act *Pipeline
-	convT, resize, dw           *Pipeline
+	convT, resize, dw, im2colBF *Pipeline
 	directCB, convTCB           [len(blockWidths)]*Pipeline
 	err                         error
 }
@@ -334,7 +341,7 @@ func (d *Device) PrepareCNN() error {
 			name string
 			dst  **Pipeline
 		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act},
-			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}, {"conv_dw", &cnnPSO.dw}} {
+			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}, {"conv_dw", &cnnPSO.dw}, {"im2col_nchw_bf16", &cnnPSO.im2colBF}} {
 			if *k.dst, cnnPSO.err = d.Compile(cnnSrc, k.name); cnnPSO.err != nil {
 				return
 			}
@@ -369,14 +376,23 @@ func (g ConvGeom) args() (Arg, Arg, Arg) {
 // one image x [C, H, W] (g.N and g.Group are ignored; g.C is the image's
 // channel count).
 func (e *Encoder) Im2ColNCHW(x, cols Region, g ConvGeom, p0, pc int) {
+	e.im2col(cnnPSO.im2col, x, cols, g, p0, pc)
+}
+
+// Im2ColNCHWBF16 is Im2ColNCHW writing bf16 columns.
+func (e *Encoder) Im2ColNCHWBF16(x, cols Region, g ConvGeom, p0, pc int) {
+	e.im2col(cnnPSO.im2colBF, x, cols, g, p0, pc)
+}
+
+func (e *Encoder) im2col(p *Pipeline, x, cols Region, g ConvGeom, p0, pc int) {
 	K := g.C * g.KH * g.KW
 	if p0 < 0 || pc <= 0 || p0+pc > g.OH*g.OW {
-		e.err = fmt.Errorf("metal: Im2ColNCHW pixels [%d, %d) of %d", p0, p0+pc, g.OH*g.OW)
+		e.err = fmt.Errorf("metal: im2col pixels [%d, %d) of %d", p0, p0+pc, g.OH*g.OW)
 		return
 	}
-	if e.ready(cnnPSO.im2col) {
+	if e.ready(p) {
 		a, b, c := g.args()
-		e.Dispatch(cnnPSO.im2col, [3]int{pc, K, 1}, [3]int{64, 4, 1}, x, cols, a, b, c, u32s(p0, pc, K, 0))
+		e.Dispatch(p, [3]int{pc, K, 1}, [3]int{64, 4, 1}, x, cols, a, b, c, u32s(p0, pc, K, 0))
 	}
 }
 

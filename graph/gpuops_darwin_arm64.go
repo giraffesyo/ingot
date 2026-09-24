@@ -3,6 +3,10 @@
 package graph
 
 import (
+	"encoding/binary"
+	"fmt"
+	"math"
+
 	"github.com/giraffesyo/ingot/kernels/metal"
 	"github.com/giraffesyo/ingot/tensor"
 )
@@ -18,8 +22,7 @@ type gpuOp interface {
 }
 
 type gpuCtx struct {
-	s    *GPUSession
-	ones *tensor.Tensor // [n] ones, grown on demand (LayerNorm without scale)
+	s *GPUSession
 }
 
 func (c *gpuCtx) out(shape ...int) *tensor.Tensor { return c.s.pool.GetUninit(tensor.F32, shape...) }
@@ -386,6 +389,22 @@ func (o matmulGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	}
 	gelu := o.gelu
 	nout := out.Numel()
+	if c.s.bf16 && len(bs) == 2 {
+		if wb, ok := c.bf16Const(st, 1); ok {
+			if ab, ok := c.bf16Scratch(M * K); ok {
+				return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+					e.CastBF16(rs[0], ab, M, K, K, K)
+					e.Gemm(metal.Gemm{M: M, N: N, K: K, A: ab, B: wb, C: ro[0], ABF16: true, BF16: true})
+					if bias != nil {
+						e.AddBias(ro[0], rs[2], M, N, N)
+					}
+					if gelu {
+						e.Unary(metal.UnGeluErf, ro[0], ro[0], nout)
+					}
+				}, true
+			}
+		}
+	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: M, N: N, K: K, A: rs[0], B: rs[1], C: ro[0],
 			Batch: batch, StrideA: M * K, StrideB: K * N, StrideC: M * N})
@@ -442,6 +461,19 @@ func (o gemmGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		return nil, nil, false
 	}
 	transB := o.transB
+	if c.s.bf16 {
+		if wb, ok := c.bf16Const(st, 1); ok {
+			if ab, ok := c.bf16Scratch(M * K); ok {
+				return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+					e.CastBF16(rs[0], ab, M, K, K, K)
+					e.Gemm(metal.Gemm{M: M, N: N, K: K, A: ab, B: wb, C: ro[0], TransB: transB, ABF16: true, BF16: true})
+					if bias != nil {
+						e.AddBias(ro[0], rs[2], M, N, N)
+					}
+				}, true
+			}
+		}
+	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: M, N: N, K: K, A: rs[0], B: rs[1], C: ro[0], TransB: transB})
 		if bias != nil {
@@ -455,15 +487,48 @@ func (o gemmGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 // lastAxis reports whether axis names the last of rank dims.
 func lastAxis(axis, rank int) bool { return axis == -1 || axis == rank-1 }
 
+// onesVec is n ones in session memory (written once, never recycled: a
+// pooled buffer written on the CPU could still be read by queued GPU work).
 func (c *gpuCtx) onesVec(n int) (metal.Region, bool) {
-	if c.ones == nil || c.ones.Numel() < n {
-		if c.ones != nil {
-			c.release(c.ones)
-		}
-		c.ones = c.out(n)
-		copy(c.ones.F32(), tensor.FromF32(onesSlice(n), n).F32())
+	return c.s.table(fmt.Sprintf("ones/%d", n), func() []byte { return tensor.FromF32(onesSlice(n), n).Bytes() })
+}
+
+// bf16Const returns step input k — which must be a graph constant (f32) —
+// converted once to bf16 (round to nearest even) in session memory.
+func (c *gpuCtx) bf16Const(st *step, k int) (metal.Region, bool) {
+	if k >= len(st.in) || st.in[k] < 0 {
+		return metal.Region{}, false
 	}
-	r, ok := c.regions(c.ones)
+	t := c.s.constVals[st.in[k]]
+	if t == nil || t.DType() != tensor.F32 || !t.IsContiguous() {
+		return metal.Region{}, false
+	}
+	return c.s.table(fmt.Sprintf("bf16/%d", st.in[k]), func() []byte {
+		f := t.F32()
+		b := make([]byte, 2*len(f))
+		for i, v := range f {
+			binary.LittleEndian.PutUint16(b[2*i:], bf16Bits(v))
+		}
+		return b
+	})
+}
+
+// bf16Bits rounds f to bf16 (nearest even; NaN stays NaN).
+func bf16Bits(f float32) uint16 {
+	u := math.Float32bits(f)
+	if u&0x7fffffff > 0x7f800000 {
+		return uint16(u>>16) | 0x40
+	}
+	return uint16((u + 0x7fff + (u>>16)&1) >> 16)
+}
+
+// bf16Scratch is an uninitialised bf16 buffer of n elements for this
+// node's dispatches only (back to the pool at once; later users run after
+// them in stream order).
+func (c *gpuCtx) bf16Scratch(n int) (metal.Region, bool) {
+	t := c.s.pool.GetUninit(tensor.BF16, max(n, 1))
+	r, ok := c.regions(t)
+	c.release(t)
 	if !ok {
 		return metal.Region{}, false
 	}
