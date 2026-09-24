@@ -11,7 +11,7 @@ import (
 
 // Detector runs a DBNet-style text detector and returns text boxes.
 type Detector struct {
-	sess      *graph.Session
+	sess      graph.Runner
 	inName    string
 	outName   string
 	limit     int
@@ -21,8 +21,12 @@ type Detector struct {
 	MinSize   int     // minimum box side (pixels, original scale)
 }
 
-// NewDetector loads a detection model from an ONNX file.
-func NewDetector(path string) (*Detector, error) {
+// NewDetector loads a detection model from an ONNX file (CPU).
+func NewDetector(path string) (*Detector, error) { return NewDetectorOn(path, "cpu") }
+
+// NewDetectorOn loads a detection model for a device (see graph.CompileOn:
+// "cpu", "gpu" or "auto").
+func NewDetectorOn(path, device string) (*Detector, error) {
 	m, err := onnx.DecodeFile(path)
 	if err != nil {
 		return nil, err
@@ -36,7 +40,7 @@ func NewDetector(path string) (*Detector, error) {
 	// but it measured +4-8% on Zen 5 — at det's plane/channel mix (large
 	// spatial, thin C) the pipeline's im2col GEMM beats the blocked kernels.
 	// det stays on the pipeline.
-	s, err := graph.Compile(g)
+	s, err := graph.CompileOn(g, device)
 	if err != nil {
 		return nil, err
 	}

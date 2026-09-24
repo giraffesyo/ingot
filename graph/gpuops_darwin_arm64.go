@@ -130,6 +130,13 @@ func gpuOpFor(n *Node) gpuOp {
 			return gatherGPU{axis: int(a.Int("axis", 0))}
 		case "Conv":
 			return newConvGPU(a)
+		case "ConvTranspose":
+			return newConvTransposeGPU(a)
+		case "Resize":
+			if m := a.String("mode", "nearest"); m != "nearest" && m != "linear" {
+				return nil
+			}
+			return resizeGPU{attrs: a, name: n.Name}
 		case "Expand":
 			return expandGPU{}
 		case "Slice":

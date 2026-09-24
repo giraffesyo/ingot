@@ -64,6 +64,62 @@ kernel void conv_direct(device const float* x [[buffer(0)]], device const float*
 	o[((n * e.z + m) * OH + oy) * OW + ox] = acc;
 }
 
+// Transposed convolution (gather form: each output sums the inputs whose
+// taps land on it; no atomics). x [N, Cin, H, W], w [Cin, CoutG, KH, KW],
+// out [N, Cout, OH, OW]; a = (Cin, H, W, OW), e = (CinG, CoutG, Cout, OH).
+kernel void convt_direct(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                         device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
+                         constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
+                         constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
+                         constant uint4& f [[buffer(8)]], uint3 i [[thread_position_in_grid]]) {
+	const uint OW = a.w, OH = e.w, p = i.x, oc = i.y, n = i.z;
+	if (p >= OH * OW || oc >= e.z || n >= f.y) return;
+	const int oy = int(p / OW), ox = int(p % OW);
+	const uint g = oc / e.y, ocg = oc % e.y, CinG = e.x;
+	const int H = int(a.y), W = int(a.z), sh = int(b.z), sw = int(b.w);
+	float acc = f.x != 0 ? bias[oc] : 0.0f;
+	for (uint ky = 0; ky < b.x; ky++) {
+		const int ty = oy + int(c.z) - int(ky * c.x);
+		if (ty < 0 || ty % sh != 0 || ty / sh >= H) continue;
+		const int iy = ty / sh;
+		for (uint kx = 0; kx < b.y; kx++) {
+			const int tx = ox + int(c.w) - int(kx * c.y);
+			if (tx < 0 || tx % sw != 0 || tx / sw >= W) continue;
+			const int ix = tx / sw;
+			for (uint ic = 0; ic < CinG; ic++) {
+				const uint ci = g * CinG + ic;
+				acc += x[((n * a.x + ci) * uint(H) + uint(iy)) * uint(W) + uint(ix)] *
+				       w[((ci * e.y + ocg) * b.x + ky) * b.y + kx];
+			}
+		}
+	}
+	o[((n * e.z + oc) * OH + uint(oy)) * OW + uint(ox)] = acc;
+}
+
+// Separable resize of planes x [NC, H, W] → o [NC, OH, OW] from tap tables:
+// ti = [y0 OH | y1 OH | x0 OW | x1 OW] (int), tw = [wy OH | wx OW] (upper
+// tap weights; 0 for nearest). a = (H, W, OH, OW).
+kernel void resize_taps(device const float* x [[buffer(0)]], device float* o [[buffer(1)]],
+                        device const int* ti [[buffer(2)]], device const float* tw [[buffer(3)]],
+                        constant uint4& a [[buffer(4)]], uint2 i [[thread_position_in_grid]]) {
+	const uint OH = a.z, OW = a.w;
+	if (i.x >= OH * OW) return;
+	const uint r = i.x / OW, q = i.x % OW;
+	device const float* xp = x + i.y * a.x * a.y;
+	const int y0 = ti[r], y1 = ti[OH + r], x0 = ti[2 * OH + q], x1 = ti[2 * OH + OW + q];
+	const float wy = tw[r], wx = tw[OH + q];
+	const float v00 = xp[y0 * a.y + x0];
+	float top = v00, bot;
+	if (wx != 0) top = v00 * (1 - wx) + xp[y0 * a.y + x1] * wx;
+	float v = top;
+	if (wy != 0) {
+		bot = xp[y1 * a.y + x0];
+		if (wx != 0) bot = bot * (1 - wx) + xp[y1 * a.y + x1] * wx;
+		v = top * (1 - wy) + bot * wy;
+	}
+	o[i.y * OH * OW + i.x] = v;
+}
+
 // 2-D max / average pooling over planes x [NC, H, W] → o [NC, OH, OW].
 // a = (H, W, OH, OW), b = (KH, KW, SH, SW), c = (PT, PL, PB, PR),
 // d = (max, countIncludePad, 0, 0).
@@ -135,6 +191,7 @@ const (
 var cnnPSO struct {
 	once                        sync.Once
 	im2col, direct, pool2d, act *Pipeline
+	convT, resize               *Pipeline
 	err                         error
 }
 
@@ -144,7 +201,8 @@ func (d *Device) PrepareCNN() error {
 		for _, k := range []struct {
 			name string
 			dst  **Pipeline
-		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act}} {
+		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act},
+			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}} {
 			if *k.dst, cnnPSO.err = d.Compile(cnnSrc, k.name); cnnPSO.err != nil {
 				return
 			}
@@ -197,6 +255,35 @@ func (e *Encoder) ConvDirect(x, w, bias, out Region, g ConvGeom) {
 		a, b, c := g.args()
 		e.Dispatch(cnnPSO.direct, [3]int{g.OH * g.OW, g.M, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
 			u32s(g.C/g.Group, g.M/g.Group, g.M, g.OH), u32s(hasBias, g.N, 0, 0))
+	}
+}
+
+// ConvTransposeDirect computes out = convtranspose(x, w) (+ bias) one
+// thread per output. Geometry: g.C = Cin, g.M = Cout, g.H/g.W the input,
+// g.OH/g.OW the output, g.PT/g.PL the leading pads; w is [Cin, Cout/Group,
+// KH, KW]. bias may be the zero Region.
+func (e *Encoder) ConvTransposeDirect(x, w, bias, out Region, g ConvGeom) {
+	if g.Group <= 0 || g.C%g.Group != 0 || g.M%g.Group != 0 {
+		e.err = fmt.Errorf("metal: ConvTransposeDirect C=%d M=%d group=%d", g.C, g.M, g.Group)
+		return
+	}
+	hasBias := 1
+	if bias.B == nil {
+		bias, hasBias = w, 0
+	}
+	if e.ready(cnnPSO.convT) {
+		a, b, c := g.args()
+		e.Dispatch(cnnPSO.convT, [3]int{g.OH * g.OW, g.M, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
+			u32s(g.C/g.Group, g.M/g.Group, g.M, g.OH), u32s(hasBias, g.N, 0, 0))
+	}
+}
+
+// ResizeTaps resamples planes x [planes, h, w] to out [planes, oh, ow]
+// from tap tables (see the kernel): idx holds 2·oh + 2·ow int32 indices,
+// wts oh + ow float weights.
+func (e *Encoder) ResizeTaps(x, out, idx, wts Region, planes, h, w, oh, ow int) {
+	if e.ready(cnnPSO.resize) {
+		e.Dispatch(cnnPSO.resize, [3]int{oh * ow, planes, 1}, [3]int{64, 1, 1}, x, out, idx, wts, u32s(h, w, oh, ow))
 	}
 }
 

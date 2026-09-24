@@ -4,6 +4,7 @@ package graph
 
 import (
 	"errors"
+	"time"
 
 	"github.com/giraffesyo/ingot/tensor"
 )
@@ -11,7 +12,10 @@ import (
 // GPUSession is unavailable off darwin/arm64 (see the darwin build).
 type GPUSession struct {
 	*Session
-	GPUSteps, CPUSteps int
+	GPUSteps, CPUSteps, Flushes int
+	FlushedBy                   []string
+	Profile                     bool
+	OpTime                      map[string]time.Duration
 }
 
 // CompileGPU reports that no GPU backend exists on this platform.
@@ -24,3 +28,5 @@ func (s *GPUSession) Run(map[string]*tensor.Tensor) (map[string]*tensor.Tensor, 
 }
 
 func (s *GPUSession) Close() {}
+
+func (s *GPUSession) Release(map[string]*tensor.Tensor) {}
