@@ -1,8 +1,9 @@
-// Command qwenimage generates an image from a text prompt with Qwen-Image-2.1,
-// running entirely on the ingot runtime (pure Go, CPU).
+// Command qwenimage generates or edits images with Qwen-Image-2.1, running
+// entirely on the ingot runtime (pure Go; the GPU via Metal when available).
 //
 //	qwenimage -prompt "a red fox in the snow" -out fox.png
 //	qwenimage -prompt "..." -size 512 -steps 20 -seed 7
+//	qwenimage -prompt "give the fox a red scarf" -image fox.png -out scarf.png
 //
 // The weights are the Hugging Face snapshot (Qwen/Qwen-Image-2.1), found in
 // the HF cache or given with -model. Stages load one at a time; peak memory
@@ -13,6 +14,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -24,7 +27,9 @@ import (
 func main() {
 	prompt := flag.String("prompt", "", "text prompt (required)")
 	out := flag.String("out", "out.png", "output PNG (RGBA)")
-	size := flag.Int("size", 1024, "output side length when -width/-height are unset")
+	var images imageList
+	flag.Var(&images, "image", "condition image for editing (PNG/JPEG; repeat for up to 10)")
+	size := flag.Int("size", 1024, "output resolution: side of the square area outputs and condition images target")
 	width := flag.Int("width", 0, "output width in pixels (multiple of 32)")
 	height := flag.Int("height", 0, "output height in pixels (multiple of 32)")
 	steps := flag.Int("steps", 40, "denoising steps")
@@ -47,16 +52,10 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	w, h := *width, *height
-	if w == 0 {
-		w = *size
-	}
-	if h == 0 {
-		h = *size
-	}
 	t0 := time.Now()
 	res, err := qwenimage.Generate(dir, qwenimage.Options{
-		Prompt: *prompt, Width: w, Height: h, Steps: *steps, Seed: *seed, Device: *device, Fast: *fast,
+		Prompt: *prompt, Images: images, Resolution: *size, Width: *width, Height: *height,
+		Steps: *steps, Seed: *seed, Device: *device, Fast: *fast,
 		Log: func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	})
 	if err != nil {
@@ -73,6 +72,25 @@ func main() {
 	}
 	b := res.Image.Bounds()
 	fmt.Printf("wrote %s (%dx%d) in %.1fs\n", *out, b.Dx(), b.Dy(), time.Since(t0).Seconds())
+}
+
+// imageList is the repeatable -image flag.
+type imageList []image.Image
+
+func (l *imageList) String() string { return fmt.Sprintf("%d images", len(*l)) }
+
+func (l *imageList) Set(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	*l = append(*l, img)
+	return nil
 }
 
 // findSnapshot locates Qwen/Qwen-Image-2.1 in the Hugging Face cache

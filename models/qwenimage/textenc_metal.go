@@ -88,14 +88,42 @@ func NewMetalTextEncoder(cfg TextConfig, set *safetensors.Set) (*MetalTextEncode
 	return m, nil
 }
 
-// Encode runs the prompt ids and returns hidden states [len(ids)-drop, D].
-// layers < NumHiddenLayers runs a truncated model (tests).
+// Encode runs a text-only prompt and returns hidden states
+// [len(ids)-drop, D]. layers < NumHiddenLayers runs a truncated model.
 func (m *MetalTextEncoder) Encode(ids []int64, drop, layers int) (*tensor.Tensor, error) {
+	return m.EncodeMM(TextInputs{IDs: ids}, drop, layers)
+}
+
+// EncodeMM runs a prompt with image placeholders: their embeddings are
+// replaced by the vision tower's merged tokens, the deepstack features are
+// added to their hidden states after the first decoder layers, and every
+// token rotates by its M-RoPE (t, h, w) position.
+func (m *MetalTextEncoder) EncodeMM(in TextInputs, drop, layers int) (*tensor.Tensor, error) {
 	c := m.cfg
+	ids := in.IDs
 	T, D, H, KV, dh, I := len(ids), c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, c.IntermediateSize
 	emb, err := m.te.Embed(ids)
 	if err != nil {
 		return nil, err
+	}
+	nImg := len(in.ImagePositions)
+	if nImg > 0 {
+		if in.ImageEmbeds == nil || in.ImageEmbeds.Numel() != nImg*D {
+			return nil, fmt.Errorf("qwenimage: %d image positions but image embeds %v", nImg, in.ImageEmbeds)
+		}
+		for r, p := range in.ImagePositions {
+			copy(emb.F32()[p*D:(p+1)*D], in.ImageEmbeds.F32()[r*D:(r+1)*D])
+		}
+	}
+	pos := in.Positions
+	if pos == nil {
+		pos = make([][3]int, T)
+		for p := range pos {
+			pos[p] = [3]int{p, p, p}
+		}
+	}
+	if len(pos) != T {
+		return nil, fmt.Errorf("qwenimage: %d positions for %d tokens", len(pos), T)
 	}
 	var bufs []*metal.Buffer
 	defer func() {
@@ -116,8 +144,28 @@ func (m *MetalTextEncoder) Encode(ids []int64, drop, layers int) (*tensor.Tensor
 	x, y, q, k, v, o := nb(T*D), nb(T*D), nb(T*H*dh), nb(T*KV*dh), nb(T*KV*dh), nb(T*H*dh)
 	g, u, s, mask := nb(T*I), nb(T*I), nb(T*T), nb(T*T)
 	cos, sin := nb(T*dh/2), nb(T*dh/2)
+	var deep []*metal.Buffer
+	var imgIdx *metal.Buffer
+	if nImg > 0 {
+		for range in.Deepstack {
+			deep = append(deep, nb(nImg*D))
+		}
+		imgIdx = nb(nImg)
+	}
 	if err != nil {
 		return nil, err
+	}
+	for i, d := range in.Deepstack {
+		if d.Numel() != nImg*D {
+			return nil, fmt.Errorf("qwenimage: deepstack %d is %v, want [%d %d]", i, d.Shape(), nImg, D)
+		}
+		copy(f32view(deep[i]), d.F32())
+	}
+	if nImg > 0 {
+		iv := unsafe.Slice((*uint32)(unsafe.Pointer(&imgIdx.Bytes()[0])), nImg)
+		for r, p := range in.ImagePositions {
+			iv[r] = uint32(p)
+		}
 	}
 	copy(f32view(x), emb.F32())
 	mf := f32view(mask)
@@ -129,8 +177,9 @@ func (m *MetalTextEncoder) Encode(ids []int64, drop, layers int) (*tensor.Tensor
 	cf, sf := f32view(cos), f32view(sin)
 	for i := 0; i < dh/2; i++ { // as TextEncoder.Build: f32 inv_freq, f32 angle
 		inv := 1 / float32(math.Pow(c.RopeTheta, float64(float32(2*i)/float32(dh))))
+		ax := mropeAxis(i)
 		for p := range T {
-			a := float64(float32(p) * inv)
+			a := float64(float32(pos[p][ax]) * inv)
 			cf[p*dh/2+i], sf[p*dh/2+i] = float32(math.Cos(a)), float32(math.Sin(a))
 		}
 	}
@@ -140,7 +189,7 @@ func (m *MetalTextEncoder) Encode(ids []int64, drop, layers int) (*tensor.Tensor
 		e.Gemm(metal.Gemm{M: T, N: n, K: k, A: a.At(0), B: w, C: out.At(0), TransB: true, BF16: true})
 	}
 	err = m.dev.Run(func(e *metal.Encoder) {
-		for _, l := range m.layers[:layers] {
+		for li, l := range m.layers[:layers] {
 			e.RMSNormRows(x.At(0), y.At(0), l.inNorm.At(0), T, D, D, D, eps)
 			lin(e, y, l.q, q, H*dh, D)
 			lin(e, y, l.k, k, KV*dh, D)
@@ -162,6 +211,9 @@ func (m *MetalTextEncoder) Encode(ids []int64, drop, layers int) (*tensor.Tensor
 			e.SiLUMul(g.At(0), u.At(0), g.At(0), T, I, I, I, I)
 			lin(e, g, l.down, y, D, I)
 			e.GatedAdd(x.At(0), m.ones.At(0), y.At(0), T, D, D, D)
+			if li < len(deep) { // deepstack: visual features join the early layers
+				e.ScatterAddRows(x.At(0), deep[li].At(0), imgIdx.At(0), nImg, D, D, D)
+			}
 		}
 	})
 	if err != nil {

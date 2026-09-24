@@ -70,3 +70,42 @@ func TestVAEEncoderParity(t *testing.T) {
 	got := PackLatents(cfg, out["z"])
 	compare(t, "cond latents", got.F32(), ref.tensor(t, "cond_latents").F32(), 2e-3)
 }
+
+// TestVisionParity runs the vision tower over the reference patches and
+// compares the merged tokens and the deepstack features.
+func TestVisionParity(t *testing.T) {
+	ref := loadRef(t, "edit")
+	dir := filepath.Join(snapshotDir(t), "text_encoder")
+	cfg, err := LoadVisionConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := safetensors.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	grid := ref.tensor(t, "image_grid_thw").I64()
+	g, err := BuildVision(cfg, set, int(grid[1]), int(grid[2]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := graph.Compile(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.Run(map[string]*tensor.Tensor{"pixels": ref.tensor(t, "pixel_values")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"merged", "deep0", "deep1", "deep2"} {
+		refName := map[string]string{"merged": "vision_merged", "deep0": "vision_deepstack0", "deep1": "vision_deepstack1",
+			"deep2": "vision_deepstack2"}[name]
+		want := ref.tensor(t, refName).F32()
+		var maxw float64
+		for _, v := range want {
+			maxw = max(maxw, float64(abs32(v)))
+		}
+		compare(t, name, out[name].F32(), want, 1e-4*maxw)
+	}
+}
