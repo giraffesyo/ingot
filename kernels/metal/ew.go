@@ -94,6 +94,43 @@ kernel void transpose_nd(device const float* x [[buffer(0)]], device float* o [[
 	o[i] = x[off];
 }
 
+// Strided N-d elementwise (rank ≤ 6): output index → coords (dims) → each
+// operand's offset by its own strides (0 on broadcast axes, negative for
+// reversed slices). t[0..5] dims, t[6..11] a strides, t[12..17] b strides,
+// t[18..23] cond strides, t[24] rank, t[25] n, t[26] mode (0 copy a,
+// 1 binary op t[27], 2 cond ? a : b).
+kernel void nd_ew(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],
+                  device const uchar* cnd [[buffer(2)]], device float* o [[buffer(3)]],
+                  constant int* t [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+	if (int(i) >= t[25]) return;
+	int rem = int(i), oa = 0, ob = 0, oc = 0;
+	for (int d = t[24] - 1; d >= 0; d--) {
+		const int x = rem % t[d];
+		rem /= t[d];
+		oa += x * t[6 + d];
+		ob += x * t[12 + d];
+		oc += x * t[18 + d];
+	}
+	float r;
+	switch (t[26]) {
+	case 0: r = a[oa]; break;
+	case 2: r = cnd[oc] != 0 ? a[oa] : b[ob]; break;
+	default: {
+		const float x = a[oa], y = b[ob];
+		switch (t[27]) {
+		case 0: r = x + y; break;
+		case 1: r = x - y; break;
+		case 2: r = x * y; break;
+		case 3: r = x / y; break;
+		case 4: r = (y == floor(y) && fabs(y) < 64.0f) ? powi(x, int(y)) : pow(x, y); break;
+		case 5: r = max(x, y); break;
+		default: r = min(x, y); break;
+		}
+	}
+	}
+	o[i] = r;
+}
+
 // dst[r, c] = src[r, c] over [rows, cols] with row strides; p = (cols, lds, ldd, 0).
 kernel void copy2d(device const float* src [[buffer(0)]], device float* dst [[buffer(1)]],
                    constant uint4& p [[buffer(2)]], uint2 i [[thread_position_in_grid]]) {
@@ -158,6 +195,7 @@ const (
 var ewPSO struct {
 	once                                          sync.Once
 	binary, unary, transp, redux, copy2d, gatherC *Pipeline
+	nd                                            *Pipeline
 	err                                           error
 }
 
@@ -168,7 +206,7 @@ func (d *Device) PrepareEW() error {
 			name string
 			dst  **Pipeline
 		}{{"binary_bcast", &ewPSO.binary}, {"unary_ew", &ewPSO.unary}, {"transpose_nd", &ewPSO.transp}, {"reduce_rows", &ewPSO.redux},
-			{"copy2d", &ewPSO.copy2d}, {"gather_rows_c", &ewPSO.gatherC}} {
+			{"copy2d", &ewPSO.copy2d}, {"gather_rows_c", &ewPSO.gatherC}, {"nd_ew", &ewPSO.nd}} {
 			if *k.dst, ewPSO.err = d.Compile(ewSrc, k.name); ewPSO.err != nil {
 				return
 			}
@@ -260,5 +298,51 @@ func (e *Encoder) ReduceRows(x, out Region, rows, cols, ld int, mean bool) {
 	}
 	if e.ready(ewPSO.redux) {
 		e.Dispatch(ewPSO.redux, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, out, u32s(cols, ld, m, 0))
+	}
+}
+
+// CopyND writes out (contiguous, dims) from x read at the given element
+// strides per output axis (0 broadcasts, negative reverses): Expand,
+// Slice, strided views.
+func (e *Encoder) CopyND(x, out Region, dims, strides []int) {
+	e.nd(0, 0, x, out, out, out, dims, strides, nil, nil)
+}
+
+// BinaryND writes out = op(a, b) over dims with per-operand strides.
+func (e *Encoder) BinaryND(op int, a, b, out Region, dims, sa, sb []int) {
+	e.nd(1, op, a, b, out, out, dims, sa, sb, nil)
+}
+
+// WhereND writes out = cond ? a : b over dims; cond holds one byte per
+// element (bool), strides in elements.
+func (e *Encoder) WhereND(cond, a, b, out Region, dims, sc, sa, sb []int) {
+	e.nd(2, 0, a, b, cond, out, dims, sa, sb, sc)
+}
+
+func (e *Encoder) nd(mode, op int, a, b, cond, out Region, dims, sa, sb, sc []int) {
+	r := len(dims)
+	if r > 6 || len(sa) != r || (sb != nil && len(sb) != r) || (sc != nil && len(sc) != r) {
+		e.err = fmt.Errorf("metal: strided op rank %d", r)
+		return
+	}
+	t := make([]int, 28)
+	n := 1
+	for d := range r {
+		t[d] = dims[d]
+		t[6+d] = sa[d]
+		if sb != nil {
+			t[12+d] = sb[d]
+		}
+		if sc != nil {
+			t[18+d] = sc[d]
+		}
+		n *= dims[d]
+	}
+	if n == 0 {
+		return
+	}
+	t[24], t[25], t[26], t[27] = r, n, mode, op
+	if e.ready(ewPSO.nd) {
+		e.Dispatch(ewPSO.nd, [3]int{n, 1, 1}, [3]int{256, 1, 1}, a, b, cond, out, u32s(t...))
 	}
 }
