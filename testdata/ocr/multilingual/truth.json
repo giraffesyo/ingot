@@ -1,0 +1,104 @@
+[
+ {
+  "image": "zh_0.png",
+  "lang": "zh",
+  "model": "ch",
+  "text": "文档布局分析与表格识别"
+ },
+ {
+  "image": "zh_1.png",
+  "lang": "zh",
+  "model": "ch",
+  "text": "纯Go推理运行时"
+ },
+ {
+  "image": "zh_2.png",
+  "lang": "zh",
+  "model": "ch",
+  "text": "今天的天气很好"
+ },
+ {
+  "image": "ja_0.png",
+  "lang": "ja",
+  "model": "ch",
+  "text": "日本語の文字認識"
+ },
+ {
+  "image": "ja_1.png",
+  "lang": "ja",
+  "model": "ch",
+  "text": "東京駅から出発します"
+ },
+ {
+  "image": "ko_0.png",
+  "lang": "ko",
+  "model": "korean",
+  "text": "한국어 문자 인식"
+ },
+ {
+  "image": "ko_1.png",
+  "lang": "ko",
+  "model": "korean",
+  "text": "오늘은 날씨가 좋습니다"
+ },
+ {
+  "image": "ru_0.png",
+  "lang": "ru",
+  "model": "cyrillic",
+  "text": "Распознавание текста"
+ },
+ {
+  "image": "ru_1.png",
+  "lang": "ru",
+  "model": "cyrillic",
+  "text": "Москва и Санкт-Петербург"
+ },
+ {
+  "image": "fr_0.png",
+  "lang": "fr",
+  "model": "latin",
+  "text": "Reconnaissance des caractères"
+ },
+ {
+  "image": "fr_1.png",
+  "lang": "fr",
+  "model": "latin",
+  "text": "Élève à côté du château"
+ },
+ {
+  "image": "de_0.png",
+  "lang": "de",
+  "model": "latin",
+  "text": "Größe und Übersetzung"
+ },
+ {
+  "image": "de_1.png",
+  "lang": "de",
+  "model": "latin",
+  "text": "Straße in München"
+ },
+ {
+  "image": "es_0.png",
+  "lang": "es",
+  "model": "latin",
+  "text": "Reconocimiento de señales"
+ },
+ {
+  "image": "es_1.png",
+  "lang": "es",
+  "model": "latin",
+  "text": "Mañana en Córdoba"
+ },
+ {
+  "image": "ar_0.png",
+  "lang": "ar",
+  "model": "arabic",
+  "text": "التعرف على النصوص"
+ },
+ {
+  "image": "ar_1.png",
+  "lang": "ar",
+  "model": "arabic",
+  "text": "مرحبا بالعالم"
+ }
+]
