@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"testing"
+	"unsafe"
 )
 
 // convRef is the float64 oracle for NCHW grouped convolution.
@@ -185,6 +186,110 @@ func TestPoolAct(t *testing.T) {
 			want := fn(float64(uf[i]))*scale + shift
 			if got := float64(f32s(uo.Bytes())[i]); math.Abs(got-want) > 2e-6*(1+math.Abs(want)) {
 				t.Fatalf("act %d [%d] (x=%g) = %g, want %g", act, i, uf[i], got, want)
+			}
+		}
+	}
+}
+
+// TestConvTranspose: the gather-form kernel vs a scatter-add oracle over
+// strides, pads, dilation, groups and output padding.
+func TestConvTranspose(t *testing.T) {
+	d := openDev(t)
+	if err := d.PrepareCNN(); err != nil {
+		t.Fatal(err)
+	}
+	r := rand.New(rand.NewPCG(7, 7))
+	for _, c := range []struct {
+		g      ConvGeom
+		outPad int
+	}{
+		{ConvGeom{N: 1, C: 4, H: 5, W: 6, M: 3, KH: 2, KW: 2, SH: 2, SW: 2, DH: 1, DW: 1, Group: 1}, 0},
+		{ConvGeom{N: 2, C: 6, H: 4, W: 5, M: 4, KH: 3, KW: 3, SH: 2, SW: 2, DH: 1, DW: 1, PT: 1, PL: 1, Group: 2}, 1},
+		{ConvGeom{N: 1, C: 3, H: 6, W: 4, M: 5, KH: 3, KW: 2, SH: 1, SW: 3, DH: 2, DW: 1, PT: 2, PL: 0, Group: 1}, 0},
+	} {
+		g := c.g
+		// Symmetric pads: bottom/right = top/left.
+		g.OH = (g.H-1)*g.SH - 2*g.PT + g.DH*(g.KH-1) + c.outPad + 1
+		g.OW = (g.W-1)*g.SW - 2*g.PL + g.DW*(g.KW-1) + c.outPad + 1
+		CinG, CoutG := g.C/g.Group, g.M/g.Group
+		x, w, b := buf(t, d, g.N*g.C*g.H*g.W), buf(t, d, g.C*CoutG*g.KH*g.KW), buf(t, d, g.M)
+		xf, wf, bf := fill(r, x), fill(r, w), fill(r, b)
+		o := buf(t, d, g.N*g.M*g.OH*g.OW)
+		if err := d.Run(func(e *Encoder) { e.ConvTransposeDirect(x.At(0), w.At(0), b.At(0), o.At(0), g) }); err != nil {
+			t.Fatal(err)
+		}
+		want := make([]float64, g.N*g.M*g.OH*g.OW)
+		for n := range g.N {
+			for oc := range g.M {
+				for p := range g.OH * g.OW {
+					want[(n*g.M+oc)*g.OH*g.OW+p] = float64(bf[oc])
+				}
+			}
+			for ci := range g.C {
+				gi := ci / CinG
+				for ocg := range CoutG {
+					oc := gi*CoutG + ocg
+					for iy := range g.H {
+						for ix := range g.W {
+							for ky := range g.KH {
+								for kx := range g.KW {
+									oy, ox := iy*g.SH-g.PT+ky*g.DH, ix*g.SW-g.PL+kx*g.DW
+									if oy < 0 || oy >= g.OH || ox < 0 || ox >= g.OW {
+										continue
+									}
+									want[((n*g.M+oc)*g.OH+oy)*g.OW+ox] += float64(xf[((n*g.C+ci)*g.H+iy)*g.W+ix]) *
+										float64(wf[((ci*CoutG+ocg)*g.KH+ky)*g.KW+kx])
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		for i, v := range f32s(o.Bytes()) {
+			if math.Abs(float64(v)-want[i]) > 1e-5*(1+math.Abs(want[i])) {
+				t.Fatalf("%+v [%d] = %g, want %g", g, i, v, want[i])
+			}
+		}
+	}
+}
+
+// TestResizeTaps: bilinear taps (fractional weights both ways) and a
+// nearest map vs direct evaluation.
+func TestResizeTaps(t *testing.T) {
+	d := openDev(t)
+	if err := d.PrepareCNN(); err != nil {
+		t.Fatal(err)
+	}
+	r := rand.New(rand.NewPCG(3, 3))
+	const planes, H, W, OH, OW = 2, 5, 7, 8, 3
+	x, o := buf(t, d, planes*H*W), buf(t, d, planes*OH*OW)
+	xf := fill(r, x)
+	ti, tw := buf(t, d, 2*OH+2*OW), buf(t, d, OH+OW)
+	idx := unsafe.Slice((*int32)(unsafe.Pointer(&ti.Bytes()[0])), 2*OH+2*OW)
+	wts := f32s(tw.Bytes())
+	for i := range OH {
+		idx[i], idx[OH+i] = int32(i*H/OH), int32(min(i*H/OH+1, H-1))
+		wts[i] = float32(i%3) / 3
+	}
+	for j := range OW {
+		idx[2*OH+j], idx[2*OH+OW+j] = int32(j*2), int32(j*2+1)
+		wts[OH+j] = float32(j) / 4
+	}
+	if err := d.Run(func(e *Encoder) { e.ResizeTaps(x.At(0), o.At(0), ti.At(0), tw.At(0), planes, H, W, OH, OW) }); err != nil {
+		t.Fatal(err)
+	}
+	for p := range planes {
+		for i := range OH {
+			for j := range OW {
+				at := func(y, xx int32) float32 { return xf[(p*H+int(y))*W+int(xx)] }
+				wy, wx := wts[i], wts[OH+j]
+				top := at(idx[i], idx[2*OH+j])*(1-wx) + at(idx[i], idx[2*OH+OW+j])*wx
+				bot := at(idx[OH+i], idx[2*OH+j])*(1-wx) + at(idx[OH+i], idx[2*OH+OW+j])*wx
+				want := top*(1-wy) + bot*wy
+				if got := f32s(o.Bytes())[(p*OH+i)*OW+j]; math.Abs(float64(got-want)) > 1e-6 {
+					t.Fatalf("[%d %d %d] = %g, want %g", p, i, j, got, want)
+				}
 			}
 		}
 	}

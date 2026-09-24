@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/giraffesyo/ingot/kernels/par"
@@ -41,14 +42,31 @@ func srcCoord(coord string, outIdx, outSize, inSize int, scale float32) float64 
 	}
 }
 
-func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
+// ResizeTaps is a 2-D Resize's separable source mapping: output row i
+// reads rows Y0[i] and Y1[i] blended by WY[i] (the upper row's weight),
+// likewise for columns. Nearest mode has Y1 = Y0 and zero weights.
+type ResizeTaps struct {
+	OH, OW         int
+	Y0, Y1, X0, X1 []int
+	WY, WX         []float32
+}
+
+// PlanResize resolves a Resize node's output size and taps for its inputs
+// (X [N,C,H,W], roi, scales, sizes) — the mapping the CPU op uses.
+func PlanResize(a Attrs, in []*tensor.Tensor) (ResizeTaps, error) {
+	o := &resizeOp{mode: a.String("mode", "nearest"), coord: a.String("coordinate_transformation_mode", "half_pixel"),
+		nearest: a.String("nearest_mode", "round_prefer_floor")}
+	return o.taps(in)
+}
+
+func (o *resizeOp) taps(in []*tensor.Tensor) (ResizeTaps, error) {
+	var t ResizeTaps
 	if len(in) < 1 || in[0] == nil || in[0].DType() != tensor.F32 {
-		return nil, o.n.Errorf("need f32 input")
+		return t, fmt.Errorf("need f32 input")
 	}
-	x := in[0]
-	xs := x.Shape()
+	xs := in[0].Shape()
 	if len(xs) != 4 {
-		return nil, o.n.Errorf("only 4-D NCHW resize supported, got %v", xs)
+		return t, fmt.Errorf("only 4-D NCHW resize supported, got %v", xs)
 	}
 	// Resolve scales/sizes from inputs (opset 11/13/18: X, roi, scales, sizes).
 	var scales []float32
@@ -63,37 +81,61 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	} else if o.sizes != nil {
 		sizes = o.sizes
 	}
-	N, C, H, W := xs[0], xs[1], xs[2], xs[3]
-	var OH, OW int
+	H, W := xs[2], xs[3]
 	var sh, sw float32
 	switch {
 	case len(sizes) == 4:
-		OH, OW = int(sizes[2]), int(sizes[3])
-		sh, sw = float32(OH)/float32(H), float32(OW)/float32(W)
+		t.OH, t.OW = int(sizes[2]), int(sizes[3])
+		sh, sw = float32(t.OH)/float32(H), float32(t.OW)/float32(W)
 	case len(scales) == 4:
 		sh, sw = scales[2], scales[3]
-		OH, OW = int(math.Floor(float64(sh)*float64(H))), int(math.Floor(float64(sw)*float64(W)))
+		t.OH, t.OW = int(math.Floor(float64(sh)*float64(H))), int(math.Floor(float64(sw)*float64(W)))
 	default:
-		return nil, o.n.Errorf("need scales or sizes")
+		return t, fmt.Errorf("need scales or sizes")
 	}
-	if OH <= 0 || OW <= 0 {
-		return nil, o.n.Errorf("non-positive output %dx%d", OH, OW)
+	if t.OH <= 0 || t.OW <= 0 {
+		return t, fmt.Errorf("non-positive output %dx%d", t.OH, t.OW)
 	}
-	out := ctx.NewUninit(tensor.F32, N, C, OH, OW)
-	xf, of := x.F32(), out.F32()
-	coord := o.coord
-
-	// Precompute per-output-row/col source mapping.
+	t.Y0, t.Y1, t.WY = make([]int, t.OH), make([]int, t.OH), make([]float32, t.OH)
+	t.X0, t.X1, t.WX = make([]int, t.OW), make([]int, t.OW), make([]float32, t.OW)
 	switch o.mode {
 	case "nearest":
-		ry := make([]int, OH)
-		rx := make([]int, OW)
-		for i := range ry {
-			ry[i] = clampIdx(nearestIdx(o.nearest, srcCoord(coord, i, OH, H, sh)), H)
+		for i := range t.Y0 {
+			t.Y0[i] = clampIdx(nearestIdx(o.nearest, srcCoord(o.coord, i, t.OH, H, sh)), H)
+			t.Y1[i] = t.Y0[i]
 		}
-		for j := range rx {
-			rx[j] = clampIdx(nearestIdx(o.nearest, srcCoord(coord, j, OW, W, sw)), W)
+		for j := range t.X0 {
+			t.X0[j] = clampIdx(nearestIdx(o.nearest, srcCoord(o.coord, j, t.OW, W, sw)), W)
+			t.X1[j] = t.X0[j]
 		}
+	case "linear":
+		for i := range t.Y0 {
+			t.Y0[i], t.Y1[i], t.WY[i] = linTaps(srcCoord(o.coord, i, t.OH, H, sh), H)
+		}
+		for j := range t.X0 {
+			t.X0[j], t.X1[j], t.WX[j] = linTaps(srcCoord(o.coord, j, t.OW, W, sw), W)
+		}
+	default:
+		return t, fmt.Errorf("unsupported mode %q (only nearest, linear)", o.mode)
+	}
+	return t, nil
+}
+
+func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	tp, err := o.taps(in)
+	if err != nil {
+		return nil, o.n.Errorf("%v", err)
+	}
+	x := in[0]
+	xs := x.Shape()
+	N, C, H, W := xs[0], xs[1], xs[2], xs[3]
+	OH, OW := tp.OH, tp.OW
+	out := ctx.NewUninit(tensor.F32, N, C, OH, OW)
+	xf, of := x.F32(), out.F32()
+
+	switch o.mode {
+	case "nearest":
+		ry, rx := tp.Y0, tp.X0
 		// Integer 2× upsample (the FPN case): each output row is either a
 		// self-interleave of a source row or a copy of the previous output
 		// row — no per-element gather.
@@ -125,20 +167,7 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 			}
 		})
 	case "linear":
-		y0 := make([]int, OH)
-		y1 := make([]int, OH)
-		wy := make([]float32, OH)
-		for i := range y0 {
-			c := srcCoord(coord, i, OH, H, sh)
-			y0[i], y1[i], wy[i] = linTaps(c, H)
-		}
-		x0 := make([]int, OW)
-		x1 := make([]int, OW)
-		wx := make([]float32, OW)
-		for j := range x0 {
-			c := srcCoord(coord, j, OW, W, sw)
-			x0[j], x1[j], wx[j] = linTaps(c, W)
-		}
+		y0, y1, wy, x0, x1, wx := tp.Y0, tp.Y1, tp.WY, tp.X0, tp.X1, tp.WX
 		par.For(N*C, 1, func(nc, _ int) {
 			src := xf[nc*H*W : (nc+1)*H*W]
 			dst := of[nc*OH*OW : (nc+1)*OH*OW]
@@ -155,8 +184,6 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 				}
 			}
 		})
-	default:
-		return nil, o.n.Errorf("unsupported mode %q (only nearest, linear)", o.mode)
 	}
 	return ctx.Out(out), nil
 }

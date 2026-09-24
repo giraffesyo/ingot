@@ -3,6 +3,8 @@
 package graph
 
 import (
+	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/giraffesyo/ingot/kernels/metal"
@@ -322,4 +324,137 @@ func (o actGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Ten
 func newClipGPU(a ops.Attrs) gpuOp {
 	return actGPU{act: metal.ActClip, clip: true,
 		alpha: a.Float("min", float32(math.Inf(-1))), beta: a.Float("max", float32(math.Inf(1)))}
+}
+
+// resizeGPU is Resize (nearest / linear over NCHW planes): the taps come
+// from ops.PlanResize — the CPU op's own mapping — cached per shape.
+type resizeGPU struct {
+	attrs ops.Attrs
+	name  string
+}
+
+func (o resizeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) < 1 || in[0] == nil || !allF32(in[0]) || !onlyFirstOutput(st) {
+		return nil, nil, false
+	}
+	// Scales / sizes are read on the CPU now: only constants (or integer
+	// sizes, never GPU outputs) are known written.
+	if len(in) > 2 && in[2] != nil && in[2].Numel() > 0 && c.s.constVals[st.in[2]] == nil {
+		return nil, nil, false
+	}
+	tp, err := ops.PlanResize(o.attrs, in)
+	if err != nil {
+		return nil, nil, false
+	}
+	x := in[0]
+	xs := x.Shape()
+	H, W := xs[2], xs[3]
+	key := fmt.Sprintf("resize/%s/%dx%d->%dx%d", o.name, H, W, tp.OH, tp.OW)
+	ri, ok1 := c.s.table(key+"/i", func() []byte {
+		b := make([]byte, 0, 4*(2*tp.OH+2*tp.OW))
+		for _, v := range [][]int{tp.Y0, tp.Y1, tp.X0, tp.X1} {
+			for _, i := range v {
+				b = binary.LittleEndian.AppendUint32(b, uint32(i))
+			}
+		}
+		return b
+	})
+	rw, ok2 := c.s.table(key+"/w", func() []byte {
+		b := make([]byte, 0, 4*(tp.OH+tp.OW))
+		for _, v := range [][]float32{tp.WY, tp.WX} {
+			for _, f := range v {
+				b = binary.LittleEndian.AppendUint32(b, math.Float32bits(f))
+			}
+		}
+		return b
+	})
+	if !ok1 || !ok2 {
+		return nil, nil, false
+	}
+	rx, ok := c.regions(x)
+	if !ok {
+		return nil, nil, false
+	}
+	out := c.out(xs[0], xs[1], tp.OH, tp.OW)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	planes, OH, OW := xs[0]*xs[1], tp.OH, tp.OW
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.ResizeTaps(rx[0], ro[0], ri, rw, planes, H, W, OH, OW) }, true
+}
+
+type convTransposeGPU struct {
+	strides, dils, outPad [2]int
+	pads                  [4]int
+	outShape              []int64
+	group                 int
+	epi                   gpuEpilogue
+}
+
+func newConvTransposeGPU(a ops.Attrs) gpuOp {
+	st, di, pa := a.Ints("strides", []int64{1, 1}), a.Ints("dilations", []int64{1, 1}), a.Ints("pads", []int64{0, 0, 0, 0})
+	op := a.Ints("output_padding", []int64{0, 0})
+	epi, ok := epilogueOf(a)
+	if len(st) != 2 || len(di) != 2 || len(pa) != 4 || len(op) != 2 || !ok {
+		return nil
+	}
+	if ap := a.String("auto_pad", "NOTSET"); ap != "NOTSET" && ap != "" {
+		return nil
+	}
+	return convTransposeGPU{strides: [2]int{int(st[0]), int(st[1])}, dils: [2]int{int(di[0]), int(di[1])},
+		outPad: [2]int{int(op[0]), int(op[1])}, pads: [4]int{int(pa[0]), int(pa[1]), int(pa[2]), int(pa[3])},
+		outShape: a.Ints("output_shape", nil), group: int(a.Int("group", 1)), epi: epi}
+}
+
+func (o convTransposeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) < 2 || in[0] == nil || in[1] == nil || !allF32(in...) || !onlyFirstOutput(st) {
+		return nil, nil, false
+	}
+	x, w := in[0], in[1]
+	var bias *tensor.Tensor
+	if len(in) > 2 {
+		bias = in[2]
+	}
+	xs, ws := x.Shape(), w.Shape()
+	if len(xs) != 4 || len(ws) != 4 || ws[0] != xs[1] || o.group <= 0 || xs[1]%o.group != 0 {
+		return nil, nil, false
+	}
+	g := metal.ConvGeom{N: xs[0], C: xs[1], H: xs[2], W: xs[3], M: ws[1] * o.group, KH: ws[2], KW: ws[3],
+		SH: o.strides[0], SW: o.strides[1], DH: o.dils[0], DW: o.dils[1], PT: o.pads[0], PL: o.pads[1], Group: o.group}
+	if bias != nil && bias.Numel() != g.M {
+		return nil, nil, false
+	}
+	g.OH = (g.H-1)*g.SH - o.pads[0] - o.pads[2] + g.DH*(g.KH-1) + o.outPad[0] + 1
+	g.OW = (g.W-1)*g.SW - o.pads[1] - o.pads[3] + g.DW*(g.KW-1) + o.outPad[1] + 1
+	if len(o.outShape) == 4 {
+		g.OH, g.OW = int(o.outShape[2]), int(o.outShape[3])
+	}
+	if g.OH <= 0 || g.OW <= 0 || g.N == 0 {
+		return nil, nil, false
+	}
+	ts := []*tensor.Tensor{x, w}
+	if bias != nil {
+		ts = append(ts, bias)
+	}
+	rs, ok := c.regions(ts...)
+	if !ok {
+		return nil, nil, false
+	}
+	var rb metal.Region
+	if bias != nil {
+		rb = rs[2]
+	}
+	out := c.out(g.N, g.M, g.OH, g.OW)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	n, epi := out.Numel(), o.epi
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+		e.ConvTransposeDirect(rs[0], rs[1], rb, ro[0], g)
+		epi.encode(e, ro[0], n)
+	}, true
 }

@@ -104,6 +104,26 @@ FFI lives in `kernels/metal` (darwin/arm64; a stub elsewhere):
   Metal's compute API does not need them.
 - Charter amended (CLAUDE.md): CPU-first, optional GPU backends, no cgo.
 
+Executor seam, as built (2026-09-24): `graph.GPUSession` (CompileGPU) is
+a copy of the CPU run loop with per-node placement, not a backend
+interface inside Session — the CPU executor stays untouched.
+- Memory: the session pool allocates page-aligned mmap'd slabs, each
+  wrapped once as a no-copy Metal buffer; constants and feeds are copied
+  in. CPU and GPU ops share tensors directly — no transfers.
+- Ordering: GPU nodes append to one open command buffer (Stream, recorded
+  on the device thread in batches of 64 — a thread hand-off per node cost
+  more than small kernels). A CPU node that reads GPU-written data flushes
+  first; views, and integer shape math whose inputs no pending GPU node
+  wrote, run without flushing. Those side nodes allocate from their own
+  pool, recycled only at a flush, so a queued GPU reader never sees its
+  buffer reused; GPU-to-GPU reuse is safe in stream order.
+- Contract for GPU ops: prepare validates and allocates (or declines, and
+  the node runs on the CPU); the encode closure runs later and captures
+  sizes and regions by value. Integer tensors are never GPU outputs, so
+  prepare may read indices, shapes and slice bounds on the CPU.
+- GPUSession.Profile flushes after every GPU node and totals wall time per
+  op type, for finding slow kernels.
+
 ## Order
 
 1. Ops: Sin, Cos, GroupNormalization — done (2026-09-23); Einsum,

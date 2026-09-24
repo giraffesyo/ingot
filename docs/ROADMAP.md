@@ -315,7 +315,17 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
 - [x] image editing: vision tower, multimodal text encoder (image tokens,
       deepstack, 3D M-RoPE), VAE encoder, condition-aware layout — all on
       the GPU; parity 1.5e-4 (f32) vs diffusers; CLI -image
-- [ ] executor-level GPU placement for ONNX graphs (today the Metal path is
-      model-level, in models/qwenimage)
+- [x] executor-level GPU placement for ONNX graphs: graph.CompileGPU
+      (opt-in GPUSession; graph.CompileOn(g, "cpu"|"gpu"|"auto")). Per-node
+      placement with CPU fallback, unified-memory tensors (page-aligned
+      pool wrapped as Metal buffers), one command buffer between CPU
+      nodes, integer shape math off the flush path. GPU ops: elementwise
+      (any broadcast), MatMul/Gemm, LayerNorm, Softmax, reductions,
+      Transpose/Slice/Concat/Gather/Expand/Where, SDPA/MHA, Conv (im2col +
+      matmul2d GEMM; direct for grouped), ConvTranspose, pooling, Resize,
+      fused activations. All 35 zoo models match; the OCR detector runs
+      as a single command buffer (ocr.NewDetectorOn, cmd/ocr -device)
+- [ ] GPUSession perf: small-M GEMM tiles for conv (M = channels < 64),
+      fused conv epilogues in the GEMM, bf16 weights
 - [ ] CPU perf: per-step time at 1024² (0.69 TFLOPS at 256 tokens)
 - [ ] RMSNorm / RoPE / adaLN fused ops (profile first)

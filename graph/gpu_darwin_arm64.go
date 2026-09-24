@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/giraffesyo/ingot/kernels/metal"
@@ -22,20 +23,24 @@ import (
 // also makes buffer recycling safe — a pooled buffer is only handed to a
 // CPU writer once every GPU reader has run.
 //
-// The CPU Session is untouched; GPUSession is opt-in (CompileGPU). Not safe
-// for concurrent Runs.
+// The CPU Session is untouched; GPUSession is opt-in (CompileGPU). Runs
+// are serialized.
 type GPUSession struct {
 	*Session
 	dev    *metal.Device
 	gops   []gpuOp // per step; nil = CPU only
 	mem    *pageMem
-	mu     sync.Mutex
+	mu     sync.Mutex // guards wraps
+	runMu  sync.Mutex
 	wraps  map[unsafe.Pointer]*metal.Buffer
 	stream *metal.Stream
 	// side serves CPU nodes that run while GPU work is pending (see
 	// sideRun): session memory, so GPU nodes can read their outputs, but
 	// apart from the GPU pool, and recycled only after a flush.
 	side *tensor.Pool
+	// tables caches small constant tables GPU nodes derive from shapes
+	// (resize taps), in session memory for the session's lifetime.
+	tables map[string]metal.Region
 
 	// GPUSteps and CPUSteps count where the last Run placed its nodes;
 	// Flushes counts its GPU round trips (mid-graph flushes before CPU
@@ -43,6 +48,11 @@ type GPUSession struct {
 	GPUSteps, CPUSteps, Flushes int
 	// FlushedBy names the CPU nodes that forced mid-graph flushes.
 	FlushedBy []string
+	// Profile, when set, flushes after every GPU node and accumulates its
+	// wall time (encode + GPU) per op type in OpTime — for finding slow
+	// kernels, not for production runs.
+	Profile bool
+	OpTime  map[string]time.Duration
 }
 
 // CompileGPU optimizes g and compiles it for the GPU (darwin/arm64 with
@@ -65,7 +75,7 @@ func CompileGPU(g *Graph) (*GPUSession, error) {
 	mem := &pageMem{}
 	s.pool = tensor.NewPoolAlloc(mem.alloc)
 	gs := &GPUSession{Session: s, dev: dev, mem: mem, wraps: map[unsafe.Pointer]*metal.Buffer{}, stream: dev.NewStream(),
-		side: tensor.NewPoolAlloc(mem.alloc)}
+		side: tensor.NewPoolAlloc(mem.alloc), tables: map[string]metal.Region{}}
 	// Constants move to aligned memory so GPU nodes can read them in place.
 	for id, c := range s.constVals {
 		if c != nil && c.Numel() > 0 {
@@ -140,8 +150,25 @@ func (s *GPUSession) region(t *tensor.Tensor) (metal.Region, bool) {
 	return b.At(off), true
 }
 
+// table returns data copied once into session memory under key.
+func (s *GPUSession) table(key string, data func() []byte) (metal.Region, bool) {
+	if r, ok := s.tables[key]; ok {
+		return r, true
+	}
+	b := data()
+	buf := s.mem.alloc(len(b))
+	copy(buf, b)
+	r, ok := s.region(tensor.FromBytes(tensor.U8, buf, len(buf)))
+	if ok {
+		s.tables[key] = r
+	}
+	return r, ok
+}
+
 // Run executes the graph (see GPUSession).
 func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tensor.Tensor, err error) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
 	vals := make([]*tensor.Tensor, s.nval)
 	live := make([]int, s.nval)
 	pooled := make([]bool, s.nval)
@@ -225,10 +252,21 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		if g := s.gops[si]; g != nil {
 			var enc func(e *metal.Encoder)
 			var ok bool
+			t0 := time.Now()
 			if outs, enc, ok = g.prepare(gctx, st, in); ok {
 				s.stream.Encode(enc)
 				placed = true
 				s.GPUSteps++
+				if s.Profile {
+					if err := flush(); err != nil {
+						return nil, fmt.Errorf("graph: gpu: %w", err)
+					}
+					gen++
+					if s.OpTime == nil {
+						s.OpTime = map[string]time.Duration{}
+					}
+					s.OpTime[st.node.OpType] += time.Since(t0)
+				}
 			}
 		}
 		side := false
