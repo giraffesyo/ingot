@@ -131,6 +131,10 @@ func (t *Tensor) Bytes() []byte {
 	return t.buf[t.offset*sz : (t.offset+t.Numel())*sz]
 }
 
+// Storage returns the tensor's whole backing buffer and the byte offset of
+// its first element within it (non-zero for views).
+func (t *Tensor) Storage() ([]byte, int) { return t.buf[:cap(t.buf)], t.offset * t.dtype.Size() }
+
 // Reshape returns a view with a new shape (same numel, contiguous only).
 func (t *Tensor) Reshape(shape ...int) *Tensor {
 	s := Shape(shape)

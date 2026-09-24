@@ -10,10 +10,17 @@ type Pool struct {
 	mu      sync.Mutex
 	buckets map[int][][]byte
 	free    []*Tensor // recycled headers (Put clears them; Get reinitialises)
+	alloc   func(n int) []byte
 }
 
 // NewPool returns an empty pool.
 func NewPool() *Pool { return &Pool{buckets: make(map[int][][]byte)} }
+
+// NewPoolAlloc returns a pool whose fresh buffers come from alloc (which
+// must return exactly n bytes) — e.g. page-aligned memory a GPU can map.
+func NewPoolAlloc(alloc func(n int) []byte) *Pool {
+	return &Pool{buckets: make(map[int][][]byte), alloc: alloc}
+}
 
 func sizeClass(n int) int {
 	c := 64
@@ -50,7 +57,11 @@ func (p *Pool) GetUninit(dt DType, shape ...int) *Tensor {
 	}
 	p.mu.Unlock()
 	if buf == nil {
-		buf = make([]byte, cls)
+		if p.alloc != nil {
+			buf = p.alloc(cls)
+		} else {
+			buf = make([]byte, cls)
+		}
 	}
 	if t == nil {
 		t = &Tensor{}

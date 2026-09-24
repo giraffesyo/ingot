@@ -26,14 +26,18 @@ static float powi(float x, int n) {
 	return n < 0 ? 1.0f / r : r;
 }
 
-// out[i] = op(a[i % na], b[i % nb]) over n elements; p = (n, na, nb, op).
+// out[i] = op(a[(i / da) % ma], b[(i / db) % mb]) over n elements;
+// p = (n, da, ma, op), q = (db, mb, 0, 0): each operand is a contiguous
+// block of the output's dims repeated around it (trailing vector, per-row
+// scalar, [1,H,1,1], ...).
 kernel void binary_bcast(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],
                          device float* o [[buffer(2)]], constant uint4& p [[buffer(3)]],
-                         uint i [[thread_position_in_grid]]) {
+                         constant uint4& q [[buffer(4)]], uint i [[thread_position_in_grid]]) {
 	if (i >= p.x) return;
-	const float x = a[i % p.y], y = b[i % p.z];
+	const float x = a[(i / p.y) % p.z], y = b[(i / q.x) % q.y];
+	const uint op = p.w;
 	float r;
-	switch (p.w) {
+	switch (op) {
 	case 0: r = x + y; break;
 	case 1: r = x - y; break;
 	case 2: r = x * y; break;
@@ -90,6 +94,21 @@ kernel void transpose_nd(device const float* x [[buffer(0)]], device float* o [[
 	o[i] = x[off];
 }
 
+// dst[r, c] = src[r, c] over [rows, cols] with row strides; p = (cols, lds, ldd, 0).
+kernel void copy2d(device const float* src [[buffer(0)]], device float* dst [[buffer(1)]],
+                   constant uint4& p [[buffer(2)]], uint2 i [[thread_position_in_grid]]) {
+	if (i.x >= p.x) return;
+	dst[i.y * p.z + i.x] = src[i.y * p.y + i.x];
+}
+
+// dst[r, :] = src[idx[r], :] with indices passed as constant data.
+kernel void gather_rows_c(device const float* src [[buffer(0)]], device float* dst [[buffer(1)]],
+                          constant uint* idx [[buffer(2)]], constant uint4& p [[buffer(3)]],
+                          uint2 i [[thread_position_in_grid]]) {
+	if (i.x >= p.x) return;
+	dst[i.y * p.x + i.x] = src[idx[i.y] * p.x + i.x];
+}
+
 // o[r] = mean or sum of x[r, :cols]; p = (cols, ld, mean, 0).
 kernel void reduce_rows(device const float* x [[buffer(0)]], device float* o [[buffer(1)]],
                         constant uint4& p [[buffer(2)]], uint row [[threadgroup_position_in_grid]],
@@ -137,9 +156,9 @@ const (
 )
 
 var ewPSO struct {
-	once                         sync.Once
-	binary, unary, transp, redux *Pipeline
-	err                          error
+	once                                          sync.Once
+	binary, unary, transp, redux, copy2d, gatherC *Pipeline
+	err                                           error
 }
 
 // PrepareEW compiles the elementwise kernels.
@@ -148,7 +167,8 @@ func (d *Device) PrepareEW() error {
 		for _, k := range []struct {
 			name string
 			dst  **Pipeline
-		}{{"binary_bcast", &ewPSO.binary}, {"unary_ew", &ewPSO.unary}, {"transpose_nd", &ewPSO.transp}, {"reduce_rows", &ewPSO.redux}} {
+		}{{"binary_bcast", &ewPSO.binary}, {"unary_ew", &ewPSO.unary}, {"transpose_nd", &ewPSO.transp}, {"reduce_rows", &ewPSO.redux},
+			{"copy2d", &ewPSO.copy2d}, {"gather_rows_c", &ewPSO.gatherC}} {
 			if *k.dst, ewPSO.err = d.Compile(ewSrc, k.name); ewPSO.err != nil {
 				return
 			}
@@ -164,8 +184,40 @@ func (e *Encoder) Binary(op int, a, b, out Region, n, na, nb int) {
 		e.err = fmt.Errorf("metal: Binary n=%d na=%d nb=%d", n, na, nb)
 		return
 	}
+	e.BinaryBcast(op, a, b, out, n, 1, na, 1, nb)
+}
+
+// BinaryBcast writes out[i] = op(a[(i/da) % ma], b[(i/db) % mb]) for i < n.
+func (e *Encoder) BinaryBcast(op int, a, b, out Region, n, da, ma, db, mb int) {
+	if da <= 0 || ma <= 0 || db <= 0 || mb <= 0 {
+		e.err = fmt.Errorf("metal: BinaryBcast strides %d %d %d %d", da, ma, db, mb)
+		return
+	}
 	if e.ready(ewPSO.binary) {
-		e.Dispatch(ewPSO.binary, [3]int{n, 1, 1}, [3]int{256, 1, 1}, a, b, out, u32s(n, na, nb, op))
+		e.Dispatch(ewPSO.binary, [3]int{n, 1, 1}, [3]int{256, 1, 1}, a, b, out, u32s(n, da, ma, op), u32s(db, mb, 0, 0))
+	}
+}
+
+// Copy2D copies [rows, cols] from src (row stride lds) to dst (ldd).
+func (e *Encoder) Copy2D(src, dst Region, rows, cols, lds, ldd int) {
+	if e.ready(ewPSO.copy2d) {
+		e.Dispatch(ewPSO.copy2d, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, src, dst, u32s(cols, lds, ldd, 0))
+	}
+}
+
+// GatherRowsConst writes dst[r] = src[idx[r]] (rows of cols floats) with at
+// most 1024 indices, passed as constant data.
+func (e *Encoder) GatherRowsConst(src, dst Region, idx []uint32, cols int) {
+	if len(idx) == 0 || len(idx) > 1024 {
+		e.err = fmt.Errorf("metal: GatherRowsConst with %d indices", len(idx))
+		return
+	}
+	b := make([]byte, 4*len(idx))
+	for i, v := range idx {
+		b[4*i], b[4*i+1], b[4*i+2], b[4*i+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+	}
+	if e.ready(ewPSO.gatherC) {
+		e.Dispatch(ewPSO.gatherC, [3]int{cols, len(idx), 1}, [3]int{256, 1, 1}, src, dst, b, u32s(cols, 0, 0, 0))
 	}
 }
 
