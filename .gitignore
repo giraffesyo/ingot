@@ -30,3 +30,4 @@ __pycache__/
 /testdata/layout/*.onnx
 /testdata/layout/*.bin
 /testdata/layout/v3_io.json
+/testdata/ocr/v5/

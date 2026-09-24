@@ -210,7 +210,11 @@ func TestCorpus(t *testing.T) {
 	if v := os.Getenv("OCR_REC_ONNX"); v != "" {
 		recPath = v
 	}
-	p, err := NewPipeline(detPath, recPath, corpusDir+"/rec_dict.txt")
+	dictPath := corpusDir + "/rec_dict.txt"
+	if v := os.Getenv("OCR_REC_DICT"); v != "" {
+		dictPath = v
+	}
+	p, err := NewPipeline(detPath, recPath, dictPath)
 	if err != nil {
 		t.Skip(err)
 	}

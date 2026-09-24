@@ -7,7 +7,9 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/giraffesyo/ingot/graph"
 	"github.com/giraffesyo/ingot/onnx"
@@ -25,6 +27,11 @@ type Recognizer struct {
 	// (ctcbeam.go). The posterior is near-one-hot on clean text, so the
 	// default stays greedy; see docs/PERF.md for the corpus A/B.
 	BeamWidth int
+	// RTL marks a right-to-left script (set when most of the dictionary is
+	// Arabic-script): the model reads left to right, so decoded text is
+	// reversed into logical order, keeping embedded Latin/digit runs intact
+	// (PaddleOCR's pred_reverse).
+	RTL bool
 }
 
 // NewRecognizer loads a recognition model and its character dictionary. The
@@ -60,7 +67,7 @@ func NewRecognizerOn(modelPath, dictPath, device string) (*Recognizer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Recognizer{sess: s, inName: g.Inputs[0].Name, outName: g.Outputs[0].Name, dict: dict, height: 48}, nil
+	return &Recognizer{sess: s, inName: g.Inputs[0].Name, outName: g.Outputs[0].Name, dict: dict, height: 48, RTL: rtlDict(dict)}, nil
 }
 
 func loadDict(path string) ([]string, error) {
@@ -77,6 +84,51 @@ func loadDict(path string) ([]string, error) {
 	}
 	chars = append(chars, " ") // PP-OCR appends a space class
 	return chars, sc.Err()
+}
+
+// rtlDict reports whether most of a dictionary's letters are Arabic-script
+// (U+0600-06FF, U+0750-077F, U+FB50-FDFF, U+FE70-FEFF).
+func rtlDict(dict []string) bool {
+	arabic, letters := 0, 0
+	for _, s := range dict {
+		for _, c := range s {
+			if !unicode.IsLetter(c) {
+				continue
+			}
+			letters++
+			if c >= 0x600 && c <= 0x6FF || c >= 0x750 && c <= 0x77F || c >= 0xFB50 && c <= 0xFDFF || c >= 0xFE70 && c <= 0xFEFF {
+				arabic++
+			}
+		}
+	}
+	return letters > 0 && arabic*2 > letters
+}
+
+// logicalOrder reverses visually ordered RTL text, keeping runs of Latin
+// letters, digits and " :*./%+-" in their own order (PaddleOCR's
+// pred_reverse).
+func logicalOrder(s string) string {
+	keep := func(c rune) bool {
+		return c < 128 && (unicode.IsLetter(c) || unicode.IsDigit(c) || strings.ContainsRune(" :*./%+-", c))
+	}
+	var parts []string
+	run := ""
+	for _, c := range s {
+		if keep(c) {
+			run += string(c)
+			continue
+		}
+		if run != "" {
+			parts = append(parts, run)
+			run = ""
+		}
+		parts = append(parts, string(c))
+	}
+	if run != "" {
+		parts = append(parts, run)
+	}
+	slices.Reverse(parts)
+	return strings.Join(parts, "")
 }
 
 // CropWidth is the model-input width of the box's crop at the model height
@@ -137,6 +189,11 @@ func (r *Recognizer) RecognizeBatch(img image.Image, boxes []Box) ([]string, []f
 			return nil, nil, err
 		}
 		texts[i], confs[i] = t, c
+	}
+	if r.RTL {
+		for i := range texts {
+			texts[i] = logicalOrder(texts[i])
+		}
 	}
 	r.sess.Release(outs) // decoded to strings above; tensors no longer referenced
 	return texts, confs, nil
