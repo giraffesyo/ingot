@@ -328,6 +328,66 @@ func (e *Encoder) Dispatch(p *Pipeline, grid, group [3]int, args ...Arg) {
 	send(e.enc, "dispatchThreads:threadsPerThreadgroup:", uintptr(unsafe.Pointer(&g)), uintptr(unsafe.Pointer(&t)))
 }
 
+// Stream records dispatches across calls into one command buffer, left
+// open until Flush — for an executor encoding op by op. Its encoder and
+// command buffer are retained past each job's autorelease pool. Not safe
+// for concurrent use.
+type Stream struct {
+	d       *Device
+	cb, enc uintptr
+	err     error
+	pending int
+}
+
+// NewStream returns an empty stream on d.
+func (d *Device) NewStream() *Stream { return &Stream{d: d} }
+
+// Encode records fn's dispatches into the open command buffer (opening one
+// if needed). fn runs on the device thread and must not call Device
+// methods. The first error sticks until Flush reports it.
+func (s *Stream) Encode(fn func(e *Encoder)) {
+	if s.err != nil {
+		return
+	}
+	s.d.do(func() {
+		if s.enc == 0 {
+			s.cb = send(send(s.d.queue, "commandBuffer"), "retain")
+			s.enc = send(send(s.cb, "computeCommandEncoder"), "retain")
+		}
+		e := &Encoder{enc: s.enc}
+		fn(e)
+		if e.err != nil {
+			s.err = e.err
+		}
+		s.pending++
+	})
+}
+
+// Pending reports whether dispatches are waiting for Flush.
+func (s *Stream) Pending() bool { return s.pending > 0 }
+
+// Flush commits the recorded work, waits for it, and reports the first
+// error since the last Flush.
+func (s *Stream) Flush() error {
+	err := s.err
+	if s.enc != 0 {
+		s.d.do(func() {
+			send(s.enc, "endEncoding")
+			if err == nil {
+				send(s.cb, "commit")
+				send(s.cb, "waitUntilCompleted")
+				if ce := send(s.cb, "error"); ce != 0 {
+					err = fmt.Errorf("metal: command buffer: %w", nserror(ce))
+				}
+			}
+			send(s.enc, "release")
+			send(s.cb, "release")
+		})
+	}
+	s.cb, s.enc, s.err, s.pending = 0, 0, nil, 0
+	return err
+}
+
 // Dispatch runs p once in its own command buffer and waits.
 func (p *Pipeline) Dispatch(grid, group [3]int, args ...Arg) error {
 	return p.dev.Run(func(e *Encoder) { e.Dispatch(p, grid, group, args...) })
