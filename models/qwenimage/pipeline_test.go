@@ -121,10 +121,20 @@ func TestDenoiseParity(t *testing.T) {
 // text encoder → DiT (reference noise) → VAE, against diffusers' image.
 func TestGenerateParity(t *testing.T) {
 	fullModel(t)
+	for _, dev := range []string{"cpu", "gpu"} {
+		if dev == "gpu" && !metalAvailable() {
+			continue
+		}
+		t.Run(dev, func(t *testing.T) { generateParity(t, dev) })
+	}
+}
+
+func generateParity(t *testing.T, device string) {
 	snap := snapshotDir(t)
 	ref := loadRef(t, "pipeline")
 	hw := ref.Meta["hw"].([]any)
 	res, err := Generate(snap, Options{
+		Device:  device,
 		Prompt:  ref.Meta["prompt"].(string),
 		Width:   int(hw[1].(float64)),
 		Height:  int(hw[0].(float64)),

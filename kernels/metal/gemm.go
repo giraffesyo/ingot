@@ -23,13 +23,12 @@ using namespace metal;
 using namespace mpp::tensor_ops;
 
 // d = (M, N, K), ld = (lda, ldb, ldc) in elements.
-template <bool NT, typename TB>
+template <bool NT, typename TB, matmul2d_descriptor::mode MODE>
 void gemm(device float* A, device TB* B, device float* C, uint4 d, uint4 ld, uint2 tg) {
 	using ext = dextents<int32_t, 2>;
 	tensor<device float, ext, tensor_inline> tA(A, ext(d.z, d.x), array<int32_t, 2>{1, int(ld.x)});
 	tensor<device float, ext, tensor_inline> tC(C, ext(d.y, d.x), array<int32_t, 2>{1, int(ld.z)});
-	constexpr auto desc = matmul2d_descriptor(64, 64, static_cast<int>(dynamic_extent), false, NT, false,
-	                                          matmul2d_descriptor::mode::multiply);
+	constexpr auto desc = matmul2d_descriptor(64, 64, static_cast<int>(dynamic_extent), false, NT, false, MODE);
 	matmul2d<desc, execution_simdgroups<4>> op;
 	auto mA = tA.slice(0, tg.y * 64);
 	auto mC = tC.slice(tg.x * 64, tg.y * 64);
@@ -43,30 +42,32 @@ void gemm(device float* A, device TB* B, device float* C, uint4 d, uint4 ld, uin
 		op.run(mA, mB, mC);
 	}
 }
-#define GEMM(name, NT, TB) \
+#define GEMM(name, NT, TB, MODE) \
 kernel void name(device float* A [[buffer(0)]], device TB* B [[buffer(1)]], device float* C [[buffer(2)]], \
                  constant uint4& d [[buffer(3)]], constant uint4& ld [[buffer(4)]], \
-                 uint2 tg [[threadgroup_position_in_grid]]) { gemm<NT, TB>(A, B, C, d, ld, tg); }
-GEMM(gemm_nt_f32, true, float)
-GEMM(gemm_nt_bf16, true, bfloat)
-GEMM(gemm_nn_f32, false, float)
+                 uint2 tg [[threadgroup_position_in_grid]]) { gemm<NT, TB, matmul2d_descriptor::mode::MODE>(A, B, C, d, ld, tg); }
+GEMM(gemm_nt_f32, true, float, multiply)
+GEMM(gemm_nt_bf16, true, bfloat, multiply)
+GEMM(gemm_nn_f32, false, float, multiply)
+GEMM(gemm_nn_f32_acc, false, float, multiply_accumulate)
 `
 
 // Gemm describes C[M,N] = A[M,K] · op(B) with row-major operands at byte
 // offsets (Regions) and row strides in elements. TransB: B is stored [N,K]
 // (PyTorch Linear weights, or K for Q·Kᵀ); otherwise [K,N]. BF16 selects a
-// bf16 B (TransB only). A and C are f32.
+// bf16 B (TransB only). A and C are f32. Accumulate adds into C (NN f32
+// only) instead of overwriting it.
 type Gemm struct {
-	M, N, K       int
-	A, B, C       Region
-	LDA, LDB, LDC int // 0 = packed (K, K or N, N)
-	TransB, BF16  bool
+	M, N, K                  int
+	A, B, C                  Region
+	LDA, LDB, LDC            int // 0 = packed (K, K or N, N)
+	TransB, BF16, Accumulate bool
 }
 
 var gemmPSO struct {
-	once              sync.Once
-	ntF32, ntBF16, nn *Pipeline
-	err               error
+	once                     sync.Once
+	ntF32, ntBF16, nn, nnAcc *Pipeline
+	err                      error
 }
 
 func (d *Device) gemmPipelines() error {
@@ -74,7 +75,8 @@ func (d *Device) gemmPipelines() error {
 		for _, k := range []struct {
 			name string
 			dst  **Pipeline
-		}{{"gemm_nt_f32", &gemmPSO.ntF32}, {"gemm_nt_bf16", &gemmPSO.ntBF16}, {"gemm_nn_f32", &gemmPSO.nn}} {
+		}{{"gemm_nt_f32", &gemmPSO.ntF32}, {"gemm_nt_bf16", &gemmPSO.ntBF16}, {"gemm_nn_f32", &gemmPSO.nn},
+			{"gemm_nn_f32_acc", &gemmPSO.nnAcc}} {
 			if *k.dst, gemmPSO.err = d.Compile(gemmSrc, k.name); gemmPSO.err != nil {
 				return
 			}
@@ -120,6 +122,13 @@ func (e *Encoder) Gemm(g Gemm) {
 	case g.BF16:
 		e.err = fmt.Errorf("metal: bf16 B needs TransB")
 		return
+	}
+	if g.Accumulate {
+		if g.TransB {
+			e.err = fmt.Errorf("metal: Accumulate needs NN")
+			return
+		}
+		p = gemmPSO.nnAcc
 	}
 	span := func(r Region, rows, cols, ld, esz int) error {
 		if need := r.Off + ((rows-1)*ld+cols)*esz; need > r.B.n {

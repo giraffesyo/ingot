@@ -106,6 +106,33 @@ kernel void softmax_rows(device float* x [[buffer(0)]], constant uint4& p [[buff
 	for (uint i = tid; i < n; i += NT) xr[i] *= inv;
 }
 
+// Masked variant: softmax(scale · row + mask[row]) with mask rows of stride
+// p.z (additive, -inf masks).
+kernel void softmax_rows_masked(device float* x [[buffer(0)]], device const float* mask [[buffer(1)]],
+                                constant uint4& p [[buffer(2)]], constant float4& f [[buffer(3)]],
+                                uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                                uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+	threadgroup float scratch[NT / 32];
+	const uint n = p.x;
+	device float* xr = x + row * p.y;
+	device const float* mr = mask + row * p.z;
+	float m = -INFINITY;
+	for (uint i = tid; i < n; i += NT) m = max(m, xr[i] * f.x + mr[i]);
+	m = tg_max(m, scratch, tid, sg, lane);
+	float acc = 0;
+	for (uint i = tid; i < n; i += NT) { float e = exp(xr[i] * f.x + mr[i] - m); xr[i] = e; acc += e; }
+	const float inv = 1.0f / tg_sum(acc, scratch, tid, sg, lane);
+	for (uint i = tid; i < n; i += NT) xr[i] *= inv;
+}
+
+// dst[r, :] = src[idx[r], :] over cols; p = (cols, lds, ldd, 0).
+kernel void gather_rows(device const float* src [[buffer(0)]], device float* dst [[buffer(1)]],
+                        device const uint* idx [[buffer(2)]], constant uint4& p [[buffer(3)]],
+                        uint2 i [[thread_position_in_grid]]) {
+	if (i.x >= p.x) return;
+	dst[i.y * p.z + i.x] = src[idx[i.y] * p.y + i.x];
+}
+
 // out[r, c] = silu(a[r, c]) · b[r, c] over [rows, cols] with row strides
 // p = (cols, lda, ldb, ldo).
 kernel void silu_mul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],
@@ -126,9 +153,9 @@ kernel void gated_add(device float* x [[buffer(0)]], device const float* g [[buf
 `
 
 var nnPSO struct {
-	once                                          sync.Once
-	layerNorm, rmsRope, softmax, siluMul, gateAdd *Pipeline
-	err                                           error
+	once                                                              sync.Once
+	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
+	err                                                               error
 }
 
 func (d *Device) nnPipelines() error {
@@ -137,7 +164,8 @@ func (d *Device) nnPipelines() error {
 			name string
 			dst  **Pipeline
 		}{{"layernorm_mod", &nnPSO.layerNorm}, {"rmsnorm_rope", &nnPSO.rmsRope}, {"softmax_rows", &nnPSO.softmax},
-			{"silu_mul", &nnPSO.siluMul}, {"gated_add", &nnPSO.gateAdd}} {
+			{"silu_mul", &nnPSO.siluMul}, {"gated_add", &nnPSO.gateAdd},
+			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather}} {
 			if *k.dst, nnPSO.err = d.Compile(nnSrc, k.name); nnPSO.err != nil {
 				return
 			}
@@ -189,6 +217,21 @@ func (e *Encoder) RMSNormRoPE(x, w, cos, sin Region, t, heads, dh, ld int, eps f
 func (e *Encoder) SoftmaxRows(x Region, rows, cols, ld int, scale float32) {
 	if e.ready(nnPSO.softmax) {
 		e.Dispatch(nnPSO.softmax, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, u32s(cols, ld, 0, 0), f32c(scale))
+	}
+}
+
+// SoftmaxRowsMasked applies softmax(scale · x + mask) row by row in place;
+// mask rows (additive, -inf to mask) have stride ldm.
+func (e *Encoder) SoftmaxRowsMasked(x, mask Region, rows, cols, ld, ldm int, scale float32) {
+	if e.ready(nnPSO.softmaxMask) {
+		e.Dispatch(nnPSO.softmaxMask, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, mask, u32s(cols, ld, ldm, 0), f32c(scale))
+	}
+}
+
+// GatherRows: dst[r] = src[idx[r]] for r < rows (idx: uint32 row indices).
+func (e *Encoder) GatherRows(src, dst, idx Region, rows, cols, lds, ldd int) {
+	if e.ready(nnPSO.gather) {
+		e.Dispatch(nnPSO.gather, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, src, dst, idx, u32s(cols, lds, ldd, 0))
 	}
 }
 
