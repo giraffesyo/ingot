@@ -181,8 +181,9 @@ func (d *Device) do(f func()) {
 
 // Pipeline is a compiled compute kernel.
 type Pipeline struct {
-	dev *Device
-	pso uintptr
+	dev  *Device
+	pso  uintptr
+	name string
 	// MaxThreads is the kernel's maxTotalThreadsPerThreadgroup.
 	MaxThreads int
 }
@@ -209,7 +210,7 @@ func (d *Device) Compile(src, name string) (*Pipeline, error) {
 			err = fmt.Errorf("metal: pipeline %q: %w", name, nserror(e))
 			return
 		}
-		p = &Pipeline{dev: d, pso: pso, MaxThreads: int(send(pso, "maxTotalThreadsPerThreadgroup"))}
+		p = &Pipeline{dev: d, pso: pso, name: name, MaxThreads: int(send(pso, "maxTotalThreadsPerThreadgroup"))}
 	})
 	return p, err
 }
@@ -294,8 +295,9 @@ type mtlSize struct{ w, h, d uint64 }
 // Encoder records dispatches into one command buffer (see Device.Run).
 // Dispatches execute in order; each sees the previous ones' writes.
 type Encoder struct {
-	enc uintptr
-	err error
+	enc   uintptr
+	err   error
+	count map[string]int // dispatches per kernel (Stream.CountDispatches)
 }
 
 // Run records the dispatches fn makes into a single command buffer, commits
@@ -328,6 +330,9 @@ func (e *Encoder) Dispatch(p *Pipeline, grid, group [3]int, args ...Arg) {
 		return
 	}
 	send(e.enc, "setComputePipelineState:", p.pso)
+	if e.count != nil {
+		e.count[p.name]++
+	}
 	for i, a := range args {
 		switch v := a.(type) {
 		case *Buffer:
@@ -369,6 +374,9 @@ type Stream struct {
 	queued  []func(e *Encoder)
 	pending int
 	gpu     time.Duration
+	// Counts, when non-nil, accumulates dispatches per kernel name
+	// (diagnostics: which kernels a graph issues, how often).
+	Counts map[string]int
 }
 
 // streamBatch is how many queued callbacks trigger recording before Flush.
@@ -397,7 +405,7 @@ func (s *Stream) record() {
 		s.cb = send(send(s.d.queue, "commandBuffer"), "retain")
 		s.enc = send(send(s.cb, "computeCommandEncoder"), "retain")
 	}
-	e := &Encoder{enc: s.enc}
+	e := &Encoder{enc: s.enc, count: s.Counts}
 	for i, fn := range s.queued {
 		if s.err == nil {
 			fn(e)

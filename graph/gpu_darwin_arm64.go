@@ -102,6 +102,15 @@ func CompileGPU(g *Graph, opts ...GPUOption) (*GPUSession, error) {
 	return gs, nil
 }
 
+// DispatchCounts starts counting GPU dispatches per kernel across Runs
+// and returns the live map (diagnostics).
+func (s *GPUSession) DispatchCounts() map[string]int {
+	if s.stream.Counts == nil {
+		s.stream.Counts = map[string]int{}
+	}
+	return s.stream.Counts
+}
+
 // Close releases the session's GPU buffers and memory. Tensors it returned
 // are invalid afterwards.
 func (s *GPUSession) Close() {

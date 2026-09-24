@@ -389,18 +389,17 @@ func (o matmulGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	}
 	gelu := o.gelu
 	nout := out.Numel()
+	var rb metal.Region
+	if bias != nil {
+		rb = rs[2]
+	}
 	if c.s.bf16 && len(bs) == 2 {
 		if wb, ok := c.bf16Const(st, 1); ok {
 			if ab, ok := c.bf16Scratch(M * K); ok {
 				return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 					e.CastBF16(rs[0], ab, M, K, K, K)
 					e.Gemm(metal.Gemm{M: M, N: N, K: K, A: ab, B: wb, C: ro[0], ABF16: true, BF16: true})
-					if bias != nil {
-						e.AddBias(ro[0], rs[2], M, N, N)
-					}
-					if gelu {
-						e.Unary(metal.UnGeluErf, ro[0], ro[0], nout)
-					}
+					colEpilogue(e, ro[0], rb, nout, N, gelu)
 				}, true
 			}
 		}
@@ -408,14 +407,20 @@ func (o matmulGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: M, N: N, K: K, A: rs[0], B: rs[1], C: ro[0],
 			Batch: batch, StrideA: M * K, StrideB: K * N, StrideC: M * N})
-		rows := nout / N
-		if bias != nil {
-			e.AddBias(ro[0], rs[2], rows, N, N)
-		}
-		if gelu {
-			e.Unary(metal.UnGeluErf, ro[0], ro[0], nout)
-		}
+		colEpilogue(e, ro[0], rb, nout, N, gelu)
 	}, true
+}
+
+// colEpilogue adds a GEMM's per-column bias (rb, may be the zero Region)
+// and optional GELU in one pass.
+func colEpilogue(e *metal.Encoder, out, rb metal.Region, n, cols int, gelu bool) {
+	ep := metal.ConvEpilogue{}
+	if gelu {
+		ep.Act = metal.ActGeluErf
+	}
+	if rb.B != nil || gelu {
+		e.BiasAct(out, rb, n, 1, cols, ep)
+	}
 }
 
 type gemmGPU struct {
@@ -461,24 +466,24 @@ func (o gemmGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		return nil, nil, false
 	}
 	transB := o.transB
+	var rb metal.Region
+	if bias != nil {
+		rb = rs[2]
+	}
 	if c.s.bf16 {
 		if wb, ok := c.bf16Const(st, 1); ok {
 			if ab, ok := c.bf16Scratch(M * K); ok {
 				return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 					e.CastBF16(rs[0], ab, M, K, K, K)
 					e.Gemm(metal.Gemm{M: M, N: N, K: K, A: ab, B: wb, C: ro[0], TransB: transB, ABF16: true, BF16: true})
-					if bias != nil {
-						e.AddBias(ro[0], rs[2], M, N, N)
-					}
+					colEpilogue(e, ro[0], rb, M*N, N, false)
 				}, true
 			}
 		}
 	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: M, N: N, K: K, A: rs[0], B: rs[1], C: ro[0], TransB: transB})
-		if bias != nil {
-			e.AddBias(ro[0], rs[2], M, N, N)
-		}
+		colEpilogue(e, ro[0], rb, M*N, N, false)
 	}, true
 }
 
