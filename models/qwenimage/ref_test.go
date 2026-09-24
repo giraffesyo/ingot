@@ -73,6 +73,12 @@ func (c *refCase) tensor(t testing.TB, name string) *tensor.Tensor {
 				out.F32()[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[4*i:]))
 			}
 			return out
+		case "int64":
+			v := make([]int64, len(raw)/8)
+			for i := range v {
+				v[i] = int64(binary.LittleEndian.Uint64(raw[8*i:]))
+			}
+			return tensor.FromI64(v, r.Shape...)
 		case "uint8":
 			out := tensor.New(tensor.U8, r.Shape...)
 			copy(out.U8(), raw)
