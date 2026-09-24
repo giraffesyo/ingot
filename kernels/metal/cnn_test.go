@@ -74,7 +74,7 @@ func TestConv(t *testing.T) {
 			// bf16 path: bf16 weights and columns, bf16×bf16 GEMM.
 			yh, wh, colsH := buf(t, d, g.N*g.M*P), buf(t, d, (g.M*K+1)/2), buf(t, d, (K*P+1)/2)
 			yi, yih := buf(t, d, g.N*g.M*P), buf(t, d, g.N*g.M*P) // implicit GEMM, f32 and bf16
-			pc := (P + 2) / 3 // three pixel chunks
+			pc := (P + 2) / 3                                     // three pixel chunks
 			cols := buf(t, d, K*pc)
 			err := d.Run(func(e *Encoder) {
 				e.ConvDirect(x.At(0), w.At(0), b.At(0), yd.At(0), g)
