@@ -286,3 +286,21 @@ func BenchmarkModels(b *testing.B) {
 		})
 	}
 }
+
+// TestResNetishDenseBlocked forces the dense blocked conv kind (the amd64
+// default) so every platform checks it against ONNX Runtime.
+func TestResNetishDenseBlocked(t *testing.T) {
+	defer graph.SetBlkDense(true)()
+	s, _ := loadSession(t, "resnetish")
+	dense := 0
+	for _, n := range s.Graph().Nodes {
+		if n.OpType == "ConvDenseBlk" {
+			dense++
+		}
+	}
+	if dense == 0 {
+		t.Fatal("no ConvDenseBlk in the optimized graph")
+	}
+	t.Logf("%d dense blocked convs", dense)
+	runConformance(t, "resnetish", 1e-3)
+}

@@ -2414,3 +2414,23 @@ runs them in NCHWc direct kernels. Candidates: an NCHWc direct 3x3
 kernel for dense convs (the blocked layout today covers only depthwise
 and pointwise), or a whole-model width cap for models whose regions are
 all tiny.
+
+## Dense 3x3 in the blocked layout (2026-09-24)
+
+ops.ConvDenseBlk runs a dense KxK conv (stride 1/2) over nChw8c as KH·KW
+blocked pointwise tiles (vek.PwBlk6x16) on a padded input: output position
+q = oy·Wq + ox reads each tap at a constant offset, junk columns past OW
+included, so 6-position tiles cross rows with no bounds checks even on 4x4
+planes; stride 2 reads four parity-phase planes. The layout pass seeds
+regions with it (kind 3) and lets elementwise activations join regions
+(ResNet's post-residual ReLU cut every block out before).
+
+Kernel alone vs the NCHW path, Zen 5: 8x8 32->32 12 vs 21-23 µs, 4x4
+64->64 7.2 vs 22, 16x16 16->16 on par. In the model (resnetish, Zen 5):
+246-264 -> 232-241 µs — the kernel wins are eaten by per-op fan-out at 12
+workers: resnetish runs 149 µs at 2-4 workers vs 214 at 12 (ORT 54). A
+per-model width cap chosen at compile time is the remaining lever (the
+per-region adaptive width is on the do-not-retry list). Default on amd64
+only; Apple measurement is inconclusive today (machine loaded ~3x) and the
+blocked layout never paid there. INGOT_BLK_DENSE=0/1 overrides;
+TestResNetishDenseBlocked forces it on every platform.

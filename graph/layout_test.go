@@ -84,14 +84,14 @@ func buildResidualStack() *Graph {
 func TestBlockedLayoutResidual(t *testing.T) {
 	graw, gopt := buildResidualStack(), buildResidualStack()
 	stats := Optimize(gopt)
-	if stats["blk-regions"] != 1 || stats["assign-blk"] != 7 || stats["blk-add"] != 2 || stats["blk-se"] != 1 || stats["fuse-blk-res"] != 2 {
-		t.Fatalf("stats = %v, want blk-regions:1 assign-blk:7 blk-add:2 blk-se:1 fuse-blk-res:2", stats)
+	if stats["blk-regions"] != 1 || stats["assign-blk"] != 7 || stats["blk-add"] != 2 || stats["blk-se"] != 1 || stats["fuse-blk-res"] != 2 || stats["blk-unary"] != 1 {
+		t.Fatalf("stats = %v, want blk-regions:1 assign-blk:7 blk-add:2 blk-se:1 fuse-blk-res:2 blk-unary:1", stats)
 	}
 	count := map[string]int{}
 	for _, n := range gopt.Nodes {
 		count[n.OpType]++
 	}
-	// One entry (x), two exits (y1 for the Relu, y2 as graph output).
+	// One entry (x), two exits (the Relu's output, y2 as graph output).
 	if count["ToBlk8"] != 1 || count["FromBlk8"] != 2 {
 		t.Fatalf("conversions = %v, want 1 ToBlk8, 2 FromBlk8", count)
 	}
@@ -99,12 +99,12 @@ func TestBlockedLayoutResidual(t *testing.T) {
 	if count["Conv"] != 0 || count["ConvDwBlk"] != 2 || count["ConvPwBlk"] != 5 || count["Add"] != 0 || count["SE"] != 1 {
 		t.Fatalf("node mix = %v", count)
 	}
-	// The Relu must read the NCHW copy of y1 (produced by a FromBlk8), while
-	// the blocked consumers read the blocked value directly.
+	// The Relu is layout-agnostic: it joins the region and reads the
+	// blocked value directly (its own output leaves through a FromBlk8).
 	for _, n := range gopt.Nodes {
 		if n.OpType == "Relu" {
-			if p := n.Inputs[0].Producer; p == nil || p.OpType != "FromBlk8" {
-				t.Fatalf("Relu input produced by %v, want FromBlk8", p)
+			if p := n.Inputs[0].Producer; p == nil || p.OpType != "ConvPwBlk" {
+				t.Fatalf("Relu input produced by %v, want the blocked ConvPwBlk", p)
 			}
 		}
 	}
