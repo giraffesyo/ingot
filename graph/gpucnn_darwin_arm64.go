@@ -463,8 +463,16 @@ func (o convTransposeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*
 		return nil, nil, false
 	}
 	n, epi := out.Numel(), o.epi
+	// Blocked over output channels when a group has ≥ 8 of them: inputs are
+	// read once per block (DBNet's [24,24,2,2] head: 1.52 -> 0.57 ms on M5
+	// Pro); a single output channel wastes the block.
+	blocked := g.M/g.Group >= 8
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
-		e.ConvTransposeDirect(rs[0], rs[1], rb, ro[0], g)
+		if blocked {
+			e.ConvTransposeBlocked(rs[0], rs[1], rb, ro[0], g)
+		} else {
+			e.ConvTransposeDirect(rs[0], rs[1], rb, ro[0], g)
+		}
 		epi.encode(e, ro[0], n)
 	}, true
 }

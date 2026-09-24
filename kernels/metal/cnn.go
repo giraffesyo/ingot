@@ -64,47 +64,6 @@ kernel void conv_direct(device const float* x [[buffer(0)]], device const float*
 	o[((n * e.z + m) * OH + oy) * OW + ox] = acc;
 }
 
-// Register-blocked direct convolution for group 1 with few output
-// channels: one thread per (pixel, block of CB output channels) reads each
-// input tap once and accumulates CB outputs — no im2col scratch, which
-// makes thin convs at high resolution bandwidth-bound. Grid (P, ceil(M/CB),
-// N); e = (C, M, OH, hasBias).
-#define CB 8
-kernel void conv_direct_cb(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
-                           device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
-                           constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
-                           constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
-                           uint3 i [[thread_position_in_grid]]) {
-	const uint OW = a.w, OH = e.z, P = OH * OW, p = i.x, m0 = i.y * CB, n = i.z, M = e.y, C = e.x;
-	if (p >= P || m0 >= M) return;
-	const uint KK = b.x * b.y, K = C * KK;
-	const int y0 = int((p / OW) * b.z) - int(c.z), x0 = int((p % OW) * b.w) - int(c.w);
-	float acc[CB];
-	for (uint j = 0; j < CB; j++) acc[j] = (e.w != 0 && m0 + j < M) ? bias[m0 + j] : 0.0f;
-	device const float* xn = x + n * C * a.y * a.z;
-	const uint mc = min(uint(CB), M - m0);
-	for (uint ky = 0; ky < b.x; ky++) {
-		const int iy = y0 + int(ky * c.x);
-		if (iy < 0 || iy >= int(a.y)) continue;
-		for (uint kx = 0; kx < b.y; kx++) {
-			const int ix = x0 + int(kx * c.y);
-			if (ix < 0 || ix >= int(a.z)) continue;
-			device const float* xp = xn + uint(iy) * a.z + uint(ix);
-			device const float* wp = w + m0 * K + ky * b.y + kx;
-			for (uint ch = 0; ch < C; ch++) {
-				const float v = xp[ch * a.y * a.z];
-				if (mc == CB) {
-					for (uint j = 0; j < CB; j++) acc[j] = fma(v, wp[j * K + ch * KK], acc[j]);
-				} else {
-					for (uint j = 0; j < mc; j++) acc[j] = fma(v, wp[j * K + ch * KK], acc[j]);
-				}
-			}
-		}
-	}
-	device float* op = o + (n * M + m0) * P + p;
-	for (uint j = 0; j < mc; j++) op[j * P] = acc[j];
-}
-
 // Transposed convolution (gather form: each output sums the inputs whose
 // taps land on it; no atomics). x [N, Cin, H, W], w [Cin, CoutG, KH, KW],
 // out [N, Cout, OH, OW]; a = (Cin, H, W, OW), e = (CinG, CoutG, Cout, OH).
@@ -217,6 +176,98 @@ kernel void act_ew(device const float* x [[buffer(0)]], device float* o [[buffer
 }
 `
 
+// cnnBlockSrc holds the register-blocked kernels, compiled per block width
+// CB (output channels per thread): each thread reads an input tap once and
+// accumulates CB outputs.
+const cnnBlockSrc = `
+#include <metal_stdlib>
+using namespace metal;
+
+// Direct convolution, group 1: one thread per (pixel, block of CB output
+// channels) — no im2col scratch, which dominates thin convs at high
+// resolution. Grid (P, ceil(M/CB), N); e = (C, M, OH, hasBias).
+kernel void conv_direct_cb(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                           device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
+                           constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
+                           constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
+                           uint3 i [[thread_position_in_grid]]) {
+	const uint OW = a.w, OH = e.z, P = OH * OW, p = i.x, m0 = i.y * CB, n = i.z, M = e.y, C = e.x;
+	if (p >= P || m0 >= M) return;
+	const uint KK = b.x * b.y, K = C * KK, plane = a.y * a.z;
+	const int y0 = int((p / OW) * b.z) - int(c.z), x0 = int((p % OW) * b.w) - int(c.w);
+	const uint mc = min(uint(CB), M - m0);
+	float acc[CB];
+	for (uint j = 0; j < CB; j++) acc[j] = (e.w != 0 && j < mc) ? bias[m0 + j] : 0.0f;
+	device const float* xn = x + n * C * plane;
+	for (uint ky = 0; ky < b.x; ky++) {
+		const int iy = y0 + int(ky * c.x);
+		if (iy < 0 || iy >= int(a.y)) continue;
+		for (uint kx = 0; kx < b.y; kx++) {
+			const int ix = x0 + int(kx * c.y);
+			if (ix < 0 || ix >= int(a.z)) continue;
+			device const float* xp = xn + uint(iy) * a.z + uint(ix);
+			device const float* wp = w + m0 * K + ky * b.y + kx;
+			for (uint ch = 0; ch < C; ch++) {
+				const float v = xp[ch * plane];
+				if (mc == CB) {
+					for (uint j = 0; j < CB; j++) acc[j] = fma(v, wp[j * K + ch * KK], acc[j]);
+				} else {
+					for (uint j = 0; j < mc; j++) acc[j] = fma(v, wp[j * K + ch * KK], acc[j]);
+				}
+			}
+		}
+	}
+	device float* op = o + (n * M + m0) * P + p;
+	for (uint j = 0; j < mc; j++) op[j * P] = acc[j];
+}
+
+// Transposed convolution, gather form, blocked over output channels:
+// thread (pixel, block of CB channels of one group). w [Cin, CoutG, KH, KW];
+// a = (Cin, H, W, OW), e = (CinG, CoutG, Cout, OH), f = (hasBias, N,
+// blocks per group, 0).
+kernel void convt_cb(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                     device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
+                     constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
+                     constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
+                     constant uint4& f [[buffer(8)]], uint3 i [[thread_position_in_grid]]) {
+	const uint OW = a.w, OH = e.w, P = OH * OW, p = i.x, n = i.z, CoutG = e.y, CinG = e.x;
+	const uint g = i.y / f.z, ocg0 = (i.y % f.z) * CB;
+	if (p >= P || n >= f.y || ocg0 >= CoutG) return;
+	const uint mc = min(uint(CB), CoutG - ocg0), oc0 = g * CoutG + ocg0, KK = b.x * b.y;
+	const int oy = int(p / OW), ox = int(p % OW), H = int(a.y), W = int(a.z), sh = int(b.z), sw = int(b.w);
+	float acc[CB];
+	for (uint j = 0; j < CB; j++) acc[j] = (f.x != 0 && j < mc) ? bias[oc0 + j] : 0.0f;
+	for (uint ky = 0; ky < b.x; ky++) {
+		const int ty = oy + int(c.z) - int(ky * c.x);
+		if (ty < 0 || ty % sh != 0 || ty / sh >= H) continue;
+		const int iy = ty / sh;
+		for (uint kx = 0; kx < b.y; kx++) {
+			const int tx = ox + int(c.w) - int(kx * c.y);
+			if (tx < 0 || tx % sw != 0 || tx / sw >= W) continue;
+			const int ix = tx / sw;
+			device const float* xp = x + ((n * a.x + g * CinG) * uint(H) + uint(iy)) * uint(W) + uint(ix);
+			device const float* wp = w + ((g * CinG) * CoutG + ocg0) * KK + ky * b.y + kx;
+			for (uint ic = 0; ic < CinG; ic++) {
+				const float v = xp[ic * uint(H) * uint(W)];
+				device const float* wr = wp + ic * CoutG * KK;
+				if (mc == CB) {
+					for (uint j = 0; j < CB; j++) acc[j] = fma(v, wr[j * KK], acc[j]);
+				} else {
+					for (uint j = 0; j < mc; j++) acc[j] = fma(v, wr[j * KK], acc[j]);
+				}
+			}
+		}
+	}
+	device float* op = o + (n * e.z + oc0) * P + p;
+	for (uint j = 0; j < mc; j++) op[j * P] = acc[j];
+}
+`
+
+// blockWidths are the compiled CB variants of cnnBlockSrc. Only 8: on M5
+// Pro, 16 and 32 measured 2-25x slower than 8 (accumulators spill), even
+// with 24 output channels (BenchmarkConvThin, BenchmarkConvTranspose).
+var blockWidths = [...]int{8}
+
 // Activation codes for Act.
 const (
 	ActNone = iota
@@ -232,7 +283,8 @@ const (
 var cnnPSO struct {
 	once                        sync.Once
 	im2col, direct, pool2d, act *Pipeline
-	convT, resize, directCB     *Pipeline
+	convT, resize               *Pipeline
+	directCB, convTCB           [len(blockWidths)]*Pipeline
 	err                         error
 }
 
@@ -243,8 +295,17 @@ func (d *Device) PrepareCNN() error {
 			name string
 			dst  **Pipeline
 		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act},
-			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}, {"conv_direct_cb", &cnnPSO.directCB}} {
+			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}} {
 			if *k.dst, cnnPSO.err = d.Compile(cnnSrc, k.name); cnnPSO.err != nil {
+				return
+			}
+		}
+		for i, cb := range blockWidths {
+			src := fmt.Sprintf("#define CB %d\n", cb) + cnnBlockSrc
+			if cnnPSO.directCB[i], cnnPSO.err = d.Compile(src, "conv_direct_cb"); cnnPSO.err != nil {
+				return
+			}
+			if cnnPSO.convTCB[i], cnnPSO.err = d.Compile(src, "convt_cb"); cnnPSO.err != nil {
 				return
 			}
 		}
@@ -300,10 +361,24 @@ func (e *Encoder) ConvDirect(x, w, bias, out Region, g ConvGeom) {
 }
 
 // ConvDirectBlocked computes a group-1 convolution (+ bias) with each
-// thread producing 8 output channels of one pixel: for thin convs (few
-// output channels, large planes) where im2col's scratch traffic dominates.
-// bias may be the zero Region.
+// thread producing a block of output channels of one pixel: for thin convs
+// (few output channels, large planes) where im2col's scratch traffic
+// dominates. bias may be the zero Region.
 func (e *Encoder) ConvDirectBlocked(x, w, bias, out Region, g ConvGeom) {
+	e.convDirectCB(blockFor(g.M), x, w, bias, out, g)
+}
+
+// blockFor picks the block-width variant for n output channels.
+func blockFor(n int) int {
+	for i, cb := range blockWidths {
+		if n <= cb {
+			return i
+		}
+	}
+	return len(blockWidths) - 1
+}
+
+func (e *Encoder) convDirectCB(v int, x, w, bias, out Region, g ConvGeom) {
 	if g.Group != 1 {
 		e.err = fmt.Errorf("metal: ConvDirectBlocked group=%d", g.Group)
 		return
@@ -312,10 +387,35 @@ func (e *Encoder) ConvDirectBlocked(x, w, bias, out Region, g ConvGeom) {
 	if bias.B == nil {
 		bias, hasBias = w, 0
 	}
-	if e.ready(cnnPSO.directCB) {
+	if e.ready(cnnPSO.directCB[v]) {
 		a, b, c := g.args()
-		e.Dispatch(cnnPSO.directCB, [3]int{g.OH * g.OW, (g.M + 7) / 8, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
+		cb := blockWidths[v]
+		e.Dispatch(cnnPSO.directCB[v], [3]int{g.OH * g.OW, (g.M + cb - 1) / cb, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
 			u32s(g.C, g.M, g.OH, hasBias))
+	}
+}
+
+// ConvTransposeBlocked is ConvTransposeDirect with each thread producing a
+// block of a group's output channels (inputs read once per block).
+func (e *Encoder) ConvTransposeBlocked(x, w, bias, out Region, g ConvGeom) {
+	e.convTCB(blockFor(g.M/max(g.Group, 1)), x, w, bias, out, g)
+}
+
+func (e *Encoder) convTCB(v int, x, w, bias, out Region, g ConvGeom) {
+	if g.Group <= 0 || g.C%g.Group != 0 || g.M%g.Group != 0 {
+		e.err = fmt.Errorf("metal: ConvTransposeBlocked C=%d M=%d group=%d", g.C, g.M, g.Group)
+		return
+	}
+	hasBias := 1
+	if bias.B == nil {
+		bias, hasBias = w, 0
+	}
+	if e.ready(cnnPSO.convTCB[v]) {
+		a, b, c := g.args()
+		cb, coutG := blockWidths[v], g.M/g.Group
+		blocks := (coutG + cb - 1) / cb
+		e.Dispatch(cnnPSO.convTCB[v], [3]int{g.OH * g.OW, g.Group * blocks, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
+			u32s(g.C/g.Group, coutG, g.M, g.OH), u32s(hasBias, g.N, blocks, 0))
 	}
 }
 
