@@ -278,3 +278,33 @@
       cross-builds both and runs the js/wasm suites. Perf is scalar (mv2
       272 ms vs 1.4 native; bertish 2.1 vs 0.09): Go exposes no wasm SIMD128,
       so speed there is compiler-bound for now
+
+## Phase 6 — large generative models (Qwen-Image-2.1) + GPU
+
+Design: docs/DESIGN-large-models.md. Parity references: tools/export/
+qwenimage21_ref.py (testdata/qwenimage21, gitignored).
+
+- [x] ops: Sin, Cos, GroupNormalization (opset 18/21); middle-axis reduce
+      fast path (NCHW channel ReduceL2 22-25×)
+- [x] unmasked flash attention for long T (Bk=512, 128-row tiles): 285 MB–
+      1.1 GB → 19–38 MB scratch per call, 2–4% faster at DiT shapes
+- [x] safetensors: mmap'd reader, zero-copy views, sharded index
+- [x] graph.Builder: Go-defined models over checkpoints (+ nn helpers)
+- [x] Gemm over bf16 weights: packed once straight from the mapped file,
+      shared across graphs via a weak-keyed cache (7.1B DiT ≈ 28.5 GB)
+- [x] models/qwenimage: VAE decoder (8.2e-6), DiT as prefix + target graphs
+      with prefix-KV reuse (1-layer 1.2e-4; full 32-layer 4-step latents 5e-4),
+      FlowMatch scheduler (bit-exact), Qwen3-VL text encoder (~9e-6 rel),
+      byte-level BPE tokenizer (exact ids)
+- [x] end-to-end text-to-image from the prompt text (image 2.2e-3 vs
+      diffusers, < 1 8-bit level); cmd/qwenimage; peak RSS 35.8 GB
+- [x] kernels/metal: cgo-free Metal FFI (entersyscall + private C stack),
+      runtime MSL compile, shared buffers, dispatch; charter amended
+- [x] GPU GEMM baseline (simdgroup f32, correct incl. ragged)
+- [ ] GPU GEMM at speed; attention/norm/elementwise MSL kernels; executor
+      backend encoding a whole DiT step into one command buffer
+- [ ] CPU perf: per-step time at 1024² (0.69 TFLOPS at 256 tokens), step 1-2
+      warm-up, peak memory (text encoder not fully released before DiT)
+- [ ] editing mode: Qwen3-VL vision tower (27-layer ViT, deepstack), VAE
+      encoder, condition-image layout
+- [ ] RMSNorm / RoPE / adaLN fused ops (profile first)
