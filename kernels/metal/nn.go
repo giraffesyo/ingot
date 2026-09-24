@@ -191,6 +191,14 @@ kernel void gather_rows(device const float* src [[buffer(0)]], device float* dst
 	dst[i.y * p.z + i.x] = src[idx[i.y] * p.y + i.x];
 }
 
+// 16-bit gather (bf16 rows): dst[r, :] = src[idx[r], :]; p = (cols, lds, ldd, 0).
+kernel void gather_rows_u16(device const ushort* src [[buffer(0)]], device ushort* dst [[buffer(1)]],
+                            device const uint* idx [[buffer(2)]], constant uint4& p [[buffer(3)]],
+                            uint2 i [[thread_position_in_grid]]) {
+	if (i.x >= p.x) return;
+	dst[i.y * p.z + i.x] = src[idx[i.y] * p.y + i.x];
+}
+
 // dst[idx[r], :] += src[r, :] over cols; p = (cols, ldd, lds, 0).
 kernel void scatter_add_rows(device float* dst [[buffer(0)]], device const float* src [[buffer(1)]],
                              device const uint* idx [[buffer(2)]], constant uint4& p [[buffer(3)]],
@@ -225,7 +233,7 @@ var nnPSO struct {
 	once                                                               sync.Once
 	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
 	rmsRows, softmaxBF16, layerNormBF16, rmsRopeBF16, siluMulBF16      *Pipeline
-	scatterAdd                                                         *Pipeline
+	scatterAdd, gather16                                               *Pipeline
 	err                                                                error
 }
 
@@ -239,7 +247,8 @@ func (d *Device) nnPipelines() error {
 			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather},
 			{"rmsnorm_rows", &nnPSO.rmsRows}, {"softmax_rows_bf16", &nnPSO.softmaxBF16},
 			{"layernorm_mod_bf16", &nnPSO.layerNormBF16}, {"rmsnorm_rope_bf16", &nnPSO.rmsRopeBF16},
-			{"silu_mul_bf16", &nnPSO.siluMulBF16}, {"scatter_add_rows", &nnPSO.scatterAdd}} {
+			{"silu_mul_bf16", &nnPSO.siluMulBF16}, {"scatter_add_rows", &nnPSO.scatterAdd},
+			{"gather_rows_u16", &nnPSO.gather16}} {
 			if *k.dst, nnPSO.err = d.Compile(nnSrc, k.name); nnPSO.err != nil {
 				return
 			}
@@ -359,6 +368,13 @@ func (e *Encoder) SoftmaxRowsMasked(x, mask Region, rows, cols, ld, ldm int, sca
 func (e *Encoder) GatherRows(src, dst, idx Region, rows, cols, lds, ldd int) {
 	if e.ready(nnPSO.gather) {
 		e.Dispatch(nnPSO.gather, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, src, dst, idx, u32s(cols, lds, ldd, 0))
+	}
+}
+
+// GatherRows16 is GatherRows for 16-bit (bf16) rows.
+func (e *Encoder) GatherRows16(src, dst, idx Region, rows, cols, lds, ldd int) {
+	if e.ready(nnPSO.gather16) {
+		e.Dispatch(nnPSO.gather16, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, src, dst, idx, u32s(cols, lds, ldd, 0))
 	}
 }
 
