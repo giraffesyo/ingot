@@ -114,8 +114,24 @@ func TestSoftmaxRows(t *testing.T) {
 	x := buf(t, d, rows*ld)
 	xf := fill(r, x)
 	orig := append([]float32(nil), xf...)
-	if err := d.Run(func(e *Encoder) { e.SoftmaxRows(x.At(0), rows, cols, ld, 3) }); err != nil {
+	p16, err := d.NewBuffer(2 * rows * cols)
+	if err != nil {
 		t.Fatal(err)
+	}
+	defer p16.Release()
+	if err := d.Run(func(e *Encoder) {
+		e.SoftmaxRowsBF16(x.At(0), p16.At(0), rows, cols, ld, cols, 3) // reads x before the in-place pass
+		e.SoftmaxRows(x.At(0), rows, cols, ld, 3)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pb := p16.Bytes()
+	for i := range rows * cols {
+		got := math.Float32frombits(uint32(pb[2*i])<<16 | uint32(pb[2*i+1])<<24)
+		want := xf[(i/cols)*ld+i%cols]
+		if math.Abs(float64(got-want)) > float64(want)/128+1e-12 {
+			t.Fatalf("bf16 softmax[%d] = %g, want %g (bf16 of)", i, got, want)
+		}
 	}
 	for rr := range rows {
 		m := math.Inf(-1)

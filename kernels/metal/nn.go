@@ -130,6 +130,26 @@ kernel void softmax_rows(device float* x [[buffer(0)]], constant uint4& p [[buff
 	for (uint i = tid; i < n; i += NT) xr[i] *= inv;
 }
 
+// softmax(scale · row) of f32 x into bf16 p, three read passes and one
+// bf16 write (vs softmax_rows + cast_bf16's five passes): the attention
+// probabilities feeding a bf16 P·V GEMM. p = (cols, ldx, ldp, 0).
+kernel void softmax_rows_bf16(device const float* x [[buffer(0)]], device bfloat* o [[buffer(1)]],
+                              constant uint4& p [[buffer(2)]], constant float4& f [[buffer(3)]],
+                              uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                              uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+	threadgroup float scratch[NT / 32];
+	const uint n = p.x;
+	device const float* xr = x + row * p.y;
+	device bfloat* orow = o + row * p.z;
+	float m = -INFINITY;
+	for (uint i = tid; i < n; i += NT) m = max(m, xr[i] * f.x);
+	m = tg_max(m, scratch, tid, sg, lane);
+	float acc = 0;
+	for (uint i = tid; i < n; i += NT) acc += exp(xr[i] * f.x - m);
+	const float inv = 1.0f / tg_sum(acc, scratch, tid, sg, lane);
+	for (uint i = tid; i < n; i += NT) orow[i] = bfloat(exp(xr[i] * f.x - m) * inv);
+}
+
 // Masked variant: softmax(scale · row + mask[row]) with mask rows of stride
 // p.z (additive, -inf masks).
 kernel void softmax_rows_masked(device float* x [[buffer(0)]], device const float* mask [[buffer(1)]],
@@ -179,7 +199,7 @@ kernel void gated_add(device float* x [[buffer(0)]], device const float* g [[buf
 var nnPSO struct {
 	once                                                               sync.Once
 	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
-	rmsRows                                                            *Pipeline
+	rmsRows, softmaxBF16                                               *Pipeline
 	err                                                                error
 }
 
@@ -191,7 +211,7 @@ func (d *Device) nnPipelines() error {
 		}{{"layernorm_mod", &nnPSO.layerNorm}, {"rmsnorm_rope", &nnPSO.rmsRope}, {"softmax_rows", &nnPSO.softmax},
 			{"silu_mul", &nnPSO.siluMul}, {"gated_add", &nnPSO.gateAdd},
 			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather},
-			{"rmsnorm_rows", &nnPSO.rmsRows}} {
+			{"rmsnorm_rows", &nnPSO.rmsRows}, {"softmax_rows_bf16", &nnPSO.softmaxBF16}} {
 			if *k.dst, nnPSO.err = d.Compile(nnSrc, k.name); nnPSO.err != nil {
 				return
 			}
@@ -261,6 +281,14 @@ func (e *Encoder) RMSNormRows(x, y, w Region, rows, cols, ldx, ldy int, eps floa
 func (e *Encoder) SoftmaxRows(x Region, rows, cols, ld int, scale float32) {
 	if e.ready(nnPSO.softmax) {
 		e.Dispatch(nnPSO.softmax, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, u32s(cols, ld, 0, 0), f32c(scale))
+	}
+}
+
+// SoftmaxRowsBF16 writes softmax(scale · x) of f32 rows as bf16 into out
+// (ld/ldo row strides in elements).
+func (e *Encoder) SoftmaxRowsBF16(x, out Region, rows, cols, ld, ldo int, scale float32) {
+	if e.ready(nnPSO.softmaxBF16) {
+		e.Dispatch(nnPSO.softmaxBF16, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, out, u32s(cols, ld, ldo, 0), f32c(scale))
 	}
 }
 
