@@ -20,6 +20,11 @@ import (
 // small per-layer buffers; target K/V share one buffer across layers, and
 // attention covers [prefix, target] keys as two column blocks of S.
 type MetalDiT struct {
+	// Fast runs every GEMM with bf16 activations (the matrix units' fast
+	// path, ~2.6x): inputs are rounded to bf16, accumulation and the
+	// residual stream, norms and softmax stay f32. Set before Prefix.
+	Fast bool
+
 	dev    *metal.Device
 	cfg    DiTConfig
 	l      *DiTLayout
@@ -37,6 +42,7 @@ type MetalDiT struct {
 	s1, g1, s2, g2, fs *metal.Buffer
 	pmask, pvalid      *metal.Buffer   // prefix attention mask, valid-row indices
 	kp, vp             []*metal.Buffer // per-layer prefix K/V [valid prefix, dim]
+	kp16, vp16         []*metal.Buffer // their bf16 copies (Fast)
 	textIn             *graph.Session
 }
 
@@ -47,10 +53,13 @@ type metalWork struct {
 	T                         int
 	x, y, q, k, v, o, g, p, s *metal.Buffer
 	cos, sin                  *metal.Buffer
+	// bf16 GEMM inputs for Fast mode (allocated on first use).
+	y16, q16, k16, v16, s16 *metal.Buffer
 }
 
 func (w *metalWork) release() {
-	for _, b := range []*metal.Buffer{w.x, w.y, w.q, w.k, w.v, w.o, w.g, w.p, w.s, w.cos, w.sin} {
+	for _, b := range []*metal.Buffer{w.x, w.y, w.q, w.k, w.v, w.o, w.g, w.p, w.s, w.cos, w.sin,
+		w.y16, w.q16, w.k16, w.v16, w.s16} {
 		if b != nil {
 			b.Release()
 		}
@@ -245,11 +254,20 @@ func (m *MetalDiT) Prefix(txt, cond *tensor.Tensor) error {
 	D, dh, P := m.cfg.dim(), m.cfg.AttentionHeadDim, m.l.Prefix
 	scale := float32(1 / math.Sqrt(float64(dh)))
 	w := m.pw
+	if m.Fast {
+		if err := m.fastBuffers(); err != nil {
+			return err
+		}
+	}
 	return m.dev.Run(func(e *metal.Encoder) {
 		for li := range m.lw {
-			m.block(e, li, w, func() {
+			m.block(e, li, w, false, func() {
 				e.GatherRows(w.k.At(0), m.kp[li].At(0), m.pvalid.At(0), m.pv, D, D, D)
 				e.GatherRows(w.v.At(0), m.vp[li].At(0), m.pvalid.At(0), m.pv, D, D, D)
+				if m.Fast {
+					e.CastBF16(m.kp[li].At(0), m.kp16[li].At(0), m.pv, D, D, D)
+					e.CastBF16(m.vp[li].At(0), m.vp16[li].At(0), m.pv, D, D, D)
+				}
 			}, func(ho int) {
 				e.Gemm(metal.Gemm{M: P, N: P, K: dh, A: w.q.At(ho), LDA: D, B: w.k.At(ho), LDB: D, C: w.s.At(0), TransB: true})
 				e.SoftmaxRowsMasked(w.s.At(0), m.pmask.At(0), P, P, P, P, scale)
@@ -275,10 +293,30 @@ func (m *MetalDiT) Step(x *tensor.Tensor, t float32) (*tensor.Tensor, error) {
 	scale := float32(1 / math.Sqrt(float64(dh)))
 	SW := P + T
 	w := m.tw
+	fast := m.Fast
+	if fast && len(m.kp16) == 0 {
+		return nil, fmt.Errorf("qwenimage: Fast set after Prefix")
+	}
 	err := m.dev.Run(func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: T, N: D, K: cfg.InChannels, A: m.lat.At(0), B: m.imgIn, C: w.x.At(0), TransB: true, BF16: true})
 		for li := range m.lw {
-			m.block(e, li, w, nil, func(ho int) {
+			if fast {
+				m.block(e, li, w, true, nil, func(ho int) {
+					h2 := ho / 2 // byte offset of the head in a bf16 row
+					e.Gemm(metal.Gemm{M: T, N: P, K: dh, A: w.q16.At(h2), LDA: D, B: m.kp16[li].At(h2), LDB: D,
+						C: w.s.At(0), LDC: SW, TransB: true, BF16: true, ABF16: true})
+					e.Gemm(metal.Gemm{M: T, N: T, K: dh, A: w.q16.At(h2), LDA: D, B: w.k16.At(h2), LDB: D,
+						C: w.s.At(4 * P), LDC: SW, TransB: true, BF16: true, ABF16: true})
+					e.SoftmaxRows(w.s.At(0), T, SW, SW, scale)
+					e.CastBF16(w.s.At(0), w.s16.At(0), T, SW, SW, SW)
+					e.Gemm(metal.Gemm{M: T, N: dh, K: P, A: w.s16.At(0), LDA: SW, B: m.vp16[li].At(h2), LDB: D,
+						C: w.o.At(ho), LDC: D, BF16: true, ABF16: true})
+					e.Gemm(metal.Gemm{M: T, N: dh, K: T, A: w.s16.At(2 * P), LDA: SW, B: w.v16.At(h2), LDB: D,
+						C: w.o.At(ho), LDC: D, BF16: true, ABF16: true, Accumulate: true})
+				})
+				continue
+			}
+			m.block(e, li, w, false, nil, func(ho int) {
 				e.Gemm(metal.Gemm{M: T, N: P, K: dh, A: w.q.At(ho), LDA: D, B: m.kp[li].At(ho), LDB: D,
 					C: w.s.At(0), LDC: SW, TransB: true})
 				e.Gemm(metal.Gemm{M: T, N: T, K: dh, A: w.q.At(ho), LDA: D, B: w.k.At(ho), LDB: D,
@@ -291,7 +329,7 @@ func (m *MetalDiT) Step(x *tensor.Tensor, t float32) (*tensor.Tensor, error) {
 			})
 		}
 		e.LayerNormMod(w.x.At(0), w.y.At(0), m.fs.At(0), T, D, D, D, cfg.Eps)
-		e.Gemm(metal.Gemm{M: T, N: cfg.OutChannels, K: D, A: w.y.At(0), B: m.projOut, C: m.out.At(0), TransB: true, BF16: true})
+		m.linear(e, w, fast, w.y, D, m.projOut, m.out, cfg.OutChannels)
 	})
 	if err != nil {
 		return nil, err
@@ -302,36 +340,85 @@ func (m *MetalDiT) Step(x *tensor.Tensor, t float32) (*tensor.Tensor, error) {
 }
 
 // block encodes one transformer block over w's tokens. afterKV (optional)
-// runs once q/k/v are final (post-norm, post-RoPE); attend(ho) fills head
-// h's slice of w.o (ho = its byte offset in a [T, dim] row).
-func (m *MetalDiT) block(e *metal.Encoder, li int, w *metalWork, afterKV func(), attend func(ho int)) {
+// runs once q/k/v are final (post-norm, post-RoPE; in fast mode also as
+// bf16 in q16/k16/v16); attend(ho) fills head h's slice of w.o (ho = its
+// byte offset in an f32 [T, dim] row).
+func (m *MetalDiT) block(e *metal.Encoder, li int, w *metalWork, fast bool, afterKV func(), attend func(ho int)) {
 	cfg, lw := m.cfg, m.lw[li]
 	D, H, dh, T, eps := cfg.dim(), cfg.NumAttentionHeads, cfg.AttentionHeadDim, w.T, cfg.Eps
 	hid := D * cfg.MLPRatio
-	lin := func(a *metal.Buffer, wt metal.Region, c *metal.Buffer, out, in int) {
-		e.Gemm(metal.Gemm{M: T, N: out, K: in, A: a.At(0), B: wt, C: c.At(0), TransB: true, BF16: true})
-	}
 	e.LayerNormMod(w.x.At(0), w.y.At(0), m.s1.At(0), T, D, D, D, eps)
-	lin(w.y, lw.q, w.q, D, D)
-	lin(w.y, lw.k, w.k, D, D)
-	lin(w.y, lw.v, w.v, D, D)
+	if fast {
+		e.CastBF16(w.y.At(0), w.y16.At(0), T, D, D, D)
+	}
+	m.linearFrom(e, w, fast, w.y, D, lw.q, w.q, D)
+	m.linearFrom(e, w, fast, w.y, D, lw.k, w.k, D)
+	m.linearFrom(e, w, fast, w.y, D, lw.v, w.v, D)
 	e.RMSNormRoPE(w.q.At(0), lw.normQ.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps)
 	e.RMSNormRoPE(w.k.At(0), lw.normK.At(0), w.cos.At(0), w.sin.At(0), T, H, dh, D, eps)
+	if fast {
+		e.CastBF16(w.q.At(0), w.q16.At(0), T, D, D, D)
+		e.CastBF16(w.k.At(0), w.k16.At(0), T, D, D, D)
+		e.CastBF16(w.v.At(0), w.v16.At(0), T, D, D, D)
+	}
 	if afterKV != nil {
 		afterKV()
 	}
 	for h := range H {
 		attend(4 * h * dh)
 	}
-	lin(w.o, lw.o, w.y, D, D)
+	m.linear(e, w, fast, w.o, D, lw.o, w.y, D)
 	e.GatedAdd(w.x.At(0), m.g1.At(0), w.y.At(0), T, D, D, D)
 
 	e.LayerNormMod(w.x.At(0), w.y.At(0), m.s2.At(0), T, D, D, D, eps)
-	lin(w.y, lw.gate, w.g, hid, D)
-	lin(w.y, lw.proj, w.p, hid, D)
+	if fast {
+		e.CastBF16(w.y.At(0), w.y16.At(0), T, D, D, D)
+	}
+	m.linearFrom(e, w, fast, w.y, D, lw.gate, w.g, hid)
+	m.linearFrom(e, w, fast, w.y, D, lw.proj, w.p, hid)
 	e.SiLUMul(w.g.At(0), w.p.At(0), w.g.At(0), T, hid, hid, hid, hid)
-	lin(w.g, lw.out, w.y, D, hid)
+	m.linear(e, w, fast, w.g, hid, lw.out, w.y, D)
 	e.GatedAdd(w.x.At(0), m.g2.At(0), w.y.At(0), T, D, D, D)
+}
+
+// linear encodes c = a·Wᵀ for a [T, in] (casting a to bf16 first in fast
+// mode, through w.y16 — sized for the widest input).
+func (m *MetalDiT) linear(e *metal.Encoder, w *metalWork, fast bool, a *metal.Buffer, in int, wt metal.Region, c *metal.Buffer, out int) {
+	if fast {
+		e.CastBF16(a.At(0), w.y16.At(0), w.T, in, in, in)
+	}
+	m.linearFrom(e, w, fast, a, in, wt, c, out)
+}
+
+// linearFrom is linear with the bf16 copy of a already in w.y16.
+func (m *MetalDiT) linearFrom(e *metal.Encoder, w *metalWork, fast bool, a *metal.Buffer, in int, wt metal.Region, c *metal.Buffer, out int) {
+	if fast {
+		e.Gemm(metal.Gemm{M: w.T, N: out, K: in, A: w.y16.At(0), B: wt, C: c.At(0), TransB: true, BF16: true, ABF16: true})
+		return
+	}
+	e.Gemm(metal.Gemm{M: w.T, N: out, K: in, A: a.At(0), B: wt, C: c.At(0), TransB: true, BF16: true})
+}
+
+// fastBuffers allocates the bf16 scratch Fast mode needs.
+func (m *MetalDiT) fastBuffers() error {
+	if len(m.kp16) > 0 {
+		return nil
+	}
+	D, hid, T := m.cfg.dim(), m.cfg.dim()*m.cfg.MLPRatio, m.tw.T
+	var err error
+	nb := func(elems int) *metal.Buffer {
+		b, e := m.dev.NewBuffer(2 * max(elems, 1))
+		if err == nil {
+			err = e
+		}
+		return b
+	}
+	w := m.tw
+	w.y16, w.q16, w.k16, w.v16, w.s16 = nb(T*max(D, hid)), nb(T*D), nb(T*D), nb(T*D), nb(T*(m.pv+T))
+	for range m.layers {
+		m.kp16, m.vp16 = append(m.kp16, nb(m.pv*D)), append(m.vp16, nb(m.pv*D))
+	}
+	return err
 }
 
 // Close releases the GPU buffers (the mapped weights stay the caller's).
@@ -349,6 +436,10 @@ func (m *MetalDiT) Close() {
 	for i := range m.kp {
 		m.kp[i].Release()
 		m.vp[i].Release()
+	}
+	for i := range m.kp16 {
+		m.kp16[i].Release()
+		m.vp16[i].Release()
 	}
 	for _, lw := range m.lw {
 		lw.normQ.Release()

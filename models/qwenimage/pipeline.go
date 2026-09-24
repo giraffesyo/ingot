@@ -28,6 +28,10 @@ type Options struct {
 	// Device runs the DiT on "cpu", "gpu" (Metal, darwin/arm64) or "auto"
 	// (the default: gpu when available).
 	Device string
+	// Fast (GPU only) runs the DiT's GEMMs with bf16 activations: ~2.6x the
+	// matrix throughput, outputs within ~1% (the reference pipeline itself
+	// runs in bf16). Off by default: f32 inputs match diffusers' f32 run.
+	Fast bool
 
 	// Latents, when set, replaces the seeded noise: packed [h·w, 64]
 	// (parity tests inject the reference pipeline's torch noise).
@@ -196,7 +200,7 @@ func denoise(dir string, embeds *tensor.Tensor, lh, lw int, opt Options, logf fu
 	sched := NewSchedule(scfg, opt.Steps, l.Target)
 	gpu := opt.Device == "gpu" || ((opt.Device == "" || opt.Device == "auto") && metalAvailable())
 	if gpu {
-		return denoiseMetal(cfg, set, l, embeds, x, sched, opt.Steps, logf)
+		return denoiseMetal(cfg, set, l, embeds, x, sched, opt.Steps, opt.Fast, logf)
 	}
 	if opt.Device != "" && opt.Device != "auto" && opt.Device != "cpu" {
 		return nil, fmt.Errorf("qwenimage: unknown device %q (cpu, gpu, auto)", opt.Device)
@@ -231,13 +235,14 @@ func denoise(dir string, embeds *tensor.Tensor, lh, lw int, opt Options, logf fu
 
 // denoiseMetal runs the prefix pass and every step on the GPU.
 func denoiseMetal(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, embeds, x *tensor.Tensor, sched Schedule, steps int,
-	logf func(string, ...any)) (*tensor.Tensor, error) {
+	fast bool, logf func(string, ...any)) (*tensor.Tensor, error) {
 	t0 := time.Now()
 	m, err := NewMetalDiT(cfg, set, l, cfg.NumLayers)
 	if err != nil {
 		return nil, err
 	}
 	defer m.Close()
+	m.Fast = fast
 	if err := m.Prefix(embeds, nil); err != nil {
 		return nil, err
 	}
