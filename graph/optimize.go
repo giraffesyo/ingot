@@ -3,6 +3,7 @@ package graph
 import (
 	"math"
 	"os"
+	"runtime"
 	"strconv"
 
 	"github.com/giraffesyo/ingot/ops"
@@ -2196,6 +2197,12 @@ func blkEligible(n *Node) int {
 	}
 	// pointwise: [M,C,1,1], s1, p0, both channel counts blocked
 	if ws[2] != 1 || ws[3] != 1 || S != 1 || ws[0]%8 != 0 || ws[1]%8 != 0 {
+		// dense: square KxK (or 1x1 stride 2), stride 1/2, both channel
+		// counts blocked (ops.ConvDenseBlk).
+		if blkDense && ws[2] == ws[3] && (S == 1 || S == 2) && ws[0]%8 == 0 && ws[1]%8 == 0 && ws[2] <= 7 &&
+			len(n.Attrs.Ints("pads", []int64{0, 0, 0, 0})) == 4 {
+			return 3
+		}
 		return 0
 	}
 	for _, p := range n.Attrs.Ints("pads", nil) {
@@ -2205,6 +2212,21 @@ func blkEligible(n *Node) int {
 	}
 	return 2
 }
+
+// blkDense enables the dense blocked conv kind (ops.ConvDenseBlk): on
+// amd64 by default (Zen 5, resnetish: 246-264 -> 232-241 µs; the kernel
+// alone is 2-3x the NCHW path on <= 8x8 planes), off elsewhere (the
+// blocked layout has never paid on Apple silicon; docs/DESIGN-nchwc.md).
+// INGOT_BLK_DENSE=0/1 overrides.
+var blkDense = func() bool {
+	switch os.Getenv("INGOT_BLK_DENSE") {
+	case "0":
+		return false
+	case "1":
+		return true
+	}
+	return runtime.GOARCH == "amd64"
+}()
 
 // blkSpatialGate returns the maximum H*W at which a blocked region may seed
 // (default 224², the measured break-even; see docs/DESIGN-nchwc.md).
@@ -2216,6 +2238,19 @@ func blkSpatialGate() int {
 		}
 	}
 	return 224 * 224
+}
+
+// blkUnaryEligible: elementwise activations that compute the same result
+// on any layout (one data input, no axis semantics).
+func blkUnaryEligible(n *Node) bool {
+	if n.Domain != "" && !(n.Domain == ingotDomain && (n.OpType == "HardSwish" || n.OpType == "SiLU")) {
+		return false
+	}
+	switch n.OpType {
+	case "Relu", "Sigmoid", "Tanh", "HardSwish", "HardSigmoid", "LeakyRelu", "SiLU":
+		return len(n.Inputs) == 1 && len(n.Outputs) == 1
+	}
+	return false
 }
 
 // blkAddEligible reports whether n is a plain same-shape rank-4 Add. On two
@@ -2280,6 +2315,8 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 			blocked[n] = true
 		} else if n.OpType == "SE" && n.Domain == ingotDomain && blkVal(n.Inputs[0]) {
 			blocked[n] = true
+		} else if blkUnaryEligible(n) && blkVal(n.Inputs[0]) {
+			blocked[n] = true // layout-agnostic elementwise (ResNet's post-residual ReLU)
 		}
 	}
 	if len(blocked) == 0 {
@@ -2420,10 +2457,13 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 		// Blocked node forms: convs are rewritten; Adds and SE run unchanged
 		// (SE detects the blocked layout at runtime).
 		if kind[n] == 0 {
-			if n.OpType == "SE" {
+			switch {
+			case n.OpType == "SE":
 				stats["blk-se"]++
-			} else {
+			case n.OpType == "Add":
 				stats["blk-add"]++
+			default:
+				stats["blk-unary"]++
 			}
 			continue
 		}
@@ -2433,7 +2473,14 @@ func assignBlockedLayout(g *Graph, stats map[string]int) {
 				attrs[name] = a
 			}
 		}
-		if kind[n] == 1 {
+		if kind[n] == 3 {
+			ws := n.Inputs[1].Const.Shape()
+			strides := n.Attrs.Ints("strides", []int64{1, 1})
+			attrs["kernel"] = ops.Attr{Kind: ops.KindInt, I: int64(ws[2])}
+			attrs["stride"] = ops.Attr{Kind: ops.KindInt, I: strides[0]}
+			attrs["pads"] = ops.Attr{Kind: ops.KindInts, Ints: append([]int64(nil), n.Attrs.Ints("pads", []int64{0, 0, 0, 0})...)}
+			n.OpType = "ConvDenseBlk"
+		} else if kind[n] == 1 {
 			ws := n.Inputs[1].Const.Shape()
 			strides := n.Attrs.Ints("strides", []int64{1, 1})
 			attrs["kernel"] = ops.Attr{Kind: ops.KindInt, I: int64(ws[2])}
