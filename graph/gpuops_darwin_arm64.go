@@ -130,6 +130,15 @@ func gpuOpFor(n *Node) gpuOp {
 			return gatherGPU{axis: int(a.Int("axis", 0))}
 		case "Conv":
 			return newConvGPU(a)
+		case "Expand":
+			return expandGPU{}
+		case "Slice":
+			if a.Has("starts") { // opset < 10: attributes
+				return nil
+			}
+			return sliceGPU{}
+		case "Where":
+			return whereGPU{}
 		case "MaxPool":
 			return newPoolGPU(a, true)
 		case "AveragePool":
@@ -149,6 +158,8 @@ func gpuOpFor(n *Node) gpuOp {
 		}
 	case "ingot":
 		switch n.OpType {
+		case "MHA":
+			return mhaGPU{scale: a.Float("scale", 1), packed: a.Int("layout", 0) == 1}
 		case "HardSwish":
 			return actGPU{act: metal.ActHardSwish}
 		case "Gelu":
@@ -185,7 +196,8 @@ func (o binaryGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	}
 	da, ma, ok1 := bcastIndex(a.Shape(), oshape)
 	db, mb, ok2 := bcastIndex(b.Shape(), oshape)
-	if !ok1 || !ok2 {
+	nd := !ok1 || !ok2
+	if nd && len(oshape) > 6 {
 		return nil, nil, false
 	}
 	rs, ok := c.regions(a, b)
@@ -199,7 +211,30 @@ func (o binaryGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 		return nil, nil, false
 	}
 	n := out.Numel()
+	if nd {
+		sa, sb := bcastStrides(a.Shape(), oshape), bcastStrides(b.Shape(), oshape)
+		return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.BinaryND(o.op, rs[0], rs[1], ro[0], oshape, sa, sb) }, true
+	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.BinaryBcast(o.op, rs[0], rs[1], ro[0], n, da, ma, db, mb) }, true
+}
+
+// bcastStrides returns x's element strides along each axis of the
+// broadcast shape out (0 where x repeats).
+func bcastStrides(x tensor.Shape, out []int) []int {
+	r := len(out)
+	st := make([]int, r)
+	acc := 1
+	for i := r - 1; i >= 0; i-- {
+		j := i - (r - len(x))
+		if j < 0 {
+			break
+		}
+		if x[j] != 1 {
+			st[i] = acc
+		}
+		acc *= x[j]
+	}
+	return st
 }
 
 // broadcastShapes is NumPy broadcasting of two shapes.
@@ -803,6 +838,258 @@ func (o sdpaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 			}
 		}
 	}, true
+}
+
+// mhaGPU is ingot.MHA: attention over a packed qkv tensor ([B,T,3,H,dh]
+// with layout 1, else [3,B,H,T,dh]), read strided in place; output
+// [B,T,H,dh].
+type mhaGPU struct {
+	scale  float32
+	packed bool
+}
+
+func (o mhaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) < 1 || in[0] == nil || !allF32(in[0]) || !onlyFirstOutput(st) {
+		return nil, nil, false
+	}
+	x := in[0]
+	xs := x.Shape()
+	if len(xs) != 5 {
+		return nil, nil, false
+	}
+	var B, H, T, dh, ld int
+	if o.packed {
+		if xs[2] != 3 {
+			return nil, nil, false
+		}
+		B, T, H, dh = xs[0], xs[1], xs[3], xs[4]
+		ld = 3 * H * dh
+	} else {
+		if xs[0] != 3 {
+			return nil, nil, false
+		}
+		B, H, T, dh = xs[1], xs[2], xs[3], xs[4]
+		ld = dh
+	}
+	if B*H*T*dh == 0 {
+		return nil, nil, false
+	}
+	rx, ok := c.regions(x)
+	if !ok {
+		return nil, nil, false
+	}
+	out, sc := c.out(B, T, H, dh), c.out(T, T)
+	ro, ok := c.regions(out, sc)
+	if !ok {
+		c.release(out, sc)
+		return nil, nil, false
+	}
+	c.release(sc) // scratch: see sdpaGPU
+	at := func(r metal.Region, elems int) metal.Region { return metal.Region{B: r.B, Off: r.Off + 4*elems} }
+	packed, scale := o.packed, o.scale
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+		for b := range B {
+			for h := range H {
+				var qo, ko, vo int
+				if packed {
+					qo = b*T*ld + h*dh
+					ko, vo = qo+H*dh, qo+2*H*dh
+				} else {
+					plane := T * dh
+					qo = (b*H + h) * plane
+					ko, vo = qo+B*H*plane, qo+2*B*H*plane
+				}
+				e.Gemm(metal.Gemm{M: T, N: T, K: dh, A: at(rx[0], qo), LDA: ld, B: at(rx[0], ko), LDB: ld, C: ro[1], TransB: true})
+				e.SoftmaxRows(ro[1], T, T, T, scale)
+				e.Gemm(metal.Gemm{M: T, N: dh, K: T, A: ro[1], B: at(rx[0], vo), LDB: ld, C: at(ro[0], (b*T*H+h)*dh), LDC: H * dh})
+			}
+		}
+	}, true
+}
+
+// expandGPU is Expand: a broadcast copy (min(x, x) under the binary
+// broadcast indexing). The target shape is an integer tensor (never a GPU
+// output).
+type expandGPU struct{}
+
+func (expandGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) != 2 || in[0] == nil || in[1] == nil || !allF32(in[0]) || in[1].DType() != tensor.I64 {
+		return nil, nil, false
+	}
+	x := in[0]
+	target := make([]int, in[1].Numel())
+	for i, v := range in[1].I64() {
+		target[i] = int(v)
+	}
+	oshape, ok := broadcastShapes(x.Shape(), target)
+	if !ok {
+		return nil, nil, false
+	}
+	dx, mx, block := bcastIndex(x.Shape(), oshape)
+	if !block && len(oshape) > 6 {
+		return nil, nil, false
+	}
+	rx, ok := c.regions(x)
+	if !ok {
+		return nil, nil, false
+	}
+	out := c.out(oshape...)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	n := out.Numel()
+	if n == 0 {
+		return []*tensor.Tensor{out}, func(*metal.Encoder) {}, true
+	}
+	if !block {
+		sx := bcastStrides(x.Shape(), oshape)
+		return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.CopyND(rx[0], ro[0], oshape, sx) }, true
+	}
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.BinaryBcast(metal.OpMin, rx[0], rx[0], ro[0], n, dx, mx, dx, mx) }, true
+}
+
+// sliceGPU is Slice (opset ≥ 10: parameters as integer inputs, read on the
+// CPU) as a strided copy; negative steps read backwards.
+type sliceGPU struct{}
+
+func (sliceGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) < 3 || in[0] == nil || in[1] == nil || in[2] == nil || !allF32(in[0]) {
+		return nil, nil, false
+	}
+	ints := func(t *tensor.Tensor) ([]int64, bool) {
+		switch t.DType() {
+		case tensor.I64:
+			return t.I64(), true
+		case tensor.I32:
+			v := make([]int64, t.Numel())
+			for i, x := range t.I32() {
+				v[i] = int64(x)
+			}
+			return v, true
+		}
+		return nil, false
+	}
+	x := in[0]
+	xs := x.Shape()
+	r := len(xs)
+	if r == 0 || r > 6 {
+		return nil, nil, false
+	}
+	starts, ok1 := ints(in[1])
+	ends, ok2 := ints(in[2])
+	if !ok1 || !ok2 || len(starts) != len(ends) {
+		return nil, nil, false
+	}
+	axes := make([]int64, len(starts))
+	steps := make([]int64, len(starts))
+	for i := range axes {
+		axes[i], steps[i] = int64(i), 1
+	}
+	var ok bool
+	if len(in) > 3 && in[3] != nil {
+		if axes, ok = ints(in[3]); !ok || len(axes) != len(starts) {
+			return nil, nil, false
+		}
+	}
+	if len(in) > 4 && in[4] != nil {
+		if steps, ok = ints(in[4]); !ok || len(steps) != len(starts) {
+			return nil, nil, false
+		}
+	}
+	stride := make([]int, r)
+	acc := 1
+	for d := r - 1; d >= 0; d-- {
+		stride[d] = acc
+		acc *= xs[d]
+	}
+	cnt := append([]int{}, xs...)
+	sst := append([]int{}, stride...)
+	base := 0
+	seen := make([]bool, r)
+	for i, a := range axes {
+		ax := int(a)
+		if ax < 0 {
+			ax += r
+		}
+		if ax < 0 || ax >= r || seen[ax] || steps[i] == 0 {
+			return nil, nil, false
+		}
+		seen[ax] = true
+		dim := int64(xs[ax])
+		s, e, k := starts[i], ends[i], steps[i]
+		if s < 0 {
+			s += dim
+		}
+		if e < 0 {
+			e += dim
+		}
+		var n int64
+		if k > 0 {
+			s, e = max(0, min(s, dim)), max(0, min(e, dim))
+			if e > s {
+				n = (e - s + k - 1) / k
+			}
+		} else {
+			s, e = max(-1, min(s, dim-1)), max(-1, min(e, dim-1))
+			if s > e {
+				n = (s - e - k - 1) / (-k)
+			}
+		}
+		cnt[ax] = int(n)
+		if n > 0 {
+			base += int(s) * stride[ax]
+		}
+		sst[ax] = stride[ax] * int(k)
+	}
+	rx, ok := c.regions(x)
+	if !ok {
+		return nil, nil, false
+	}
+	out := c.out(cnt...)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	if out.Numel() == 0 {
+		return []*tensor.Tensor{out}, func(*metal.Encoder) {}, true
+	}
+	src := metal.Region{B: rx[0].B, Off: rx[0].Off + 4*base}
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.CopyND(src, ro[0], cnt, sst) }, true
+}
+
+// whereGPU is Where(cond, x, y) with a bool condition and f32 values,
+// three-way broadcast.
+type whereGPU struct{}
+
+func (whereGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) != 3 || in[0] == nil || in[1] == nil || in[2] == nil || !allF32(in[1], in[2]) ||
+		in[0].DType() != tensor.Bool || !in[0].IsContiguous() {
+		return nil, nil, false
+	}
+	cd, x, y := in[0], in[1], in[2]
+	s1, ok1 := broadcastShapes(cd.Shape(), x.Shape())
+	if !ok1 {
+		return nil, nil, false
+	}
+	oshape, ok2 := broadcastShapes(s1, y.Shape())
+	if !ok2 || len(oshape) > 6 {
+		return nil, nil, false
+	}
+	rs, ok := c.regions(cd, x, y)
+	if !ok {
+		return nil, nil, false
+	}
+	out := c.out(oshape...)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	sc, sx, sy := bcastStrides(cd.Shape(), oshape), bcastStrides(x.Shape(), oshape), bcastStrides(y.Shape(), oshape)
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.WhereND(rs[0], rs[1], rs[2], ro[0], oshape, sc, sx, sy) }, true
 }
 
 // ---- gathers and concatenation ----

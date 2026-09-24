@@ -32,6 +32,10 @@ type GPUSession struct {
 	mu     sync.Mutex
 	wraps  map[unsafe.Pointer]*metal.Buffer
 	stream *metal.Stream
+	// side serves CPU nodes that run while GPU work is pending (see
+	// sideRun): session memory, so GPU nodes can read their outputs, but
+	// apart from the GPU pool, and recycled only after a flush.
+	side *tensor.Pool
 
 	// GPUSteps and CPUSteps count where the last Run placed its nodes;
 	// Flushes counts its GPU round trips (mid-graph flushes before CPU
@@ -60,7 +64,8 @@ func CompileGPU(g *Graph) (*GPUSession, error) {
 	}
 	mem := &pageMem{}
 	s.pool = tensor.NewPoolAlloc(mem.alloc)
-	gs := &GPUSession{Session: s, dev: dev, mem: mem, wraps: map[unsafe.Pointer]*metal.Buffer{}, stream: dev.NewStream()}
+	gs := &GPUSession{Session: s, dev: dev, mem: mem, wraps: map[unsafe.Pointer]*metal.Buffer{}, stream: dev.NewStream(),
+		side: tensor.NewPoolAlloc(mem.alloc)}
 	// Constants move to aligned memory so GPU nodes can read them in place.
 	for id, c := range s.constVals {
 		if c != nil && c.Numel() > 0 {
@@ -93,8 +98,8 @@ var metaOps = map[string]bool{"Shape": true, "Size": true}
 
 // sideRun reports whether CPU step st may run while GPU work is pending:
 // it reads no data a pending GPU node writes (shape math over integer
-// tensors, or shape queries), and its outputs come from heap memory
-// (never a pool buffer a pending GPU node still reads).
+// tensors, or shape queries), and its outputs come from the side pool
+// (never a buffer a pending GPU node still reads).
 func sideRun(st *step, in []*tensor.Tensor, pending func(id int) bool) bool {
 	if st.node.Domain != "" {
 		return false
@@ -166,7 +171,26 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		pooled[v.id] = !s.isOutput[v.id]
 	}
 	ctx := &ops.Ctx{Pool: s.pool}
-	sideCtx := &ops.Ctx{Pool: tensor.NewPool()}
+	sideCtx := &ops.Ctx{Pool: s.side}
+	// Side outputs are released only at a flush: GPU nodes may read them.
+	sideOut := make([]bool, s.nval)
+	var deferred []*tensor.Tensor
+	flush := func() error {
+		err := s.stream.Flush()
+		for _, t := range deferred {
+			s.side.Put(t)
+		}
+		deferred = deferred[:0]
+		return err
+	}
+	put := func(id int) {
+		if sideOut[id] {
+			deferred = append(deferred, vals[id])
+		} else {
+			s.pool.Put(vals[id])
+		}
+		vals[id] = nil
+	}
 	gctx := &gpuCtx{s: s}
 	// gpuGen[id] == gen marks values written by GPU work not yet flushed.
 	gpuGen := make([]int, s.nval)
@@ -216,7 +240,7 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 				} else {
 					s.Flushes++
 					s.FlushedBy = append(s.FlushedBy, st.node.OpType)
-					if err := s.stream.Flush(); err != nil {
+					if err := flush(); err != nil {
 						return nil, fmt.Errorf("graph: gpu: %w", err)
 					}
 					gen++
@@ -246,7 +270,8 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 				continue
 			}
 			vals[id] = t
-			pooled[id] = !s.isOutput[id] && !side
+			pooled[id] = !s.isOutput[id]
+			sideOut[id] = side
 			if placed {
 				gpuGen[id] = gen
 			}
@@ -269,14 +294,12 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 			}
 			live[id]--
 			if live[id] == 0 && pooled[id] {
-				s.pool.Put(vals[id])
-				vals[id] = nil
+				put(id)
 			}
 			if r := alias[id]; r >= 0 {
 				live[r]--
 				if live[r] == 0 && pooled[r] {
-					s.pool.Put(vals[r])
-					vals[r] = nil
+					put(r)
 				}
 			}
 		}
@@ -284,7 +307,7 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 	if s.stream.Pending() {
 		s.Flushes++
 	}
-	if err := s.stream.Flush(); err != nil {
+	if err := flush(); err != nil {
 		return nil, fmt.Errorf("graph: gpu: %w", err)
 	}
 	res = make(map[string]*tensor.Tensor, len(s.g.Outputs))

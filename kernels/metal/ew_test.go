@@ -121,3 +121,65 @@ func TestEW(t *testing.T) {
 		check("reduce mean", f32s(ro.Bytes())[row], sum/333, 1e-5)
 	}
 }
+
+// TestND: the strided N-d path — broadcast binary (non-contiguous operand
+// axes), a reversed strided slice copy, and where — vs direct indexing.
+func TestND(t *testing.T) {
+	d := openDev(t)
+	if err := d.PrepareEW(); err != nil {
+		t.Fatal(err)
+	}
+	r := rand.New(rand.NewPCG(21, 21))
+	dims := []int{3, 4, 5}
+	n := 60
+	// a [3,1,5] and b [1,4,1] broadcast to [3,4,5].
+	a, b, o := buf(t, d, 15), buf(t, d, 4), buf(t, d, n)
+	af, bf := fill(r, a), fill(r, b)
+	// x [6,8]: slice rows 5,3,1 (step -2) and cols 1..7 step 3 → [3, 3].
+	x, xo := buf(t, d, 48), buf(t, d, 9)
+	xf := fill(r, x)
+	cb, err := d.NewBuffer(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cb.Release()
+	cond := cb.Bytes()
+	for i := range cond {
+		cond[i] = byte(r.IntN(2))
+	}
+	wo := buf(t, d, n)
+	err = d.Run(func(e *Encoder) {
+		e.BinaryND(OpSub, a.At(0), b.At(0), o.At(0), dims, []int{5, 0, 1}, []int{0, 1, 0})
+		e.CopyND(x.At(4*(5*8+1)), xo.At(0), []int{3, 3}, []int{-16, 3})
+		e.WhereND(cb.At(0), o.At(0), a.At(0), wo.At(0), dims, []int{20, 5, 1}, []int{20, 5, 1}, []int{5, 0, 1})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	of, wf := f32s(o.Bytes()), f32s(wo.Bytes())
+	for i := range 3 {
+		for j := range 4 {
+			for k := range 5 {
+				idx := (i*4+j)*5 + k
+				want := af[i*5+k] - bf[j]
+				if of[idx] != want {
+					t.Fatalf("binary [%d %d %d] = %g, want %g", i, j, k, of[idx], want)
+				}
+				ww := af[i*5+k]
+				if cond[idx] != 0 {
+					ww = want
+				}
+				if wf[idx] != ww {
+					t.Fatalf("where [%d %d %d] = %g, want %g", i, j, k, wf[idx], ww)
+				}
+			}
+		}
+	}
+	for i := range 3 {
+		for j := range 3 {
+			if got, want := f32s(xo.Bytes())[i*3+j], xf[(5-2*i)*8+1+3*j]; got != want {
+				t.Fatalf("slice [%d %d] = %g, want %g", i, j, got, want)
+			}
+		}
+	}
+}
