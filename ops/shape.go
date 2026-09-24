@@ -383,6 +383,21 @@ func (o *concatOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 	for _, t := range in {
 		maxChunk = max(maxChunk, t.Dim(axis)*inner*esz)
 	}
+	if rowOut < piece {
+		// Small rows (an innermost-axis concat can copy one element per
+		// input per row): batch ~piece bytes of rows per task instead of one
+		// task per copy — a [T,H,64,1]+[T,H,64,1] RoPE concat was ~4M tasks.
+		rows := max(1, piece/max(rowOut, 1))
+		par.For((outer+rows-1)/rows, 1, func(t, _ int) {
+			for oi := t * rows; oi < min((t+1)*rows, outer); oi++ {
+				for ii, x := range in {
+					chunk := offs[ii+1] - offs[ii]
+					copy(dst[oi*rowOut+offs[ii]:oi*rowOut+offs[ii]+chunk], x.Bytes()[oi*chunk:(oi+1)*chunk])
+				}
+			}
+		})
+		return ctx.Out(out), nil
+	}
 	pieces := max(1, (maxChunk+piece-1)/piece)
 	par.For(outer*len(in)*pieces, 1, func(t, _ int) {
 		pc := t % pieces
