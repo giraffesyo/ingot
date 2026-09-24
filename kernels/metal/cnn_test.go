@@ -215,8 +215,11 @@ func TestConvTranspose(t *testing.T) {
 		CinG, CoutG := g.C/g.Group, g.M/g.Group
 		x, w, b := buf(t, d, g.N*g.C*g.H*g.W), buf(t, d, g.C*CoutG*g.KH*g.KW), buf(t, d, g.M)
 		xf, wf, bf := fill(r, x), fill(r, w), fill(r, b)
-		o := buf(t, d, g.N*g.M*g.OH*g.OW)
-		if err := d.Run(func(e *Encoder) { e.ConvTransposeDirect(x.At(0), w.At(0), b.At(0), o.At(0), g) }); err != nil {
+		o, ob := buf(t, d, g.N*g.M*g.OH*g.OW), buf(t, d, g.N*g.M*g.OH*g.OW)
+		if err := d.Run(func(e *Encoder) {
+			e.ConvTransposeDirect(x.At(0), w.At(0), b.At(0), o.At(0), g)
+			e.ConvTransposeBlocked(x.At(0), w.At(0), b.At(0), ob.At(0), g)
+		}); err != nil {
 			t.Fatal(err)
 		}
 		want := make([]float64, g.N*g.M*g.OH*g.OW)
@@ -247,9 +250,11 @@ func TestConvTranspose(t *testing.T) {
 				}
 			}
 		}
-		for i, v := range f32s(o.Bytes()) {
-			if math.Abs(float64(v)-want[i]) > 1e-5*(1+math.Abs(want[i])) {
-				t.Fatalf("%+v [%d] = %g, want %g", g, i, v, want[i])
+		for _, y := range []*Buffer{o, ob} {
+			for i, v := range f32s(y.Bytes()) {
+				if math.Abs(float64(v)-want[i]) > 1e-5*(1+math.Abs(want[i])) {
+					t.Fatalf("%+v [%d] = %g, want %g", g, i, v, want[i])
+				}
 			}
 		}
 	}
@@ -332,12 +337,42 @@ func BenchmarkConvThin(b *testing.B) {
 			}
 			b.ReportMetric(2*float64(g.M*K*P)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})
-		b.Run(name+"/blocked", func(b *testing.B) {
+		for v, cb := range blockWidths {
+			b.Run(fmt.Sprintf("%s/blocked%d", name, cb), func(b *testing.B) {
+				for b.Loop() {
+					d.Run(func(e *Encoder) { e.convDirectCB(v, x.At(0), w.At(0), Region{}, y.At(0), g) })
+				}
+				b.ReportMetric(2*float64(g.M*K*P)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
+			})
+		}
+	}
+}
+
+// BenchmarkConvTranspose: the per-output gather kernel vs the blocked one
+// on the OCR detector head's upsampling convs.
+func BenchmarkConvTranspose(b *testing.B) {
+	d := openDev(b)
+	if err := d.PrepareCNN(); err != nil {
+		b.Fatal(err)
+	}
+	for _, g := range []ConvGeom{
+		{N: 1, C: 24, H: 240, W: 240, M: 24, KH: 2, KW: 2, SH: 2, SW: 2, DH: 1, DW: 1, Group: 1, OH: 480, OW: 480},
+		{N: 1, C: 24, H: 480, W: 480, M: 1, KH: 2, KW: 2, SH: 2, SW: 2, DH: 1, DW: 1, Group: 1, OH: 960, OW: 960},
+	} {
+		x, w, y := bufB(b, d, g.N*g.C*g.H*g.W), bufB(b, d, g.C*g.M*g.KH*g.KW), bufB(b, d, g.M*g.OH*g.OW)
+		name := fmt.Sprintf("c%d_m%d_%dx%d", g.C, g.M, g.H, g.W)
+		b.Run(name+"/direct", func(b *testing.B) {
 			for b.Loop() {
-				d.Run(func(e *Encoder) { e.ConvDirectBlocked(x.At(0), w.At(0), Region{}, y.At(0), g) })
+				d.Run(func(e *Encoder) { e.ConvTransposeDirect(x.At(0), w.At(0), Region{}, y.At(0), g) })
 			}
-			b.ReportMetric(2*float64(g.M*K*P)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})
+		for v, cb := range blockWidths {
+			b.Run(fmt.Sprintf("%s/blocked%d", name, cb), func(b *testing.B) {
+				for b.Loop() {
+					d.Run(func(e *Encoder) { e.convTCB(v, x.At(0), w.At(0), Region{}, y.At(0), g) })
+				}
+			})
+		}
 	}
 }
 
