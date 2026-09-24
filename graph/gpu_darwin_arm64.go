@@ -38,6 +38,8 @@ type GPUSession struct {
 	// sideRun): session memory, so GPU nodes can read their outputs, but
 	// apart from the GPU pool, and recycled only after a flush.
 	side *tensor.Pool
+	// bf16 selects bf16 matrix products for constant weights (GPUBF16).
+	bf16 bool
 	// tables caches small constant tables GPU nodes derive from shapes
 	// (resize taps), in session memory for the session's lifetime.
 	tables map[string]metal.Region
@@ -62,7 +64,7 @@ type GPUSession struct {
 
 // CompileGPU optimizes g and compiles it for the GPU (darwin/arm64 with
 // Metal); nodes without a GPU implementation run their CPU ops.
-func CompileGPU(g *Graph) (*GPUSession, error) {
+func CompileGPU(g *Graph, opts ...GPUOption) (*GPUSession, error) {
 	if err := metal.Supported(); err != nil {
 		return nil, err
 	}
@@ -89,6 +91,9 @@ func CompileGPU(g *Graph) (*GPUSession, error) {
 		if c != nil && c.Numel() > 0 {
 			s.constVals[id] = mem.copyOf(c)
 		}
+	}
+	for _, o := range opts {
+		o(gs)
 	}
 	gs.gops = make([]gpuOp, len(s.steps))
 	for i, st := range s.steps {

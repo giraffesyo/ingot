@@ -14,6 +14,7 @@ type GPUSession struct {
 	*Session
 	GPUSteps, CPUSteps, Flushes int
 	GPUTime                     time.Duration
+	bf16                        bool
 	FlushedBy                   []string
 	Profile                     bool
 	OpTime                      map[string]time.Duration
@@ -21,7 +22,7 @@ type GPUSession struct {
 }
 
 // CompileGPU reports that no GPU backend exists on this platform.
-func CompileGPU(*Graph) (*GPUSession, error) {
+func CompileGPU(*Graph, ...GPUOption) (*GPUSession, error) {
 	return nil, errors.New("graph: GPU sessions need darwin/arm64 (Metal)")
 }
 

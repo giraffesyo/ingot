@@ -160,6 +160,11 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		}, true
 	}
 	K := g.C * g.KH * g.KW
+	if c.s.bf16 {
+		if enc, ok := o.bf16GEMM(c, st, g, rs[0], rb, ro[0], bias != nil, n); ok {
+			return []*tensor.Tensor{out}, enc, true
+		}
+	}
 	direct := g.KH == 1 && g.KW == 1 && g.SH == 1 && g.SW == 1 && g.PT == 0 && g.PL == 0 && P == g.H*g.W
 	pc := P
 	var rc metal.Region
@@ -197,6 +202,51 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 			e.BinaryBcast(metal.OpAdd, ro[0], rb, ro[0], n, 1, n, P, g.M)
 		}
 		epi.encode(e, ro[0], n)
+	}, true
+}
+
+// bf16GEMM encodes a group-1 conv as bf16 weights × bf16 activations
+// (1x1: the input cast; else bf16 im2col), f32 output and epilogue.
+func (o convGPU) bf16GEMM(c *gpuCtx, st *step, g metal.ConvGeom, x, rb, out metal.Region, hasBias bool, n int) (func(*metal.Encoder), bool) {
+	wb, ok := c.bf16Const(st, 1)
+	if !ok {
+		return nil, false
+	}
+	K, P, epi := g.C*g.KH*g.KW, g.OH*g.OW, o.epi
+	at := func(r metal.Region, floats int) metal.Region { return metal.Region{B: r.B, Off: r.Off + 4*floats} }
+	bias := func(e *metal.Encoder) {
+		if hasBias {
+			e.BinaryBcast(metal.OpAdd, out, rb, out, n, 1, n, P, g.M)
+		}
+		epi.encode(e, out, n)
+	}
+	if g.KH == 1 && g.KW == 1 && g.SH == 1 && g.SW == 1 && g.PT == 0 && g.PL == 0 && P == g.H*g.W {
+		xb, ok := c.bf16Scratch(g.N * K * P)
+		if !ok {
+			return nil, false
+		}
+		return func(e *metal.Encoder) {
+			e.CastBF16(x, xb, g.N*K, P, P, P)
+			e.Gemm(metal.Gemm{M: g.M, N: P, K: K, A: wb, B: xb, C: out, ABF16: true, BF16: true,
+				Batch: g.N, StrideB: K * P, StrideC: g.M * P})
+			bias(e)
+		}, true
+	}
+	pc := min(P, max(256, 2*im2colBudget/K)) // bf16 columns: twice the pixels per budget
+	cols, ok := c.bf16Scratch(K * pc)
+	if !ok {
+		return nil, false
+	}
+	return func(e *metal.Encoder) {
+		for b := range g.N {
+			xb := at(x, b*g.C*g.H*g.W)
+			for p0 := 0; p0 < P; p0 += pc {
+				cn := min(pc, P-p0)
+				e.Im2ColNCHWBF16(xb, cols, g, p0, cn)
+				e.Gemm(metal.Gemm{M: g.M, N: cn, K: K, A: wb, B: cols, LDB: cn, C: at(out, b*g.M*P+p0), LDC: P, ABF16: true, BF16: true})
+			}
+		}
+		bias(e)
 	}, true
 }
 

@@ -29,7 +29,7 @@ func main() {
 	outPath := flag.String("out", "det_boxes.png", "annotated output PNG")
 	boxThr := flag.Float64("boxthr", 0.6, "box score threshold")
 	norec := flag.Bool("norec", false, "detection only")
-	device := flag.String("device", "cpu", "device for every model: cpu, gpu (Metal) or auto")
+	device := flag.String("device", "cpu", "device for every model: cpu, gpu (Metal), gpu-bf16 (faster, bf16 weight products) or auto")
 	flag.Parse()
 
 	img, err := loadImage(*inPath)
