@@ -16,6 +16,7 @@ type Tensor struct {
 	buf     []byte // len == cap == numel*dtype.Size() for owning tensors
 	offset  int    // element offset into buf for views
 	pool    *Pool  // non-nil if buf came from a pool
+	viewOf  *Pool  // non-nil for a view header taken from that pool (Pool.View)
 
 	dims [inlineRank]int
 	stds [inlineRank]int
@@ -139,13 +140,16 @@ func (t *Tensor) Storage() ([]byte, int) { return t.buf[:cap(t.buf)], t.offset *
 func (t *Tensor) Reshape(shape ...int) *Tensor {
 	s := Shape(shape)
 	if s.Numel() != t.Numel() {
-		panic(fmt.Sprintf("tensor: cannot reshape %v to %v", t.shape, s))
+		panic(fmt.Sprintf("tensor: cannot reshape %v to %v", t.shape, append(Shape(nil), s...)))
 	}
 	t.mustContiguous()
 	nt := &Tensor{dtype: t.dtype, buf: t.buf, offset: t.offset}
 	nt.setShape(shape)
 	return nt
 }
+
+// ViewOf is the pool t's header came from (Pool.View), or nil.
+func (t *Tensor) ViewOf() *Pool { return t.viewOf }
 
 // SharesBuffer reports whether t and u are views of the same storage.
 func (t *Tensor) SharesBuffer(u *Tensor) bool {

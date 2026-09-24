@@ -213,7 +213,8 @@ type runScratch struct {
 	vals   []*tensor.Tensor
 	live   []int
 	pooled []bool
-	alias  []int // view id → id of the value owning the shared buffer (-1: none)
+	hdr    []bool // value's header is a pool view header this run owns (Pool.PutView at last use)
+	alias  []int  // view id → id of the value owning the shared buffer (-1: none)
 	in     []*tensor.Tensor
 	ctx    ops.Ctx
 }
@@ -236,6 +237,7 @@ func (s *Session) run(feeds map[string]*tensor.Tensor, dec *ops.DecodeState) (ma
 			vals:   make([]*tensor.Tensor, s.nval),
 			live:   make([]int, s.nval),
 			pooled: make([]bool, s.nval),
+			hdr:    make([]bool, s.nval),
 			alias:  make([]int, s.nval),
 			in:     make([]*tensor.Tensor, 0, 8),
 		}
@@ -244,10 +246,11 @@ func (s *Session) run(feeds map[string]*tensor.Tensor, dec *ops.DecodeState) (ma
 		clear(sc.vals)
 		s.scratch.Put(sc)
 	}()
-	vals, live, pooled, alias := sc.vals, sc.live, sc.pooled, sc.alias
+	vals, live, pooled, alias, hdr := sc.vals, sc.live, sc.pooled, sc.alias, sc.hdr
 	copy(vals, s.constVals)
 	copy(live, s.uses) // remaining uses
 	clear(pooled)
+	clear(hdr)
 	for i := range alias {
 		alias[i] = -1
 	}
@@ -323,6 +326,16 @@ func (s *Session) run(feeds map[string]*tensor.Tensor, dec *ops.DecodeState) (ma
 			// Release (or lets the GC take them).
 			vals[id] = t
 			pooled[id] = !isOutput[id]
+			// A view header from the pool is recycled at the value's last
+			// use — unless an op passed its input pointer through, in which
+			// case ownership moves to the output (one header, one owner).
+			hdr[id] = !isOutput[id] && t.ViewOf() == s.pool
+			for _, inID := range st.in {
+				if inID >= 0 && vals[inID] == t && inID != id {
+					hdr[id] = hdr[inID] && !isOutput[id]
+					hdr[inID] = false
+				}
+			}
 			// A view output (Reshape & friends, or Identity's pass-through)
 			// shares its input's buffer. The buffer stays in the custody of
 			// its owning value (the root of a view chain): the view's own
@@ -350,6 +363,11 @@ func (s *Session) run(feeds map[string]*tensor.Tensor, dec *ops.DecodeState) (ma
 			live[id]--
 			if live[id] == 0 && pooled[id] {
 				s.pool.Put(vals[id])
+				vals[id] = nil
+			}
+			if live[id] == 0 && hdr[id] {
+				hdr[id] = false
+				s.pool.PutView(vals[id])
 				vals[id] = nil
 			}
 			if r := alias[id]; r >= 0 {

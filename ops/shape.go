@@ -21,8 +21,12 @@ func normAxis(axis, rank int) (int, error) {
 
 // copyView returns a zero-copy view of t with `shape`. The name survives from
 // when this copied: the executor's alias guard keeps a view's shared buffer
-// out of the pool while the view lives, so no copy is needed.
-func copyView(_ *Ctx, t *tensor.Tensor, shape tensor.Shape) *tensor.Tensor {
+// out of the pool while the view lives, so no copy is needed. With a pool,
+// the view's header comes from it (the executor recycles it).
+func copyView(ctx *Ctx, t *tensor.Tensor, shape tensor.Shape) *tensor.Tensor {
+	if ctx != nil && ctx.Pool != nil {
+		return ctx.Pool.View(t, shape...)
+	}
 	return t.Reshape(shape...)
 }
 
@@ -86,7 +90,7 @@ func (o *reshapeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error)
 		}
 	}
 	if shape.Numel() != x.Numel() {
-		return nil, o.n.Errorf("cannot reshape %v to %v", xs, shape)
+		return nil, o.n.Errorf("cannot reshape %v to %v", xs, append(tensor.Shape(nil), shape...))
 	}
 	return ctx.Out(copyView(ctx, x, shape)), nil
 }

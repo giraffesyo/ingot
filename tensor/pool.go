@@ -1,6 +1,7 @@
 package tensor
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -69,6 +70,42 @@ func (p *Pool) GetUninit(dt DType, shape ...int) *Tensor {
 	*t = Tensor{dtype: dt, buf: buf[:need], pool: p}
 	t.setShape(shape)
 	return t
+}
+
+// View returns a view of contiguous t with shape, like t.Reshape, but with
+// its header taken from the pool (return it with PutView once the view is
+// dead) — so executor-built views allocate nothing.
+func (p *Pool) View(t *Tensor, shape ...int) *Tensor {
+	if Shape(shape).Numel() != t.Numel() {
+		panic(fmt.Sprintf("tensor: cannot reshape %v to %v", t.shape, append(Shape(nil), shape...)))
+	}
+	t.mustContiguous()
+	p.mu.Lock()
+	var h *Tensor
+	if n := len(p.free); n > 0 {
+		h = p.free[n-1]
+		p.free[n-1] = nil
+		p.free = p.free[:n-1]
+	}
+	p.mu.Unlock()
+	if h == nil {
+		h = &Tensor{}
+	}
+	*h = Tensor{dtype: t.dtype, buf: t.buf, offset: t.offset, viewOf: p}
+	h.setShape(shape)
+	return h
+}
+
+// PutView recycles the header of a view from View (the storage stays with
+// its owner). Anything else is ignored. The view must not be used after.
+func (p *Pool) PutView(t *Tensor) {
+	if t == nil || t.viewOf != p {
+		return
+	}
+	*t = Tensor{}
+	p.mu.Lock()
+	p.free = append(p.free, t)
+	p.mu.Unlock()
 }
 
 // Put returns the tensor's storage — and its header — to the pool. The tensor
