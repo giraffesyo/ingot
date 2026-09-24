@@ -22,6 +22,7 @@ type Arg any
 var errUnavailable = errors.New("metal: not available on this platform")
 
 func Available() bool                                              { return false }
+func Supported() error                                             { return errUnavailable }
 func Open() (*Device, error)                                       { return nil, errUnavailable }
 func (d *Device) Compile(src, name string) (*Pipeline, error)      { return nil, errUnavailable }
 func (d *Device) NewBuffer(n int) (*Buffer, error)                 { return nil, errUnavailable }

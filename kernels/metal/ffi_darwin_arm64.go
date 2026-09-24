@@ -2,6 +2,7 @@ package metal
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"syscall"
@@ -28,7 +29,7 @@ func entersyscall()
 func exitsyscall()
 
 // callC switches SP to stack, loads x0..x7 from args, calls fn, restores SP
-// and returns x0 (ffi_darwin_arm64.s).
+// and returns x0; d0 lands in args[0] (ffi_darwin_arm64.s).
 func callC(fn uintptr, args *[8]uintptr, stack uintptr) uintptr
 
 // C code must not run on a small, movable goroutine stack: each call gets a
@@ -64,6 +65,20 @@ func call(fn uintptr, args ...uintptr) uintptr {
 	r := ccall(fn, &a, top)
 	cStacks.Put(st)
 	return r
+}
+
+// callF is call for a C function returning a double.
+func callF(fn uintptr, args ...uintptr) float64 {
+	if len(args) > 8 {
+		panic("metal: more than 8 integer arguments")
+	}
+	var a [8]uintptr
+	copy(a[:], args)
+	st := cStacks.Get().(*[]byte)
+	top := (uintptr(unsafe.Pointer(&(*st)[0])) + cStackSize) &^ 15
+	ccall(fn, &a, top)
+	cStacks.Put(st)
+	return math.Float64frombits(uint64(a[0]))
 }
 
 const rtldNow, rtldGlobal = 0x2, 0x8

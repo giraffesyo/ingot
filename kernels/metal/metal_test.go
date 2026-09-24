@@ -23,6 +23,9 @@ func le32(v uint32) []byte { return binary.LittleEndian.AppendUint32(nil, v) }
 
 func openDev(t testing.TB) *Device {
 	t.Helper()
+	if err := Supported(); err != nil {
+		t.Skip(err)
+	}
 	d, err := Open()
 	if err != nil {
 		t.Skip(err)

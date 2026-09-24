@@ -49,8 +49,8 @@ type GPUSession struct {
 	// FlushedBy names the CPU nodes that forced mid-graph flushes.
 	FlushedBy []string
 	// Profile, when set, flushes after every GPU node and accumulates its
-	// wall time (encode + GPU) per op type in OpTime — for finding slow
-	// kernels, not for production runs.
+	// GPU execution time per op type (OpTime) and per node (NodeTime) —
+	// for finding slow kernels, not for production runs.
 	Profile  bool
 	OpTime   map[string]time.Duration
 	NodeTime map[*Node]time.Duration
@@ -59,6 +59,9 @@ type GPUSession struct {
 // CompileGPU optimizes g and compiles it for the GPU (darwin/arm64 with
 // Metal); nodes without a GPU implementation run their CPU ops.
 func CompileGPU(g *Graph) (*GPUSession, error) {
+	if err := metal.Supported(); err != nil {
+		return nil, err
+	}
 	dev, err := metal.Open()
 	if err != nil {
 		return nil, err
@@ -253,7 +256,6 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		if g := s.gops[si]; g != nil {
 			var enc func(e *metal.Encoder)
 			var ok bool
-			t0 := time.Now()
 			if outs, enc, ok = g.prepare(gctx, st, in); ok {
 				s.stream.Encode(enc)
 				placed = true
@@ -266,8 +268,8 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 					if s.OpTime == nil {
 						s.OpTime, s.NodeTime = map[string]time.Duration{}, map[*Node]time.Duration{}
 					}
-					s.OpTime[st.node.OpType] += time.Since(t0)
-					s.NodeTime[st.node] += time.Since(t0)
+					s.OpTime[st.node.OpType] += s.stream.GPUTime()
+					s.NodeTime[st.node] += s.stream.GPUTime()
 				}
 			}
 		}
