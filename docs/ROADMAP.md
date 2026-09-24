@@ -300,11 +300,20 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       diffusers, < 1 8-bit level); cmd/qwenimage; peak RSS 35.8 GB
 - [x] kernels/metal: cgo-free Metal FFI (entersyscall + private C stack),
       runtime MSL compile, shared buffers, dispatch; charter amended
-- [x] GPU GEMM baseline (simdgroup f32, correct incl. ragged)
-- [ ] GPU GEMM at speed; attention/norm/elementwise MSL kernels; executor
-      backend encoding a whole DiT step into one command buffer
-- [ ] CPU perf: per-step time at 1024² (0.69 TFLOPS at 256 tokens), step 1-2
-      warm-up, peak memory (text encoder not fully released before DiT)
+- [x] GPU GEMM on Metal 4 matmul2d tensor ops: 7.4-7.6 TFLOPS f32
+      activations, 20.6 bf16 (simdgroup baseline was 0.7)
+- [x] kernels/metal: batched command buffers, zero-copy mmap'd weights,
+      strided/accumulating GEMM, LN/RMS/RoPE/softmax/SiLU/conv kernels
+- [x] whole pipeline on the GPU: text encoder (0.8 s), DiT prefix + steps,
+      VAE (1024² decode 20 s -> 4.7 s); peak RSS 0.9 GB (CPU path 36 GB);
+      parity 2.5e-3 image; fast mode (bf16 GEMM inputs) 1024² 4.57 s/step
+      ≈ the PyTorch MPS reference
+- [ ] GPU flash attention (matmul2d on cooperative tensors) — S is still
+      materialised per head (~1 s of every 4.6 s step at 1024²)
+- [ ] fuse the remaining bf16 casts into their producers (LN, RoPE, SiLU)
+- [ ] executor-level GPU placement for ONNX graphs (today the Metal path is
+      model-level, in models/qwenimage)
+- [ ] CPU perf: per-step time at 1024² (0.69 TFLOPS at 256 tokens)
 - [ ] editing mode: Qwen3-VL vision tower (27-layer ViT, deepstack), VAE
       encoder, condition-image layout
 - [ ] RMSNorm / RoPE / adaLN fused ops (profile first)
