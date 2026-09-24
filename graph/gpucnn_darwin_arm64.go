@@ -178,12 +178,15 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	}
 	at := func(r metal.Region, floats int) metal.Region { return metal.Region{B: r.B, Off: r.Off + 4*floats} }
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+		if direct { // one GEMM batched over images, weights shared
+			e.Gemm(metal.Gemm{M: g.M, N: P, K: K, A: rs[1], B: rs[0], C: ro[0],
+				Batch: g.N, StrideB: g.C * g.H * g.W, StrideC: g.M * P})
+		}
 		for b := range g.N {
-			xb, yb := at(rs[0], b*g.C*g.H*g.W), b*g.M*P
 			if direct {
-				e.Gemm(metal.Gemm{M: g.M, N: P, K: K, A: rs[1], B: xb, C: at(ro[0], yb)})
-				continue
+				break
 			}
+			xb, yb := at(rs[0], b*g.C*g.H*g.W), b*g.M*P
 			for p0 := 0; p0 < P; p0 += pc {
 				cn := min(pc, P-p0)
 				e.Im2ColNCHW(xb, rc, g, p0, cn)

@@ -475,3 +475,38 @@ func TestBF16OutputVariants(t *testing.T) {
 		close("rmsnorm_rope", bf(q16, i), f32s(q2.Bytes())[i])
 	}
 }
+
+// TestGemmBatched: one dispatch over a batch, A shared (stride 0) and B/C
+// strided, NN and NT, vs the float64 oracle.
+func TestGemmBatched(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(8, 8))
+	const batch, M, N, K = 3, 70, 90, 45
+	for _, nt := range []bool{false, true} {
+		a, b, c := buf(t, d, M*K), buf(t, d, batch*K*N), buf(t, d, batch*M*N)
+		af, bf := fill(r, a), fill(r, b)
+		if err := d.Run(func(e *Encoder) {
+			e.Gemm(Gemm{M: M, N: N, K: K, A: a.At(0), B: b.At(0), C: c.At(0), TransB: nt,
+				Batch: batch, StrideB: K * N, StrideC: M * N})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for z := range batch {
+			for i := range M {
+				for j := range N {
+					var want float64
+					for k := range K {
+						bv := bf[z*K*N+k*N+j]
+						if nt {
+							bv = bf[z*K*N+j*K+k]
+						}
+						want += float64(af[i*K+k]) * float64(bv)
+					}
+					if got := float64(f32s(c.Bytes())[z*M*N+i*N+j]); math.Abs(got-want) > 1e-4*(1+math.Abs(want)) {
+						t.Fatalf("nt=%v [%d,%d,%d] = %g, want %g", nt, z, i, j, got, want)
+					}
+				}
+			}
+		}
+	}
+}

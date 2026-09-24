@@ -387,12 +387,8 @@ func (o matmulGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	gelu := o.gelu
 	nout := out.Numel()
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
-		for bi := range batch {
-			e.Gemm(metal.Gemm{M: M, N: N, K: K,
-				A: metal.Region{B: rs[0].B, Off: rs[0].Off + 4*bi*M*K},
-				B: metal.Region{B: rs[1].B, Off: rs[1].Off + 4*bi*K*N},
-				C: metal.Region{B: ro[0].B, Off: ro[0].Off + 4*bi*M*N}})
-		}
+		e.Gemm(metal.Gemm{M: M, N: N, K: K, A: rs[0], B: rs[1], C: ro[0],
+			Batch: batch, StrideA: M * K, StrideB: K * N, StrideC: M * N})
 		rows := nout / N
 		if bias != nil {
 			e.AddBias(ro[0], rs[2], rows, N, N)
@@ -795,7 +791,7 @@ func (o sdpaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		oshape = []int{H, T, dh}
 	}
 	out := c.out(oshape...)
-	s := c.out(T, Tk) // one head's scores, reused head by head
+	s := c.out(H, T, Tk) // one image's scores, all heads
 	ro, ok := c.regions(out, s)
 	if !ok {
 		c.release(out, s)
@@ -806,43 +802,47 @@ func (o sdpaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	// CPU writers only after a flush).
 	c.release(s)
 	at := func(r metal.Region, elems int) metal.Region { return metal.Region{B: r.B, Off: r.Off + 4*elems} }
-	o2 := o
+	// Per image, each product is one GEMM batched over heads: per-layout
+	// (image base, head stride, row stride) in elements.
+	type lay struct{ base, head, ld int }
+	var lq, lk, lv, lo lay
+	if o.aLay == 1 {
+		lq = lay{T * H * dh, dh, H * dh}
+	} else {
+		lq = lay{H * T * dh, T * dh, dh}
+	}
+	switch o.bLay {
+	case 1:
+		lk = lay{Tk * H * dh, dh, H * dh}
+	case 2:
+		lk = lay{H * Tk * dh, Tk * dh, dh}
+	default: // Kᵀ stored [dh, Tk]
+		lk = lay{H * dh * Tk, dh * Tk, Tk}
+	}
+	if o.vLay == 1 {
+		lv = lay{Tk * H * dh, dh, H * dh}
+	} else {
+		lv = lay{H * Tk * dh, Tk * dh, dh}
+	}
+	if o.strideOut {
+		lo = lay{T * H * dh, dh, H * dh}
+	} else {
+		lo = lay{H * T * dh, T * dh, dh}
+	}
+	transB, scale, masked := o.bLay != 0, o.scale, mask != nil
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		for b := range B {
-			for h := range H {
-				var qo, lq, ko, lk, vo, lv, oo, lo int
-				if o2.aLay == 1 {
-					qo, lq = (b*T*H+h)*dh, H*dh
-				} else {
-					qo, lq = (b*H+h)*T*dh, dh
+			e.Gemm(metal.Gemm{M: T, N: Tk, K: dh, A: at(rs[0], b*lq.base), LDA: lq.ld, B: at(rs[1], b*lk.base), LDB: lk.ld,
+				C: ro[1], TransB: transB, Batch: H, StrideA: lq.head, StrideB: lk.head, StrideC: T * Tk})
+			if masked { // the [T, Tk] mask repeats per head
+				for h := range H {
+					e.SoftmaxRowsMasked(at(ro[1], h*T*Tk), rs[3], T, Tk, Tk, Tk, scale)
 				}
-				switch o2.bLay {
-				case 1:
-					ko, lk = (b*Tk*H+h)*dh, H*dh
-				case 2:
-					ko, lk = (b*H+h)*Tk*dh, dh
-				default: // Kᵀ stored [dh, Tk]
-					ko, lk = (b*H+h)*dh*Tk, Tk
-				}
-				if o2.vLay == 1 {
-					vo, lv = (b*Tk*H+h)*dh, H*dh
-				} else {
-					vo, lv = (b*H+h)*Tk*dh, dh
-				}
-				if o2.strideOut {
-					oo, lo = (b*T*H+h)*dh, H*dh
-				} else {
-					oo, lo = (b*H+h)*T*dh, dh
-				}
-				e.Gemm(metal.Gemm{M: T, N: Tk, K: dh, A: at(rs[0], qo), LDA: lq, B: at(rs[1], ko), LDB: lk, C: ro[1],
-					TransB: o2.bLay != 0})
-				if mask != nil {
-					e.SoftmaxRowsMasked(ro[1], rs[3], T, Tk, Tk, Tk, o2.scale)
-				} else {
-					e.SoftmaxRows(ro[1], T, Tk, Tk, o2.scale)
-				}
-				e.Gemm(metal.Gemm{M: T, N: dh, K: Tk, A: ro[1], B: at(rs[2], vo), LDB: lv, C: at(ro[0], oo), LDC: lo})
+			} else {
+				e.SoftmaxRows(ro[1], H*T, Tk, Tk, scale)
 			}
+			e.Gemm(metal.Gemm{M: T, N: dh, K: Tk, A: ro[1], B: at(rs[2], b*lv.base), LDB: lv.ld, C: at(ro[0], b*lo.base), LDC: lo.ld,
+				Batch: H, StrideA: T * Tk, StrideB: lv.head, StrideC: lo.head})
 		}
 	}, true
 }
@@ -885,7 +885,7 @@ func (o mhaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Ten
 	if !ok {
 		return nil, nil, false
 	}
-	out, sc := c.out(B, T, H, dh), c.out(T, T)
+	out, sc := c.out(B, T, H, dh), c.out(H, T, T)
 	ro, ok := c.regions(out, sc)
 	if !ok {
 		c.release(out, sc)
@@ -893,23 +893,23 @@ func (o mhaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Ten
 	}
 	c.release(sc) // scratch: see sdpaGPU
 	at := func(r metal.Region, elems int) metal.Region { return metal.Region{B: r.B, Off: r.Off + 4*elems} }
-	packed, scale := o.packed, o.scale
+	// Per image, one GEMM batched over heads per product: the head stride
+	// is dh within the packed rows, or a whole [T, dh] plane.
+	var base, kvOff, hs int
+	if o.packed {
+		base, kvOff, hs = T*ld, H*dh, dh
+	} else {
+		base, kvOff, hs = H*T*dh, B*H*T*dh, T*dh
+	}
+	scale := o.scale
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		for b := range B {
-			for h := range H {
-				var qo, ko, vo int
-				if packed {
-					qo = b*T*ld + h*dh
-					ko, vo = qo+H*dh, qo+2*H*dh
-				} else {
-					plane := T * dh
-					qo = (b*H + h) * plane
-					ko, vo = qo+B*H*plane, qo+2*B*H*plane
-				}
-				e.Gemm(metal.Gemm{M: T, N: T, K: dh, A: at(rx[0], qo), LDA: ld, B: at(rx[0], ko), LDB: ld, C: ro[1], TransB: true})
-				e.SoftmaxRows(ro[1], T, T, T, scale)
-				e.Gemm(metal.Gemm{M: T, N: dh, K: T, A: ro[1], B: at(rx[0], vo), LDB: ld, C: at(ro[0], (b*T*H+h)*dh), LDC: H * dh})
-			}
+			q := b * base
+			e.Gemm(metal.Gemm{M: T, N: T, K: dh, A: at(rx[0], q), LDA: ld, B: at(rx[0], q+kvOff), LDB: ld, C: ro[1], TransB: true,
+				Batch: H, StrideA: hs, StrideB: hs, StrideC: T * T})
+			e.SoftmaxRows(ro[1], H*T, T, T, scale)
+			e.Gemm(metal.Gemm{M: T, N: dh, K: T, A: ro[1], B: at(rx[0], q+2*kvOff), LDB: ld, C: at(ro[0], b*T*H*dh), LDC: H * dh,
+				Batch: H, StrideA: T * T, StrideB: hs, StrideC: dh})
 		}
 	}, true
 }
