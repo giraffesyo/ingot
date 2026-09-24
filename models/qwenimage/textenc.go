@@ -155,3 +155,68 @@ func (te *TextEncoder) Build(T, drop, layers int) (g *graph.Graph, err error) {
 	b.Output("hidden", b.Slice(x, 0, int64(drop), int64(T)))
 	return b.Build()
 }
+
+// TextInputs is one prompt for the language model, optionally with images.
+type TextInputs struct {
+	IDs []int64
+	// ImagePositions lists the image-placeholder tokens in order;
+	// ImageEmbeds [len, hidden] replaces their embeddings and Deepstack[i]
+	// [len, hidden] is added to their hidden states after decoder layer i.
+	ImagePositions []int
+	ImageEmbeds    *tensor.Tensor
+	Deepstack      []*tensor.Tensor
+	// Positions are the M-RoPE (t, h, w) positions; nil means text-only
+	// (every axis at the token index).
+	Positions [][3]int
+}
+
+// mropeAxis is interleaved M-RoPE's axis for rotary frequency i
+// (mrope_section [24, 20, 20]): frequencies 1, 4, … 58 follow the height
+// position, 2, 5, … 59 the width, the rest time.
+func mropeAxis(i int) int {
+	if i < 60 {
+		switch i % 3 {
+		case 1:
+			return 1
+		case 2:
+			return 2
+		}
+	}
+	return 0
+}
+
+// MRoPEPositions is Qwen3-VL's get_rope_index for one prompt: text tokens
+// advance one position on every axis; each run of image tokens (grid
+// gh×gw merged tokens, in order) takes (start, start+row, start+col) and
+// then advances the position by max(gh, gw).
+func MRoPEPositions(ids []int64, imageToken int64, grids [][2]int) ([][3]int, error) {
+	pos := make([][3]int, 0, len(ids))
+	cur, img := 0, 0
+	for i := 0; i < len(ids); {
+		if ids[i] != imageToken {
+			pos = append(pos, [3]int{cur, cur, cur})
+			cur++
+			i++
+			continue
+		}
+		if img >= len(grids) {
+			return nil, fmt.Errorf("qwenimage: more image runs than image grids")
+		}
+		gh, gw := grids[img][0], grids[img][1]
+		for r := range gh {
+			for c := range gw {
+				if i >= len(ids) || ids[i] != imageToken {
+					return nil, fmt.Errorf("qwenimage: image %d: fewer than %d placeholder tokens", img, gh*gw)
+				}
+				pos = append(pos, [3]int{cur, cur + r, cur + c})
+				i++
+			}
+		}
+		cur += max(gh, gw)
+		img++
+	}
+	if img != len(grids) {
+		return nil, fmt.Errorf("qwenimage: %d image grids but %d image runs", len(grids), img)
+	}
+	return pos, nil
+}

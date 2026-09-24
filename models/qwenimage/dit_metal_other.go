@@ -43,3 +43,7 @@ func (*MetalVAE) Decode(*tensor.Tensor, int, int) (*tensor.Tensor, error) {
 	return nil, errors.New("unavailable")
 }
 func (*MetalVAE) Close() {}
+
+func (*MetalTextEncoder) EncodeMM(TextInputs, int, int) (*tensor.Tensor, error) {
+	return nil, errors.New("unavailable")
+}

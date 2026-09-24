@@ -191,6 +191,14 @@ kernel void gather_rows(device const float* src [[buffer(0)]], device float* dst
 	dst[i.y * p.z + i.x] = src[idx[i.y] * p.y + i.x];
 }
 
+// dst[idx[r], :] += src[r, :] over cols; p = (cols, ldd, lds, 0).
+kernel void scatter_add_rows(device float* dst [[buffer(0)]], device const float* src [[buffer(1)]],
+                             device const uint* idx [[buffer(2)]], constant uint4& p [[buffer(3)]],
+                             uint2 i [[thread_position_in_grid]]) {
+	if (i.x >= p.x) return;
+	dst[idx[i.y] * p.y + i.x] += src[i.y * p.z + i.x];
+}
+
 // out[r, c] = silu(a[r, c]) · b[r, c] over [rows, cols] with row strides
 // p = (cols, lda, ldb, ldo).
 template <typename T>
@@ -217,6 +225,7 @@ var nnPSO struct {
 	once                                                               sync.Once
 	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
 	rmsRows, softmaxBF16, layerNormBF16, rmsRopeBF16, siluMulBF16      *Pipeline
+	scatterAdd                                                         *Pipeline
 	err                                                                error
 }
 
@@ -230,7 +239,7 @@ func (d *Device) nnPipelines() error {
 			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather},
 			{"rmsnorm_rows", &nnPSO.rmsRows}, {"softmax_rows_bf16", &nnPSO.softmaxBF16},
 			{"layernorm_mod_bf16", &nnPSO.layerNormBF16}, {"rmsnorm_rope_bf16", &nnPSO.rmsRopeBF16},
-			{"silu_mul_bf16", &nnPSO.siluMulBF16}} {
+			{"silu_mul_bf16", &nnPSO.siluMulBF16}, {"scatter_add_rows", &nnPSO.scatterAdd}} {
 			if *k.dst, nnPSO.err = d.Compile(nnSrc, k.name); nnPSO.err != nil {
 				return
 			}
@@ -350,6 +359,14 @@ func (e *Encoder) SoftmaxRowsMasked(x, mask Region, rows, cols, ld, ldm int, sca
 func (e *Encoder) GatherRows(src, dst, idx Region, rows, cols, lds, ldd int) {
 	if e.ready(nnPSO.gather) {
 		e.Dispatch(nnPSO.gather, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, src, dst, idx, u32s(cols, lds, ldd, 0))
+	}
+}
+
+// ScatterAddRows: dst[idx[r]] += src[r] for r < rows (idx: uint32 rows of
+// dst, distinct).
+func (e *Encoder) ScatterAddRows(dst, src, idx Region, rows, cols, ldd, lds int) {
+	if e.ready(nnPSO.scatterAdd) {
+		e.Dispatch(nnPSO.scatterAdd, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, dst, src, idx, u32s(cols, ldd, lds, 0))
 	}
 }
 

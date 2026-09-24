@@ -202,3 +202,71 @@ func TestMetalVAEParity(t *testing.T) {
 	}
 	compare(t, "image (GPU VAE)", img.F32(), ref.tensor(t, "image").F32(), 1e-3)
 }
+
+// TestMetalTextEncoderMM: the GPU language model over the reference edit
+// prompt (image placeholders filled by the Go vision tower, deepstack,
+// M-RoPE) against the pipeline's prompt embeddings. Full model.
+func TestMetalTextEncoderMM(t *testing.T) {
+	fullModel(t)
+	if !metal.Available() {
+		t.Skip("no Metal device")
+	}
+	ref := loadRef(t, "edit")
+	dir := filepath.Join(snapshotDir(t), "text_encoder")
+	vcfg, err := LoadVisionConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadTextConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := safetensors.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Close()
+	grid := ref.tensor(t, "image_grid_thw").I64()
+	gh, gw := int(grid[1]), int(grid[2])
+	vg, err := BuildVision(vcfg, set, gh, gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs, err := graph.Compile(vg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vis, err := vs.Run(map[string]*tensor.Tensor{"pixels": ref.tensor(t, "pixel_values")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := ref.tensor(t, "input_ids").I64()
+	const imageToken = 151655
+	var imgPos []int
+	for i, id := range ids {
+		if id == imageToken {
+			imgPos = append(imgPos, i)
+		}
+	}
+	pos, err := MRoPEPositions(ids, imageToken, [][2]int{{gh / 2, gw / 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewMetalTextEncoder(cfg, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	const drop = 14
+	got, err := m.EncodeMM(TextInputs{IDs: ids, ImagePositions: imgPos, ImageEmbeds: vis["merged"],
+		Deepstack: []*tensor.Tensor{vis["deep0"], vis["deep1"], vis["deep2"]}, Positions: pos}, drop, cfg.NumHiddenLayers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ref.tensor(t, "prompt_embeds")
+	var maxw float64
+	for _, v := range want.F32() {
+		maxw = max(maxw, float64(abs32(v)))
+	}
+	compare(t, "edit prompt embeds (GPU LM + Go vision)", got.F32(), want.F32(), 3e-4*maxw)
+}

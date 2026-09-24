@@ -310,6 +310,18 @@ func TestSoftmaxMaskedGather(t *testing.T) {
 			near(t, "masked softmax", xf[i*cols+j], want, 1e-5)
 		}
 	}
+	// ScatterAddRows back into a copy: rows 8, 0, 4 of acc += g's rows.
+	acc := buf(t, d, rows*cols)
+	if err := d.Run(func(e *Encoder) { e.ScatterAddRows(acc.At(0), g.At(0), idx.At(0), 3, cols, cols, cols) }); err != nil {
+		t.Fatal(err)
+	}
+	for r, dst := range []int{8, 0, 4} {
+		for c := range cols {
+			if f32s(acc.Bytes())[dst*cols+c] != f32s(g.Bytes())[r*cols+c] {
+				t.Fatalf("scatter-add row %d col %d", dst, c)
+			}
+		}
+	}
 	gf := f32s(g.Bytes())
 	for r, src := range []int{8, 0, 4} {
 		for c := range cols {

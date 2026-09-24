@@ -2,6 +2,8 @@ package qwenimage
 
 import (
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +13,7 @@ import (
 	"github.com/giraffesyo/ingot/graph"
 	"github.com/giraffesyo/ingot/safetensors"
 	"github.com/giraffesyo/ingot/tensor"
+	"github.com/giraffesyo/ingot/tokenizer"
 )
 
 // fullModel skips unless QWENIMAGE_FULL=1: the full-size tests pack the
@@ -147,4 +150,60 @@ func generateParity(t *testing.T, device string) {
 	}
 	t.Logf("peak RSS %.1f GB", peakRSSGB())
 	compare(t, "image", res.Float.F32(), ref.tensor(t, "image").F32(), 5e-3)
+}
+
+// TestEditPromptIDs: the edit chat template, pad-expanded for the
+// reference image, tokenises to the processor's input_ids.
+func TestEditPromptIDs(t *testing.T) {
+	ref := loadRef(t, "edit")
+	tok, err := tokenizer.Load(filepath.Join(snapshotDir(t), "processor", "tokenizer.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grid := ref.tensor(t, "image_grid_thw").I64()
+	ids, err := tok.Encode(promptText(ref.Meta["prompt"].(string), []condition{{gh: int(grid[1]), gw: int(grid[2])}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ref.tensor(t, "input_ids").I64()
+	if len(ids) != len(want) {
+		t.Fatalf("%d ids, want %d", len(ids), len(want))
+	}
+	for i := range ids {
+		if ids[i] != want[i] {
+			t.Fatalf("ids[%d] = %d, want %d", i, ids[i], want[i])
+		}
+	}
+}
+
+// TestEditParity: full image editing from the prompt and the condition PNG
+// (GPU), with the reference noise, against diffusers' output.
+func TestEditParity(t *testing.T) {
+	fullModel(t)
+	if !metalAvailable() {
+		t.Skip("edit mode needs the GPU text encoder")
+	}
+	ref := loadRef(t, "edit")
+	f, err := os.Open(filepath.Join(refDir, "edit_cond.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := png.Decode(f)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Generate(snapshotDir(t), Options{
+		Prompt:     ref.Meta["prompt"].(string),
+		Images:     []image.Image{img},
+		Resolution: int(ref.Meta["resolution"].(float64)),
+		Steps:      int(ref.Meta["steps"].(float64)),
+		Latents:    ref.tensor(t, "latents0"),
+		Device:     "gpu",
+		Log:        t.Logf,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compare(t, "edit image", res.Float.F32(), ref.tensor(t, "image").F32(), 1e-2)
 }
