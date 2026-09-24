@@ -353,3 +353,48 @@ func TestGemmBF16Activations(t *testing.T) {
 		}
 	}
 }
+
+func TestRMSNormRowsAndRopeHalf(t *testing.T) {
+	d := prepared(t)
+	r := rand.New(rand.NewPCG(8, 8))
+	const rows, cols = 3, 4096
+	x, y, w := buf(t, d, rows*cols), buf(t, d, rows*cols), buf(t, d, cols)
+	xf, wf := fill(r, x), fill(r, w)
+	const T, heads, dh = 2, 3, 128
+	q, qw, cs, sn := buf(t, d, T*heads*dh), buf(t, d, dh), buf(t, d, T*dh/2), buf(t, d, T*dh/2)
+	qf, qwf, cf, sf := fill(r, q), fill(r, qw), fill(r, cs), fill(r, sn)
+	q0 := append([]float32(nil), qf...)
+	if err := d.Run(func(e *Encoder) {
+		e.RMSNormRows(x.At(0), y.At(0), w.At(0), rows, cols, cols, cols, 1e-6)
+		e.RMSNormRoPEMode(q.At(0), qw.At(0), cs.At(0), sn.At(0), T, heads, dh, heads*dh, 1e-6, RopeHalf)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	yf := f32s(y.Bytes())
+	for rr := range rows {
+		var ss float64
+		for c := range cols {
+			ss += float64(xf[rr*cols+c]) * float64(xf[rr*cols+c])
+		}
+		inv := 1 / math.Sqrt(ss/cols+1e-6)
+		for c := range cols {
+			near(t, "rmsnorm rows", yf[rr*cols+c], float64(xf[rr*cols+c])*inv*float64(wf[c]), 1e-4)
+		}
+	}
+	for tt := range T {
+		for h := range heads {
+			base := (tt*heads + h) * dh
+			var ss float64
+			for i := range dh {
+				ss += float64(q0[base+i]) * float64(q0[base+i])
+			}
+			inv := 1 / math.Sqrt(ss/dh+1e-6)
+			n := func(i int) float64 { return float64(q0[base+i]) * inv * float64(qwf[i]) }
+			for j := range dh / 2 {
+				c, s := float64(cf[tt*dh/2+j]), float64(sf[tt*dh/2+j])
+				near(t, "rope half lo", qf[base+j], n(j)*c-n(j+dh/2)*s, 1e-4)
+				near(t, "rope half hi", qf[base+j+dh/2], n(j+dh/2)*c+n(j)*s, 1e-4)
+			}
+		}
+	}
+}
