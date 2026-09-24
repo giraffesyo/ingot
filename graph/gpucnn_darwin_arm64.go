@@ -44,6 +44,19 @@ func (p gpuEpilogue) encode(e *metal.Encoder, r metal.Region, n int) {
 	}
 }
 
+// metal is the epilogue as the kernels' fused form.
+func (p gpuEpilogue) metal() metal.ConvEpilogue {
+	return metal.ConvEpilogue{Act: p.act, Alpha: p.alpha, Beta: p.beta, Scale: p.scale, Shift: p.shift}
+}
+
+// biasAct encodes a conv output's per-channel bias (rb, may be the zero
+// Region) and epilogue as one pass — none if there is neither.
+func (p gpuEpilogue) biasAct(e *metal.Encoder, out, rb metal.Region, n, P, M int) {
+	if rb.B != nil || p.active {
+		e.BiasAct(out, rb, n, P, M, p.metal())
+	}
+}
+
 // samePads resolves ONNX auto_pad for one spatial dim (eff = the dilated
 // kernel extent): (before, after) or ok=false for an unknown mode.
 func samePads(mode string, in, eff, stride int, pads [2]int) ([2]int, bool) {
@@ -139,8 +152,7 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		// Four outputs per thread over a register window of the input row:
 		// 1.2x the generic direct kernel on PP-OCR's 5x5 depthwise convs.
 		return []*tensor.Tensor{out}, func(e *metal.Encoder) {
-			e.ConvDepthwise(rs[0], rs[1], rb, ro[0], g)
-			epi.encode(e, ro[0], n)
+			e.ConvDepthwise(rs[0], rs[1], rb, ro[0], g, epi.metal())
 		}, true
 	}
 	if g.Group != 1 {
@@ -158,14 +170,13 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		// matrix units, epilogue fused) beat the f32 blocked kernel 1.25x
 		// and bf16 im2col 1.7x on DBNet's [24,96,3,3] at 240².
 		if wb, ok := c.bf16Const(st, 1); ok {
-			ep := metal.ConvEpilogue{Act: epi.act, Alpha: epi.alpha, Beta: epi.beta, Scale: epi.scale, Shift: epi.shift}
+			ep := epi.metal()
 			return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.ConvIGEMM(rs[0], wb, rb, ro[0], g, true, ep) }, true
 		}
 	}
 	if g.M <= 32 && g.KH*g.KW > 1 {
 		return []*tensor.Tensor{out}, func(e *metal.Encoder) {
-			e.ConvDirectBlocked(rs[0], rs[1], rb, ro[0], g)
-			epi.encode(e, ro[0], n)
+			e.ConvDirectBlocked(rs[0], rs[1], rb, ro[0], g, epi.metal())
 		}, true
 	}
 	K := g.C * g.KH * g.KW
@@ -207,10 +218,7 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 				e.Gemm(metal.Gemm{M: g.M, N: cn, K: K, A: rs[1], B: rc, LDB: cn, C: at(ro[0], yb+p0), LDC: P})
 			}
 		}
-		if bias != nil {
-			e.BinaryBcast(metal.OpAdd, ro[0], rb, ro[0], n, 1, n, P, g.M)
-		}
-		epi.encode(e, ro[0], n)
+		epi.biasAct(e, ro[0], rb, n, P, g.M)
 	}, true
 }
 
@@ -223,12 +231,7 @@ func (o convGPU) bf16GEMM(c *gpuCtx, st *step, g metal.ConvGeom, x, rb, out meta
 	}
 	K, P, epi := g.C*g.KH*g.KW, g.OH*g.OW, o.epi
 	at := func(r metal.Region, floats int) metal.Region { return metal.Region{B: r.B, Off: r.Off + 4*floats} }
-	bias := func(e *metal.Encoder) {
-		if hasBias {
-			e.BinaryBcast(metal.OpAdd, out, rb, out, n, 1, n, P, g.M)
-		}
-		epi.encode(e, out, n)
-	}
+	bias := func(e *metal.Encoder) { epi.biasAct(e, out, rb, n, P, g.M) }
 	if g.KH == 1 && g.KW == 1 && g.SH == 1 && g.SW == 1 && g.PT == 0 && g.PL == 0 && P == g.H*g.W {
 		xb, ok := c.bf16Scratch(g.N * K * P)
 		if !ok {
@@ -539,10 +542,10 @@ func (o convTransposeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*
 	blocked := g.M/g.Group >= 8
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		if blocked {
-			e.ConvTransposeBlocked(rs[0], rs[1], rb, ro[0], g)
-		} else {
-			e.ConvTransposeDirect(rs[0], rs[1], rb, ro[0], g)
+			e.ConvTransposeBlocked(rs[0], rs[1], rb, ro[0], g, epi.metal())
+			return
 		}
+		e.ConvTransposeDirect(rs[0], rs[1], rb, ro[0], g)
 		epi.encode(e, ro[0], n)
 	}, true
 }

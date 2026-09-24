@@ -9,11 +9,39 @@ import (
 	"sync"
 )
 
+// actFnSrc is the activation shared by the elementwise and convolution
+// kernels: act(v) for the Act* codes (alpha/beta parameterise hardsigmoid,
+// clip, leakyrelu).
+const actFnSrc = `
+static float erf_act(float x) {
+	const float z = fabs(x), t = 1.0f / (1.0f + 0.5f * z);
+	const float r = t * exp(-z * z - 1.26551223f + t * (1.00002368f + t * (0.37409196f + t * (0.09678418f +
+		t * (-0.18628806f + t * (0.27886807f + t * (-1.13520398f + t * (1.48851587f +
+		t * (-0.82215223f + t * 0.17087277f)))))))));
+	return x >= 0 ? 1.0f - r : r - 1.0f;
+}
+static float act_fn(float v, uint act, float alpha, float beta) {
+	switch (act) {
+	case 1: return max(v, 0.0f);                                              // relu
+	case 2: return v * clamp(v / 6.0f + 0.5f, 0.0f, 1.0f);                    // hardswish
+	case 3: return clamp(alpha * v + beta, 0.0f, 1.0f);                       // hardsigmoid
+	case 4: return 1.0f / (1.0f + exp(-v));                                   // sigmoid
+	case 5: return v / (1.0f + exp(-v));                                      // silu
+	case 6: return min(max(v, alpha), beta);                                  // clip
+	case 7: return v >= 0 ? v : alpha * v;                                    // leakyrelu
+	case 8: return 0.5f * v * (1.0f + erf_act(v * 0.70710678f));              // gelu (erf)
+	case 9: return 0.5f * v * (1.0f + precise::tanh(0.7978845608f * (v + 0.044715f * v * v * v))); // gelu (tanh)
+	default: return v;
+	}
+}
+`
+
 // NCHW convolution, pooling and activation kernels for executing ONNX
 // graphs on the GPU (f32).
 const cnnSrc = `
 #include <metal_stdlib>
 using namespace metal;
+` + actFnSrc + `
 
 // Conv geometry: a = (C, H, W, OW), b = (KH, KW, SH, SW), c = (DH, DW, PT, PL).
 
@@ -74,13 +102,14 @@ kernel void conv_direct(device const float* x [[buffer(0)]], device const float*
 // Depthwise convolution (group == C == M), kernel width ≤ 7: each thread
 // computes DWX horizontally adjacent outputs of one row, loading each input
 // row segment once into registers and sharing it across them and across
-// the kernel's taps. Grid (ceil(OW/DWX), OH, N·C); e = (hasBias, 0, 0, OH).
+// the kernel's taps. Grid (ceil(OW/DWX), OH, N·C); e = (hasBias, act, 0, OH),
+// q = (alpha, beta, scale, shift): the fused epilogue.
 #define DWX 4
 kernel void conv_dw(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
                     device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
                     constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
                     constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
-                    uint3 i [[thread_position_in_grid]]) {
+                    constant float4& q [[buffer(8)]], uint3 i [[thread_position_in_grid]]) {
 	const uint OW = a.w, OH = e.w, ox0 = i.x * DWX, oy = i.y, nc = i.z, ch = nc % a.x;
 	if (ox0 >= OW || oy >= OH) return;
 	const int H = int(a.y), W = int(a.z), KH = int(b.x), KW = int(b.y), sw = int(b.w), dw = int(c.y);
@@ -107,7 +136,7 @@ kernel void conv_dw(device const float* x [[buffer(0)]], device const float* w [
 	}
 	device float* op = o + (nc * OH + oy) * OW + ox0;
 	const uint n = min(uint(DWX), OW - ox0);
-	for (uint j = 0; j < n; j++) op[j] = acc[j];
+	for (uint j = 0; j < n; j++) op[j] = act_fn(acc[j], e.y, q.x, q.y) * q.z + q.w;
 }
 
 // Transposed convolution (gather form: each output sums the inputs whose
@@ -207,18 +236,19 @@ kernel void act_ew(device const float* x [[buffer(0)]], device float* o [[buffer
                    constant uint4& p [[buffer(2)]], constant float4& q [[buffer(3)]],
                    uint i [[thread_position_in_grid]]) {
 	if (i >= p.x) return;
+	o[i] = act_fn(x[i], p.y, q.x, q.y) * q.z + q.w;
+}
+
+// In place: x[i] = act(x[i] + bias[(i / inner) % M])·scale + shift — a
+// GEMM's or conv's bias and epilogue in one pass. p = (n, inner, M, act),
+// r = (hasBias, 0, 0, 0), q = (alpha, beta, scale, shift).
+kernel void bias_act(device float* x [[buffer(0)]], device const float* bias [[buffer(1)]],
+                     constant uint4& p [[buffer(2)]], constant uint4& r [[buffer(3)]],
+                     constant float4& q [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+	if (i >= p.x) return;
 	float v = x[i];
-	switch (p.y) {
-	case 1: v = max(v, 0.0f); break;                                          // relu
-	case 2: v = v * clamp(v / 6.0f + 0.5f, 0.0f, 1.0f); break;                // hardswish
-	case 3: v = clamp(q.x * v + q.y, 0.0f, 1.0f); break;                      // hardsigmoid
-	case 4: v = 1.0f / (1.0f + exp(-v)); break;                               // sigmoid
-	case 5: v = v / (1.0f + exp(-v)); break;                                  // silu
-	case 6: v = min(max(v, q.x), q.y); break;                                 // clip
-	case 7: v = v >= 0 ? v : q.x * v; break;                                  // leakyrelu
-	default: break;
-	}
-	o[i] = v * q.z + q.w;
+	if (r.x != 0) v += bias[(i / p.y) % p.z];
+	x[i] = act_fn(v, p.w, q.x, q.y) * q.z + q.w;
 }
 `
 
@@ -228,6 +258,7 @@ kernel void act_ew(device const float* x [[buffer(0)]], device float* o [[buffer
 const cnnBlockSrc = `
 #include <metal_stdlib>
 using namespace metal;
+` + actFnSrc + `
 
 // Direct convolution, group 1: one thread per (pixel, block of CB output
 // channels) — no im2col scratch, which dominates thin convs at high
@@ -236,6 +267,7 @@ kernel void conv_direct_cb(device const float* x [[buffer(0)]], device const flo
                            device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
                            constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
                            constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
+                           constant uint4& ea [[buffer(8)]], constant float4& eq [[buffer(9)]],
                            uint3 i [[thread_position_in_grid]]) {
 	const uint OW = a.w, OH = e.z, P = OH * OW, p = i.x, m0 = i.y * CB, n = i.z, M = e.y, C = e.x;
 	if (p >= P || m0 >= M) return;
@@ -264,7 +296,7 @@ kernel void conv_direct_cb(device const float* x [[buffer(0)]], device const flo
 		}
 	}
 	device float* op = o + (n * M + m0) * P + p;
-	for (uint j = 0; j < mc; j++) op[j * P] = acc[j];
+	for (uint j = 0; j < mc; j++) op[j * P] = act_fn(acc[j], ea.x, eq.x, eq.y) * eq.z + eq.w;
 }
 
 // Transposed convolution, gather form, blocked over output channels:
@@ -275,7 +307,8 @@ kernel void convt_cb(device const float* x [[buffer(0)]], device const float* w 
                      device const float* bias [[buffer(2)]], device float* o [[buffer(3)]],
                      constant uint4& a [[buffer(4)]], constant uint4& b [[buffer(5)]],
                      constant uint4& c [[buffer(6)]], constant uint4& e [[buffer(7)]],
-                     constant uint4& f [[buffer(8)]], uint3 i [[thread_position_in_grid]]) {
+                     constant uint4& f [[buffer(8)]], constant float4& eq [[buffer(9)]],
+                     uint3 i [[thread_position_in_grid]]) {
 	const uint OW = a.w, OH = e.w, P = OH * OW, p = i.x, n = i.z, CoutG = e.y, CinG = e.x;
 	const uint g = i.y / f.z, ocg0 = (i.y % f.z) * CB;
 	if (p >= P || n >= f.y || ocg0 >= CoutG) return;
@@ -305,7 +338,7 @@ kernel void convt_cb(device const float* x [[buffer(0)]], device const float* w 
 		}
 	}
 	device float* op = o + (n * e.z + oc0) * P + p;
-	for (uint j = 0; j < mc; j++) op[j * P] = acc[j];
+	for (uint j = 0; j < mc; j++) op[j * P] = act_fn(acc[j], f.w, eq.x, eq.y) * eq.z + eq.w;
 }
 `
 
@@ -324,12 +357,15 @@ const (
 	ActSiLU
 	ActClip
 	ActLeakyRelu
+	ActGeluErf
+	ActGeluTanh
 )
 
 var cnnPSO struct {
 	once                        sync.Once
 	im2col, direct, pool2d, act *Pipeline
 	convT, resize, dw, im2colBF *Pipeline
+	biasAct                     *Pipeline
 	directCB, convTCB           [len(blockWidths)]*Pipeline
 	err                         error
 }
@@ -341,7 +377,7 @@ func (d *Device) PrepareCNN() error {
 			name string
 			dst  **Pipeline
 		}{{"im2col_nchw", &cnnPSO.im2col}, {"conv_direct", &cnnPSO.direct}, {"pool2d", &cnnPSO.pool2d}, {"act_ew", &cnnPSO.act},
-			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}, {"conv_dw", &cnnPSO.dw}, {"im2col_nchw_bf16", &cnnPSO.im2colBF}} {
+			{"convt_direct", &cnnPSO.convT}, {"resize_taps", &cnnPSO.resize}, {"conv_dw", &cnnPSO.dw}, {"im2col_nchw_bf16", &cnnPSO.im2colBF}, {"bias_act", &cnnPSO.biasAct}} {
 			if *k.dst, cnnPSO.err = d.Compile(cnnSrc, k.name); cnnPSO.err != nil {
 				return
 			}
@@ -419,8 +455,8 @@ func (e *Encoder) ConvDirect(x, w, bias, out Region, g ConvGeom) {
 // thread producing a block of output channels of one pixel: for thin convs
 // (few output channels, large planes) where im2col's scratch traffic
 // dominates. bias may be the zero Region.
-func (e *Encoder) ConvDirectBlocked(x, w, bias, out Region, g ConvGeom) {
-	e.convDirectCB(blockFor(g.M), x, w, bias, out, g)
+func (e *Encoder) ConvDirectBlocked(x, w, bias, out Region, g ConvGeom, ep ConvEpilogue) {
+	e.convDirectCB(blockFor(g.M), x, w, bias, out, g, ep)
 }
 
 // blockFor picks the block-width variant for n output channels.
@@ -433,7 +469,7 @@ func blockFor(n int) int {
 	return len(blockWidths) - 1
 }
 
-func (e *Encoder) convDirectCB(v int, x, w, bias, out Region, g ConvGeom) {
+func (e *Encoder) convDirectCB(v int, x, w, bias, out Region, g ConvGeom, ep ConvEpilogue) {
 	if g.Group != 1 {
 		e.err = fmt.Errorf("metal: ConvDirectBlocked group=%d", g.Group)
 		return
@@ -446,17 +482,17 @@ func (e *Encoder) convDirectCB(v int, x, w, bias, out Region, g ConvGeom) {
 		a, b, c := g.args()
 		cb := blockWidths[v]
 		e.Dispatch(cnnPSO.directCB[v], [3]int{g.OH * g.OW, (g.M + cb - 1) / cb, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
-			u32s(g.C, g.M, g.OH, hasBias))
+			u32s(g.C, g.M, g.OH, hasBias), u32s(ep.Act, 0, 0, 0), ep.params())
 	}
 }
 
 // ConvTransposeBlocked is ConvTransposeDirect with each thread producing a
 // block of a group's output channels (inputs read once per block).
-func (e *Encoder) ConvTransposeBlocked(x, w, bias, out Region, g ConvGeom) {
-	e.convTCB(blockFor(g.M/max(g.Group, 1)), x, w, bias, out, g)
+func (e *Encoder) ConvTransposeBlocked(x, w, bias, out Region, g ConvGeom, ep ConvEpilogue) {
+	e.convTCB(blockFor(g.M/max(g.Group, 1)), x, w, bias, out, g, ep)
 }
 
-func (e *Encoder) convTCB(v int, x, w, bias, out Region, g ConvGeom) {
+func (e *Encoder) convTCB(v int, x, w, bias, out Region, g ConvGeom, ep ConvEpilogue) {
 	if g.Group <= 0 || g.C%g.Group != 0 || g.M%g.Group != 0 {
 		e.err = fmt.Errorf("metal: ConvTransposeBlocked C=%d M=%d group=%d", g.C, g.M, g.Group)
 		return
@@ -470,7 +506,7 @@ func (e *Encoder) convTCB(v int, x, w, bias, out Region, g ConvGeom) {
 		cb, coutG := blockWidths[v], g.M/g.Group
 		blocks := (coutG + cb - 1) / cb
 		e.Dispatch(cnnPSO.convTCB[v], [3]int{g.OH * g.OW, g.Group * blocks, g.N}, [3]int{64, 1, 1}, x, w, bias, out, a, b, c,
-			u32s(g.C/g.Group, coutG, g.M, g.OH), u32s(hasBias, g.N, blocks, 0))
+			u32s(g.C/g.Group, coutG, g.M, g.OH), u32s(hasBias, g.N, blocks, ep.Act), ep.params())
 	}
 }
 
@@ -480,9 +516,9 @@ func DepthwiseOK(g ConvGeom) bool {
 	return g.Group == g.C && g.C == g.M && 3*g.SW+(g.KW-1)*g.DW+1 <= 32
 }
 
-// ConvDepthwise computes a depthwise convolution (+ bias), four adjacent
-// outputs per thread. bias may be the zero Region.
-func (e *Encoder) ConvDepthwise(x, w, bias, out Region, g ConvGeom) {
+// ConvDepthwise computes a depthwise convolution (+ bias, then the
+// epilogue), four adjacent outputs per thread. bias may be the zero Region.
+func (e *Encoder) ConvDepthwise(x, w, bias, out Region, g ConvGeom, ep ConvEpilogue) {
 	if !DepthwiseOK(g) {
 		e.err = fmt.Errorf("metal: ConvDepthwise unsupported geometry %+v", g)
 		return
@@ -494,7 +530,7 @@ func (e *Encoder) ConvDepthwise(x, w, bias, out Region, g ConvGeom) {
 	if e.ready(cnnPSO.dw) {
 		a, b, c := g.args()
 		e.Dispatch(cnnPSO.dw, [3]int{(g.OW + 3) / 4, g.OH, g.N * g.C}, [3]int{32, 2, 1}, x, w, bias, out, a, b, c,
-			u32s(hasBias, 0, 0, g.OH))
+			u32s(hasBias, ep.Act, 0, g.OH), ep.params())
 	}
 }
 
@@ -547,6 +583,34 @@ func (e *Encoder) Act(act int, x, out Region, n int, alpha, beta, scale, shift f
 		}
 		e.Dispatch(cnnPSO.act, [3]int{n, 1, 1}, [3]int{256, 1, 1}, x, out, u32s(n, act), q)
 	}
+}
+
+// BiasAct applies x = act(x + bias[(i / inner) % m])·scale + shift in
+// place over n elements (bias may be the zero Region: epilogue only). For
+// NCHW channels inner is the plane size; for a GEMM's per-column bias it
+// is 1 with m = columns.
+func (e *Encoder) BiasAct(x, bias Region, n, inner, m int, ep ConvEpilogue) {
+	hasBias := 1
+	if bias.B == nil {
+		bias, hasBias = x, 0
+	}
+	if e.ready(cnnPSO.biasAct) {
+		e.Dispatch(cnnPSO.biasAct, [3]int{n, 1, 1}, [3]int{256, 1, 1}, x, bias, u32s(n, max(inner, 1), max(m, 1), ep.Act),
+			u32s(hasBias, 0, 0, 0), ep.params())
+	}
+}
+
+// params is the epilogue's float constants (alpha, beta, scale, shift).
+func (ep ConvEpilogue) params() []byte {
+	scale := ep.Scale
+	if scale == 0 {
+		scale = 1
+	}
+	q := make([]byte, 0, 16)
+	for _, v := range [4]float32{ep.Alpha, ep.Beta, scale, ep.Shift} {
+		q = binary.LittleEndian.AppendUint32(q, math.Float32bits(v))
+	}
+	return q
 }
 
 func b2i(b bool) int {

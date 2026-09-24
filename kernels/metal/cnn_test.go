@@ -79,12 +79,12 @@ func TestConv(t *testing.T) {
 			err := d.Run(func(e *Encoder) {
 				e.ConvDirect(x.At(0), w.At(0), b.At(0), yd.At(0), g)
 				if DepthwiseOK(g) {
-					e.ConvDepthwise(x.At(0), w.At(0), b.At(0), yb.At(0), g)
+					e.ConvDepthwise(x.At(0), w.At(0), b.At(0), yb.At(0), g, ConvEpilogue{})
 				}
 				if g.Group != 1 {
 					return
 				}
-				e.ConvDirectBlocked(x.At(0), w.At(0), b.At(0), yb.At(0), g)
+				e.ConvDirectBlocked(x.At(0), w.At(0), b.At(0), yb.At(0), g, ConvEpilogue{})
 				for n := range g.N {
 					xn, yn := x.At(4*n*g.C*g.H*g.W), n*g.M*P
 					for p0 := 0; p0 < P; p0 += pc {
@@ -251,7 +251,7 @@ func TestConvTranspose(t *testing.T) {
 		o, ob := buf(t, d, g.N*g.M*g.OH*g.OW), buf(t, d, g.N*g.M*g.OH*g.OW)
 		if err := d.Run(func(e *Encoder) {
 			e.ConvTransposeDirect(x.At(0), w.At(0), b.At(0), o.At(0), g)
-			e.ConvTransposeBlocked(x.At(0), w.At(0), b.At(0), ob.At(0), g)
+			e.ConvTransposeBlocked(x.At(0), w.At(0), b.At(0), ob.At(0), g, ConvEpilogue{})
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -408,7 +408,7 @@ func BenchmarkConvThin(b *testing.B) {
 		for v, cb := range blockWidths {
 			b.Run(fmt.Sprintf("%s/blocked%d", name, cb), func(b *testing.B) {
 				for b.Loop() {
-					d.Run(func(e *Encoder) { e.convDirectCB(v, x.At(0), w.At(0), Region{}, y.At(0), g) })
+					d.Run(func(e *Encoder) { e.convDirectCB(v, x.At(0), w.At(0), Region{}, y.At(0), g, ConvEpilogue{}) })
 				}
 				b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 			})
@@ -437,7 +437,7 @@ func BenchmarkConvTranspose(b *testing.B) {
 		for v, cb := range blockWidths {
 			b.Run(fmt.Sprintf("%s/blocked%d", name, cb), func(b *testing.B) {
 				for b.Loop() {
-					d.Run(func(e *Encoder) { e.convTCB(v, x.At(0), w.At(0), Region{}, y.At(0), g) })
+					d.Run(func(e *Encoder) { e.convTCB(v, x.At(0), w.At(0), Region{}, y.At(0), g, ConvEpilogue{}) })
 				}
 			})
 		}
@@ -473,7 +473,7 @@ func BenchmarkConvDepthwise(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("n%d_c%d_%dx%d_k%d/dw", g.N, g.C, g.H, g.W, g.KH), func(b *testing.B) {
 			for b.Loop() {
-				d.Run(func(e *Encoder) { e.ConvDepthwise(x.At(0), w.At(0), Region{}, y.At(0), g) })
+				d.Run(func(e *Encoder) { e.ConvDepthwise(x.At(0), w.At(0), Region{}, y.At(0), g, ConvEpilogue{}) })
 			}
 			b.ReportMetric(float64(g.N*g.M*g.OH*g.OW*g.KH*g.KW*2)*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})
@@ -502,4 +502,70 @@ func BenchmarkCopyBandwidth(b *testing.B) {
 		d.Run(func(e *Encoder) { e.Copy2D(x.At(0), y.At(0), rows, cols, cols, cols) })
 	}
 	b.ReportMetric(2*4*rows*cols*float64(b.N)/b.Elapsed().Seconds()/1e9, "GB/s")
+}
+
+// TestFusedEpilogues: every activation fused into the direct conv kernels
+// and BiasAct matches the unfused kernel followed by bias + activation on
+// the CPU.
+func TestFusedEpilogues(t *testing.T) {
+	d := openDev(t)
+	if err := d.PrepareCNN(); err != nil {
+		t.Fatal(err)
+	}
+	r := rand.New(rand.NewPCG(17, 17))
+	g := ConvGeom{N: 2, C: 12, H: 9, W: 11, M: 12, KH: 3, KW: 3, SH: 1, SW: 1, DH: 1, DW: 1, PT: 1, PL: 1, Group: 1, OH: 9, OW: 11}
+	gd := g
+	gd.Group = g.C
+	P := g.OH * g.OW
+	n := g.N * g.M * P
+	x, wf, wd, b := buf(t, d, g.N*g.C*g.H*g.W), buf(t, d, g.M*g.C*9), buf(t, d, g.M*9), buf(t, d, g.M)
+	fill(r, x)
+	fill(r, wf)
+	fill(r, wd)
+	bf := fill(r, b)
+	raw := buf(t, d, n)   // unfused, no bias
+	rawDW := buf(t, d, n) // depthwise, no bias
+	if err := d.Run(func(e *Encoder) {
+		e.ConvDirectBlocked(x.At(0), wf.At(0), Region{}, raw.At(0), g, ConvEpilogue{})
+		e.ConvDepthwise(x.At(0), wd.At(0), Region{}, rawDW.At(0), gd, ConvEpilogue{})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for act, fn := range []func(v float64) float64{
+		func(v float64) float64 { return v },
+		func(v float64) float64 { return math.Max(v, 0) },
+		func(v float64) float64 { return v * math.Min(math.Max(v/6+0.5, 0), 1) },
+		func(v float64) float64 { return math.Min(math.Max(0.2*v+0.5, 0), 1) },
+		func(v float64) float64 { return 1 / (1 + math.Exp(-v)) },
+		func(v float64) float64 { return v / (1 + math.Exp(-v)) },
+		func(v float64) float64 { return math.Min(math.Max(v, 0.2), 0.5) },
+		func(v float64) float64 {
+			if v >= 0 {
+				return v
+			}
+			return 0.2 * v
+		},
+		func(v float64) float64 { return 0.5 * v * (1 + math.Erf(v/math.Sqrt2)) },
+		func(v float64) float64 { return 0.5 * v * (1 + math.Tanh(math.Sqrt(2/math.Pi)*(v+0.044715*v*v*v))) },
+	} {
+		ep := ConvEpilogue{Act: act, Alpha: 0.2, Beta: 0.5, Scale: 1.5, Shift: -0.25}
+		yb, yd, ya := buf(t, d, n), buf(t, d, n), buf(t, d, n)
+		copy(f32s(ya.Bytes()), f32s(raw.Bytes()))
+		if err := d.Run(func(e *Encoder) {
+			e.ConvDirectBlocked(x.At(0), wf.At(0), b.At(0), yb.At(0), g, ep)
+			e.ConvDepthwise(x.At(0), wd.At(0), b.At(0), yd.At(0), gd, ep)
+			e.BiasAct(ya.At(0), b.At(0), n, P, g.M, ep)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for name, c := range map[string]struct{ got, base *Buffer }{"blocked": {yb, raw}, "depthwise": {yd, rawDW}, "bias_act": {ya, raw}} {
+			for i, v := range f32s(c.got.Bytes()) {
+				pre := float64(f32s(c.base.Bytes())[i]) + float64(bf[(i/P)%g.M])
+				want := fn(pre)*1.5 - 0.25
+				if math.Abs(float64(v)-want) > 1e-5*(1+math.Abs(want)) {
+					t.Fatalf("%s act %d [%d] = %g, want %g", name, act, i, v, want)
+				}
+			}
+		}
+	}
 }
