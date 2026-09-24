@@ -325,7 +325,12 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       matmul2d GEMM; direct for grouped), ConvTranspose, pooling, Resize,
       fused activations. All 35 zoo models match; the OCR detector runs
       as a single command buffer (ocr.NewDetectorOn, cmd/ocr -device)
-- [ ] GPUSession perf: small-M GEMM tiles for conv (M = channels < 64),
-      fused conv epilogues in the GEMM, bf16 weights
+- [x] GPUSession perf: batched GEMM (heads, images), register-blocked
+      thin/depthwise/transposed convs, implicit-GEMM conv (bf16 thin),
+      bf16 mode (graph.GPUBF16, device "gpu-bf16": 1.2-1.6x f32, corpus
+      CER equal to CPU); whole OCR pipeline per device (cmd/ocr -device):
+      1920x1080 page CPU 88 ms, GPU 64, GPU bf16 57
+- [ ] resnetish-class models on x86 (5x ORT on Zen 5; see PERF.md
+      2026-09-24): NCHWc direct kernels for dense 3x3 convs
 - [ ] CPU perf: per-step time at 1024² (0.69 TFLOPS at 256 tokens)
 - [ ] RMSNorm / RoPE / adaLN fused ops (profile first)
