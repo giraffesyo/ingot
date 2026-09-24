@@ -2449,3 +2449,18 @@ dit_* shapes and a neon-packed column so the fair comparison is the
 default. The CPU DiT step's gap is elsewhere: GEMMs run ~0.85 TFLOPS in
 the model vs 1.65 isolated — investigate on a quiet machine (this round
 ran at load average 18-29 from unrelated jobs).
+
+## bf16 weight packs stay bf16: CPU DiT step 1.4 TFLOPS (2026-09-24)
+
+The CPU DiT's GEMMs ran ~0.9 TFLOPS in the model vs 1.65 isolated, and
+step times swung 3.9-9 s: the checkpoint (13 GB bf16, mmap'd) plus its f32
+packs (26 GB) put peak RSS at 37 GB on a 48 GB machine — it was swapping.
+gemm.PackBBF16 now stores the packed panels as bf16 bits (PackedB.data16,
+the same panel layout); the small-M sweep widens each KC×NR panel into the
+per-worker f32 scratch it already had and runs every A panel over it (at
+M = 256 a widened element feeds 512 FLOPs). Results are bit-identical to
+the f32 pack (TestPackBBF16 asserts the GEMM too). The AVX-512 paired-panel
+mode needs adjacent f32 panels and is skipped for bf16 packs.
+
+Qwen-Image 2.1 DiT step, 256 target tokens, M5 Pro CPU: 3.9 s best / 5-9
+typical -> 2.56-2.62 s (1.38-1.42 TFLOPS of GEMM), peak RSS 37 -> 29 GB.

@@ -27,12 +27,29 @@ func TestPackBBF16(t *testing.T) {
 			}
 			got := PackBBF16(transB, sh.k, sh.n, raw, ldb)
 			want := PackB(transB, sh.k, sh.n, wide, ldb)
-			if len(got.data) != len(want.data) {
-				t.Fatalf("k=%d n=%d transB=%v: %d packed, want %d", sh.k, sh.n, transB, len(got.data), len(want.data))
+			if len(got.data16) != len(want.data) {
+				t.Fatalf("k=%d n=%d transB=%v: %d packed, want %d", sh.k, sh.n, transB, len(got.data16), len(want.data))
 			}
+			gw := make([]float32, len(got.data16))
+			widenPanel(gw, got.data16)
 			for i := range want.data {
-				if math.Float32bits(got.data[i]) != math.Float32bits(want.data[i]) {
-					t.Fatalf("k=%d n=%d transB=%v: data[%d] = %g, want %g", sh.k, sh.n, transB, i, got.data[i], want.data[i])
+				if math.Float32bits(gw[i]) != math.Float32bits(want.data[i]) {
+					t.Fatalf("k=%d n=%d transB=%v: data[%d] = %g, want %g", sh.k, sh.n, transB, i, gw[i], want.data[i])
+				}
+			}
+			// The GEMM over the bf16 pack equals the GEMM over the f32
+			// pack of the widened matrix, bit for bit.
+			m := 37
+			a := make([]float32, m*sh.k)
+			for i := range a {
+				a[i] = float32(r.NormFloat64())
+			}
+			c1, c2 := make([]float32, m*sh.n), make([]float32, m*sh.n)
+			SgemmPackedB(m, 1, a, sh.k, got, 0, c1, sh.n)
+			SgemmPackedB(m, 1, a, sh.k, want, 0, c2, sh.n)
+			for i := range c1 {
+				if math.Float32bits(c1[i]) != math.Float32bits(c2[i]) {
+					t.Fatalf("k=%d n=%d transB=%v: C[%d] = %g, f32 pack %g", sh.k, sh.n, transB, i, c1[i], c2[i])
 				}
 			}
 		}
