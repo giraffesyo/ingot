@@ -31,3 +31,4 @@ __pycache__/
 /testdata/layout/*.bin
 /testdata/layout/v3_io.json
 /testdata/ocr/v5/
+/testdata/realdocs/
