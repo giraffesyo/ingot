@@ -24,6 +24,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/giraffesyo/ingot/models/qwenimage"
@@ -56,7 +57,7 @@ func main() {
 	if dir == "" {
 		var err error
 		if dir, err = findSnapshot(); err != nil {
-			fmt.Fprintln(os.Stderr, "qwenimage:", err)
+			fail(err)
 			os.Exit(1)
 		}
 	}
@@ -78,7 +79,7 @@ func main() {
 		})
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "qwenimage:", err)
+		fail(err)
 		if st, serr := os.Stat(latents); serr == nil && *fromLatents == "" && !st.ModTime().Before(t0) {
 			fmt.Fprintf(os.Stderr, "qwenimage: the denoised latents are in %s; retry the decode with -from-latents %s\n", latents, latents)
 		}
@@ -89,7 +90,7 @@ func main() {
 		err = errors.Join(png.Encode(f, res.Image), f.Close())
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "qwenimage:", err)
+		fail(err)
 		os.Exit(1)
 	}
 	if *fromLatents == "" && !*keepLatents {
@@ -138,4 +139,14 @@ func findSnapshot() (string, error) {
 		return "", fmt.Errorf("Qwen-Image-2.1 not found under %s (download it, or pass -model)", hub)
 	}
 	return snaps[len(snaps)-1], nil
+}
+
+// fail prints err once prefixed with the command name (package errors
+// already carry it).
+func fail(err error) {
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "qwenimage: ") {
+		msg = "qwenimage: " + msg
+	}
+	fmt.Fprintln(os.Stderr, msg)
 }

@@ -114,16 +114,19 @@ func TestMetalDiTParity(t *testing.T) {
 		compare(t, "fast (bf16): "+c.want, out.F32(), ref.tensor(t, c.want).F32()[c.rows:], 0.15)
 	}
 
-	// The preflight's scratch estimate matches what was allocated (less the
-	// wrapped weight shards; page rounding and the norm vectors are slack).
-	got := f.dev.Allocated() - allocated
-	for _, b := range f.shards {
-		got -= (b.Len() + metal.PageSize - 1) / metal.PageSize * metal.PageSize
+	// The preflight's estimate is the run's peak scratch, and the scratch
+	// count is what the device holds (less the wrapped weight shards; page
+	// rounding and the norm vectors are slack).
+	if est := metalDiTScratch(cfg, l, 1, true); est != f.peak {
+		t.Errorf("DiT scratch estimate %d bytes, peak allocated %d", est, f.peak)
 	}
-	est := metalDiTScratch(cfg, l, 1, true)
-	t.Logf("DiT scratch: estimate %d bytes, allocated %d", est, got)
-	if d := got - est; d < 0 || d > 1<<20 {
-		t.Errorf("DiT scratch estimate %d bytes, device allocated %d", est, got)
+	held := f.dev.Allocated() - allocated
+	for _, b := range f.shards {
+		held -= (b.Len() + metal.PageSize - 1) / metal.PageSize * metal.PageSize
+	}
+	t.Logf("DiT scratch: peak %d bytes, now %d (device: %d)", f.peak, f.bytes, held)
+	if d := held - f.bytes; d < 0 || d > 1<<20 {
+		t.Errorf("device holds %d bytes of scratch, counted %d", held, f.bytes)
 	}
 }
 

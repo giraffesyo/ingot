@@ -3,6 +3,7 @@
 package qwenimage
 
 import (
+	"image"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,6 +36,18 @@ func TestPreflight(t *testing.T) {
 		if err := preflight(dir, ids, len(sys), nil, side/16, side/16, Options{Fast: true}, t.Logf); err != nil {
 			t.Errorf("%d²: %v", side, err)
 		}
+	}
+	// An edit at 1760×2368 (a portrait condition image at -size 2048): the
+	// condition's ~16k latent tokens join the prefix.
+	cw, ch := 1760, 2368
+	conds := []condition{{img: image.NewNRGBA(image.Rect(0, 0, cw, ch)), gh: ch / visPatch, gw: cw / visPatch}}
+	eids, err := tok.Encode(promptText("give the fox a red scarf", conds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("edit %dx%d:", cw, ch)
+	if err := preflight(dir, eids, len(sys), conds, ch/16, cw/16, Options{Fast: true}, t.Logf); err != nil {
+		t.Errorf("edit %dx%d: %v", cw, ch, err)
 	}
 	err = preflight(dir, ids, len(sys), nil, 8192/16, 8192/16, Options{Fast: true}, t.Logf)
 	if err == nil || !strings.Contains(err.Error(), "GPU memory") {
