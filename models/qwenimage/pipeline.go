@@ -1,11 +1,13 @@
 package qwenimage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -45,6 +47,9 @@ type Options struct {
 	// Latents, when set, replaces the seeded noise: packed [h·w, 64]
 	// (parity tests inject the reference pipeline's torch noise).
 	Latents *tensor.Tensor
+	// SaveLatents, when set, is where the denoised latents are written
+	// before decoding (see DecodeLatents).
+	SaveLatents string
 	// Log receives one line per stage with timings; nil is silent.
 	Log func(format string, args ...any)
 }
@@ -168,6 +173,11 @@ func Generate(dir string, opt Options) (*Result, error) {
 	if len(conds) > 0 && !gpu {
 		return nil, fmt.Errorf("qwenimage: image editing needs the GPU text encoder (device cpu)")
 	}
+	if gpu {
+		if err := preflight(dir, ids, drop, conds, lh, lw, opt, logf); err != nil {
+			return nil, err
+		}
+	}
 
 	// 2. Text encoder (+ vision tower) → conditioning hidden states.
 	t0 = time.Now()
@@ -197,6 +207,12 @@ func Generate(dir string, opt Options) (*Result, error) {
 	}
 	release()
 	stage("denoise", t0)
+	if opt.SaveLatents != "" { // before decoding: a failed decode need not re-denoise
+		if err := SaveLatents(opt.SaveLatents, x, lh, lw); err != nil {
+			return nil, err
+		}
+		logf("  latents saved to %s", opt.SaveLatents)
+	}
 
 	// 5. VAE decode.
 	t0 = time.Now()
@@ -388,18 +404,7 @@ func denoise(dir string, embeds *tensor.Tensor, imgPad []bool, cond *tensor.Tens
 		return nil, err
 	}
 	defer set.Close()
-	txt := embeds.Shape()[0]
-	mask := make([]bool, txt+lh*lw/imgTokensPerSlot)
-	copy(mask, imgPad)
-	for i := txt; i < len(mask); i++ {
-		mask[i] = true
-	}
-	var shapes [][3]int
-	for _, c := range conds {
-		shapes = append(shapes, [3]int{1, c.gh, c.gw}) // latent grid = vision patch grid (both 16 px)
-	}
-	shapes = append(shapes, [3]int{1, lh, lw})
-	l, err := NewDiTLayout(cfg, mask, nil, shapes)
+	l, err := ditLayout(cfg, imgPad, conds, lh, lw)
 	if err != nil {
 		return nil, err
 	}
@@ -445,6 +450,23 @@ func denoise(dir string, embeds *tensor.Tensor, imgPad []bool, cond *tensor.Tens
 		logf("  step %2d/%d  %8.2fs", i+1, opt.Steps, time.Since(t0).Seconds())
 	}
 	return x, nil
+}
+
+// ditLayout is the DiT's token layout: the conditioning rows (imgPad marks
+// image tokens), then the target's lh×lw latents.
+func ditLayout(cfg DiTConfig, imgPad []bool, conds []condition, lh, lw int) (*DiTLayout, error) {
+	txt := len(imgPad)
+	mask := make([]bool, txt+lh*lw/imgTokensPerSlot)
+	copy(mask, imgPad)
+	for i := txt; i < len(mask); i++ {
+		mask[i] = true
+	}
+	var shapes [][3]int
+	for _, c := range conds {
+		shapes = append(shapes, [3]int{1, c.gh, c.gw}) // latent grid = vision patch grid (both 16 px)
+	}
+	shapes = append(shapes, [3]int{1, lh, lw})
+	return NewDiTLayout(cfg, mask, nil, shapes)
 }
 
 // denoiseMetal runs the prefix pass and every step on the GPU.
@@ -507,6 +529,65 @@ func decode(dir string, x *tensor.Tensor, lh, lw int, gpu bool) (*tensor.Tensor,
 	}
 	img := out["image"]
 	return img.Reshape(img.Shape()[1:]...).Clone(), nil
+}
+
+// DecodeLatents decodes denoised latents (from Options.SaveLatents) into
+// the image, as Generate's last stage — on "gpu", "cpu" or "auto".
+func DecodeLatents(dir string, x *tensor.Tensor, lh, lw int, device string) (*Result, error) {
+	gpu := device == "gpu" || ((device == "" || device == "auto") && metalAvailable())
+	t0 := time.Now()
+	img, err := decode(dir, x, lh, lw, gpu)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Image: toImage(img), Float: img, Stages: map[string]time.Duration{"decode": time.Since(t0)}}, nil
+}
+
+// latentsMagic heads a latents file: then lh, lw, channels (uint32 LE) and
+// the packed [lh·lw, channels] f32 values (LE).
+const latentsMagic = "QILATNT1"
+
+// SaveLatents writes packed latents [lh·lw, C] to path.
+func SaveLatents(path string, x *tensor.Tensor, lh, lw int) error {
+	s := x.Shape()
+	if len(s) != 2 || s[0] != lh*lw {
+		return fmt.Errorf("qwenimage: latents %v are not [%d, C]", s, lh*lw)
+	}
+	b := make([]byte, 0, len(latentsMagic)+12+4*x.Numel())
+	b = append(b, latentsMagic...)
+	for _, v := range []int{lh, lw, s[1]} {
+		b = binary.LittleEndian.AppendUint32(b, uint32(v))
+	}
+	for _, v := range x.F32() {
+		b = binary.LittleEndian.AppendUint32(b, math.Float32bits(v))
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		return fmt.Errorf("qwenimage: save latents: %w", err)
+	}
+	return nil
+}
+
+// LoadLatents reads a SaveLatents file.
+func LoadLatents(path string) (x *tensor.Tensor, lh, lw int, err error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("qwenimage: load latents: %w", err)
+	}
+	n := len(latentsMagic)
+	if len(b) < n+12 || string(b[:n]) != latentsMagic {
+		return nil, 0, 0, fmt.Errorf("qwenimage: %s is not a latents file", path)
+	}
+	lh, lw = int(binary.LittleEndian.Uint32(b[n:])), int(binary.LittleEndian.Uint32(b[n+4:]))
+	c := int(binary.LittleEndian.Uint32(b[n+8:]))
+	data := b[n+12:]
+	if lh <= 0 || lw <= 0 || c <= 0 || len(data) != 4*lh*lw*c {
+		return nil, 0, 0, fmt.Errorf("qwenimage: %s: %d bytes of data for %d×%d×%d latents", path, len(data), lh, lw, c)
+	}
+	x = tensor.New(tensor.F32, lh*lw, c)
+	for i := range x.F32() {
+		x.F32()[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[4*i:]))
+	}
+	return x, lh, lw, nil
 }
 
 func compile(g *graph.Graph, err error) (*graph.Session, error) {

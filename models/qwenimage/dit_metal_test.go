@@ -91,6 +91,7 @@ func TestMetalDiTParity(t *testing.T) {
 
 	// Fast mode: bf16 GEMM inputs. Error grows to bf16's ~3 significant
 	// digits (tolerance 1% of the output range).
+	allocated := m.dev.Allocated()
 	f, err := NewMetalDiT(cfg, set, l, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -111,6 +112,18 @@ func TestMetalDiTParity(t *testing.T) {
 			t.Fatal(err)
 		}
 		compare(t, "fast (bf16): "+c.want, out.F32(), ref.tensor(t, c.want).F32()[c.rows:], 0.15)
+	}
+
+	// The preflight's scratch estimate matches what was allocated (less the
+	// wrapped weight shards; page rounding and the norm vectors are slack).
+	got := f.dev.Allocated() - allocated
+	for _, b := range f.shards {
+		got -= (b.Len() + metal.PageSize - 1) / metal.PageSize * metal.PageSize
+	}
+	est := metalDiTScratch(cfg, l, 1, true)
+	t.Logf("DiT scratch: estimate %d bytes, allocated %d", est, got)
+	if d := got - est; d < 0 || d > 1<<20 {
+		t.Errorf("DiT scratch estimate %d bytes, device allocated %d", est, got)
 	}
 }
 
@@ -201,6 +214,18 @@ func TestMetalVAEParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	compare(t, "image (GPU VAE)", img.F32(), ref.tensor(t, "image").F32(), 1e-3)
+
+	// Banded: 8-row bands at every stage and 7-query attention chunks
+	// must reproduce the single-band decode.
+	v.bandBytes, v.attnBytes = 1, 4*7*h*w
+	if p := v.decodePlan(h, w); p.stages[len(p.stages)-1].rows >= p.stages[len(p.stages)-1].H || p.qChunk != 7 {
+		t.Fatalf("plan did not band: %+v", p)
+	}
+	banded, err := v.Decode(nhwc, h, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compare(t, "image (banded vs single band)", banded.F32(), img.F32(), 1e-6)
 }
 
 // TestMetalTextEncoderMM: the GPU language model over the reference edit

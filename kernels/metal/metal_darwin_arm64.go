@@ -172,6 +172,23 @@ func open() (*Device, error) {
 	return d, nil
 }
 
+// MaxWorkingSet is the device's recommendedMaxWorkingSetSize: about how
+// many bytes of buffers its command buffers can keep resident. Work that
+// references more fails at run time (kIOGPUCommandBufferCallbackErrorOutOfMemory).
+func (d *Device) MaxWorkingSet() int {
+	var n uintptr
+	d.do(func() { n = send(d.id, "recommendedMaxWorkingSetSize") })
+	return int(n)
+}
+
+// Allocated is the device's currentAllocatedSize: bytes of buffers alive
+// now (wrapped memory included).
+func (d *Device) Allocated() int {
+	var n uintptr
+	d.do(func() { n = send(d.id, "currentAllocatedSize") })
+	return int(n)
+}
+
 // do runs f on the device thread and waits for it.
 func (d *Device) do(f func()) {
 	done := make(chan struct{})

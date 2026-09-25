@@ -326,6 +326,11 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       TFLOPS, 2x the unfused chain); per-row key limits for block-causal
       prefixes; 1024² step 4.57 -> 3.9 s (PyTorch MPS ~4.5)
 - [x] bf16 producers (LN, RoPE, SiLU·mul write GEMM operands directly)
+- [x] 2048² on the GPU: banded VAE decode (bit-identical; scratch 23.8 ->
+      3.0 GB at 2048², same 4.7 s at 1024²; the whole-image decode was also
+      nondeterministic at 2048²), chunked mid attention, working-set
+      preflight for every GPU stage, latents saved before decoding
+      (CLI -from-latents)
 - [x] image editing: vision tower, multimodal text encoder (image tokens,
       deepstack, 3D M-RoPE), VAE encoder, condition-aware layout — all on
       the GPU; parity 1.5e-4 (f32) vs diffusers; CLI -image

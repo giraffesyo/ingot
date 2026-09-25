@@ -23,6 +23,8 @@ type MetalVAE struct {
 	set    *safetensors.Set
 	shards map[unsafe.Pointer]*metal.Buffer
 	small  map[string]*metal.Buffer // biases, norm gammas
+	// bandBytes, attnBytes override decodeBandBytes and attnBytes (tests).
+	bandBytes, attnBytes int
 }
 
 // NewMetalVAE maps the VAE's weights onto the GPU.
@@ -192,21 +194,25 @@ func (r *vaeRun) res(H, W int, rb vaeRes) {
 	r.x, r.b2 = r.b2, r.x
 }
 
-// attn is QwenImage21AttentionBlock on x: one head over the H·W pixels.
-func (r *vaeRun) attn(H, W int, at vaeAttn) {
+// attn is QwenImage21AttentionBlock on x: one head over the H·W pixels,
+// queries in chunks of qc rows (S holds qc×P scores).
+func (r *vaeRun) attn(H, W int, at vaeAttn, qc int) {
 	e, C, P := r.e, at.c, H*W
 	e.RMSNormRows(r.x.At(0), r.a.At(0), at.norm.At(0), P, C, C, C, vaeEps)
 	r.conv(r.a, r.b2, H, W, at.qkv) // [P, 3C] = [q | k | v]
-	e.Gemm(metal.Gemm{M: P, N: P, K: C, A: r.b2.At(0), LDA: 3 * C, B: r.b2.At(4 * C), LDB: 3 * C, C: r.S.At(0), TransB: true})
-	e.SoftmaxRows(r.S.At(0), P, P, P, float32(1/math.Sqrt(float64(C))))
-	e.Gemm(metal.Gemm{M: P, N: C, K: P, A: r.S.At(0), B: r.b2.At(4 * 2 * C), LDB: 3 * C, C: r.a.At(0)})
+	for q0 := 0; q0 < P; q0 += qc {
+		n := min(qc, P-q0)
+		e.Gemm(metal.Gemm{M: n, N: P, K: C, A: r.b2.At(4 * q0 * 3 * C), LDA: 3 * C, B: r.b2.At(4 * C), LDB: 3 * C, C: r.S.At(0), TransB: true})
+		e.SoftmaxRows(r.S.At(0), n, P, P, float32(1/math.Sqrt(float64(C))))
+		e.Gemm(metal.Gemm{M: n, N: C, K: P, A: r.S.At(0), B: r.b2.At(4 * 2 * C), LDB: 3 * C, C: r.a.At(4 * q0 * C)})
+	}
 	r.conv(r.a, r.b2, H, W, at.proj)
 	e.GatedAdd(r.x.At(0), r.one.At(0), r.b2.At(0), P, C, C, C)
 }
 
 // buffers allocates a pass's scratch: maxAct floats per activation buffer,
-// attention scores for P0 pixels, ones for maxC channels.
-func (v *MetalVAE) buffers(maxAct, p0, maxC int) (*vaeRun, func(), error) {
+// nS attention scores, ones for maxC channels.
+func (v *MetalVAE) buffers(maxAct, nS, maxC int) (*vaeRun, func(), error) {
 	var bufs []*metal.Buffer
 	var err error
 	nb := func(bytes int) *metal.Buffer {
@@ -220,7 +226,7 @@ func (v *MetalVAE) buffers(maxAct, p0, maxC int) (*vaeRun, func(), error) {
 		return b
 	}
 	r := &vaeRun{x: nb(4 * maxAct), a: nb(4 * maxAct), b2: nb(4 * maxAct), sc: nb(4 * maxAct), bin: nb(4 * maxAct),
-		cols: nb(colsBytes), one: nb(4 * maxC), S: nb(4 * p0 * p0)}
+		cols: nb(colsBytes), one: nb(4 * maxC), S: nb(4 * nS)}
 	free := func() {
 		for _, b := range bufs {
 			b.Release()
@@ -254,24 +260,82 @@ func (v *MetalVAE) dims() (enc, dec []int, up []bool) {
 	return enc, dec, up
 }
 
+// The decoder's memory is bounded independently of the image size: after
+// the mid block every op is local (3×3 convs, nearest upsampling, per-pixel
+// norms and activations), so each up block runs over horizontal bands of
+// its input with halo rows of context on either side, and the rows it keeps
+// are exactly the full decode's. decodeBandBytes caps each activation
+// buffer; attnBytes caps the mid attention's score block (queries are
+// processed in chunks).
+const (
+	decodeBandBytes = 512 << 20
+	attnBytes       = 256 << 20
+)
+
+// decodeStage is one up block (the last one with the output head) over
+// band-sized pieces of its H×W input.
+type decodeStage struct {
+	H, W, in, out int
+	up            bool
+	halo, rows    int // context rows either side; input rows kept per band
+}
+
+// decodePlan is a decode's bands and scratch sizes.
+type decodePlan struct {
+	stages []decodeStage
+	act    int // floats per activation buffer
+	qChunk int // attention query rows per score block
+	maxC   int
+}
+
+func (v *MetalVAE) decodePlan(h, w int) decodePlan {
+	cfg := v.cfg
+	_, dims, _ := v.dims()
+	P := h * w
+	p := decodePlan{act: P * max(3*dims[0], cfg.ZDim), maxC: 3 * max(dims[0], cfg.ZDim)}
+	band, att := decodeBandBytes, attnBytes
+	if v.bandBytes > 0 {
+		band, att = v.bandBytes, v.attnBytes
+	}
+	p.qChunk = min(P, max(1, att/(4*P)))
+	H, W := h, w
+	nres := cfg.NumResBlocks + 1
+	for i := range len(dims) - 1 {
+		s := decodeStage{H: H, W: W, in: dims[i], out: dims[i+1], up: i != len(dims)-2, halo: 2*nres + 1}
+		row := W * max(s.in, s.out) // floats per input row, peak over the stage
+		if s.up {
+			row = max(row, 4*W*s.out)
+		} else {
+			row = max(row, W*cfg.OutChannels)
+		}
+		s.rows = min(H, max(8, band/(4*row)-2*s.halo))
+		p.act = max(p.act, min(H, s.rows+2*s.halo)*row)
+		p.stages = append(p.stages, s)
+		if s.up {
+			H, W = 2*H, 2*W
+		}
+	}
+	return p
+}
+
+// DecodeBytes is the GPU memory Decode needs for h×w latents beyond the
+// mapped weights: its activation, im2col and attention scratch.
+func (v *MetalVAE) DecodeBytes(h, w int) int {
+	p := v.decodePlan(h, w)
+	return 5*4*p.act + colsBytes + 4*p.qChunk*h*w + 4*p.maxC
+}
+
 // Decode turns packed, denormalised latents z [h·w, z_dim] (NHWC) into the
-// image [out_channels, 16h, 16w] in [-1, 1].
+// image [out_channels, 16h, 16w] in [-1, 1]. The mid block runs once at
+// latent resolution; the up blocks run in bands (decodePlan), their
+// full-size intermediates held in host memory between blocks.
 func (v *MetalVAE) Decode(z *tensor.Tensor, h, w int) (*tensor.Tensor, error) {
 	cfg := v.cfg
 	if z.Numel() != h*w*cfg.ZDim {
 		return nil, fmt.Errorf("qwenimage: latents %v, want [%d, %d]", z.Shape(), h*w, cfg.ZDim)
 	}
-	mult := cfg.DimMult
 	_, dims, up := v.dims()
-	// The upsampled tensor of each up block is the peak activation.
-	maxAct, hw := h*w*max(dims[0], cfg.ZDim), h*w
-	for i := range len(dims) - 1 {
-		maxAct = max(maxAct, hw*max(dims[i], dims[i+1]))
-		if i != len(mult)-1 {
-			hw *= 4
-			maxAct = max(maxAct, hw*max(dims[i], dims[i+1]))
-		}
-	}
+	plan := v.decodePlan(h, w)
 	rw := &vaeWeights{v: v}
 	d := "decoder"
 	post := rw.conv("post_quant_conv", cfg.ZDim, cfg.ZDim, 1)
@@ -281,27 +345,25 @@ func (v *MetalVAE) Decode(z *tensor.Tensor, h, w int) (*tensor.Tensor, error) {
 	type upBlock struct {
 		res      []vaeRes
 		resample *vaeConv
-		in, out  int
 		idx      []uint32
 	}
 	var ups []upBlock
-	for i := range len(dims) - 1 {
-		in, out := dims[i], dims[i+1]
-		u := upBlock{in: in, out: out}
-		cur := in
+	for i, s := range plan.stages {
+		var u upBlock
+		cur := s.in
 		for j := range cfg.NumResBlocks + 1 {
-			u.res = append(u.res, rw.res(fmt.Sprintf("%s.up_blocks.%d.resnets.%d", d, i, j), cur, out))
-			cur = out
+			u.res = append(u.res, rw.res(fmt.Sprintf("%s.up_blocks.%d.resnets.%d", d, i, j), cur, s.out))
+			cur = s.out
 		}
-		if i != len(mult)-1 {
-			c := rw.conv(fmt.Sprintf("%s.up_blocks.%d.upsampler.resample.1", d, i), out, out, 3)
+		if s.up {
+			c := rw.conv(fmt.Sprintf("%s.up_blocks.%d.upsampler.resample.1", d, i), s.out, s.out, 3)
 			u.resample = &c
 			ft := 1
 			if up[i] {
 				ft = 2
 			}
-			repeats := out * ft * 4 / in
-			for oc := range out {
+			repeats := s.out * ft * 4 / s.in
+			for oc := range s.out {
 				for hs := range 2 {
 					for ws := range 2 {
 						u.idx = append(u.idx, uint32(((oc*ft+ft-1)*2+hs)*2+ws)/uint32(repeats))
@@ -316,7 +378,7 @@ func (v *MetalVAE) Decode(z *tensor.Tensor, h, w int) (*tensor.Tensor, error) {
 	if rw.err != nil {
 		return nil, rw.err
 	}
-	r, free, err := v.buffers(maxAct, h*w, 3*max(dims[0], cfg.ZDim))
+	r, free, err := v.buffers(plan.act, plan.qChunk*h*w, plan.maxC)
 	if err != nil {
 		return nil, err
 	}
@@ -340,49 +402,101 @@ func (v *MetalVAE) Decode(z *tensor.Tensor, h, w int) (*tensor.Tensor, error) {
 		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&b.Bytes()[0])), len(u.idx)), u.idx)
 		idxFor[i] = b
 	}
+
+	// Mid block at latent resolution.
 	copy(f32view(r.x), z.F32())
 	err = v.dev.Run(func(e *metal.Encoder) {
 		r.e = e
-		H, W := h, w
-		r.conv(r.x, r.a, H, W, post)
-		r.conv(r.a, r.x, H, W, convIn)
-		r.res(H, W, mid0)
-		r.attn(H, W, midAttn)
-		r.res(H, W, mid1)
-		for i, u := range ups {
-			if u.resample != nil {
-				e.CopyF32(r.x.At(0), r.bin.At(0), H*W*u.in) // block input, for the pixel-shuffle shortcut
-			}
-			for _, rb := range u.res {
-				r.res(H, W, rb)
-			}
-			if u.resample == nil {
-				continue
-			}
-			e.Upsample2x(r.x.At(0), r.a.At(0), H, W, u.out)
-			r.conv(r.a, r.b2, 2*H, 2*W, *u.resample)
-			e.DepthToSpace2Map(r.bin.At(0), r.x.At(0), idxFor[i].At(0), H, W, u.in, u.out)
-			e.GatedAdd(r.x.At(0), r.one.At(0), r.b2.At(0), 4*H*W, u.out, u.out, u.out)
-			H, W = 2*H, 2*W
-		}
-		C := dims[len(dims)-1]
-		e.RMSNormRows(r.x.At(0), r.a.At(0), normOut.At(0), H*W, C, C, C, vaeEps)
-		e.SiLU(r.a.At(0), H*W*C)
-		r.conv(r.a, r.b2, H, W, convOut)
+		r.conv(r.x, r.a, h, w, post)
+		r.conv(r.a, r.x, h, w, convIn)
+		r.res(h, w, mid0)
+		r.attn(h, w, midAttn, plan.qChunk)
+		r.res(h, w, mid1)
 	})
 	if err != nil {
 		return nil, err
 	}
-	// NHWC → [C, H, W], clamped.
-	Ho, Wo, Co := 16*h, 16*w, cfg.OutChannels
+	cur := make([]float32, h*w*dims[0])
+	copy(cur, f32view(r.x))
+
+	// Up blocks, band by band.
+	Co := cfg.OutChannels
+	Ho, Wo := 16*h, 16*w
 	img := tensor.New(tensor.F32, Co, Ho, Wo)
-	src, dst := f32view(r.b2), img.F32()
-	for p := range Ho * Wo {
-		for c := range Co {
-			dst[c*Ho*Wo+p] = min(max(src[p*Co+c], -1), 1)
+	for i, s := range plan.stages {
+		u := ups[i]
+		var next []float32
+		if s.up {
+			next = make([]float32, 4*s.H*s.W*s.out)
 		}
+		for r0 := 0; r0 < s.H; r0 += s.rows {
+			r1 := min(s.H, r0+s.rows)
+			a0, a1 := max(0, r0-s.halo), min(s.H, r1+s.halo)
+			bh, W := a1-a0, s.W
+			copy(f32view(r.x), cur[a0*W*s.in:a1*W*s.in])
+			err = v.dev.Run(func(e *metal.Encoder) {
+				r.e = e
+				if s.up {
+					e.CopyF32(r.x.At(0), r.bin.At(0), bh*W*s.in) // block input, for the pixel-shuffle shortcut
+				}
+				for _, rb := range u.res {
+					r.res(bh, W, rb)
+				}
+				if s.up {
+					e.Upsample2x(r.x.At(0), r.a.At(0), bh, W, s.out)
+					r.conv(r.a, r.b2, 2*bh, 2*W, *u.resample)
+					e.DepthToSpace2Map(r.bin.At(0), r.x.At(0), idxFor[i].At(0), bh, W, s.in, s.out)
+					e.GatedAdd(r.x.At(0), r.one.At(0), r.b2.At(0), 4*bh*W, s.out, s.out, s.out)
+					return
+				}
+				e.RMSNormRows(r.x.At(0), r.a.At(0), normOut.At(0), bh*W, s.out, s.out, s.out, vaeEps)
+				e.SiLU(r.a.At(0), bh*W*s.out)
+				r.conv(r.a, r.b2, bh, W, convOut)
+			})
+			if err != nil {
+				return nil, err
+			}
+			if s.up { // keep output rows [2·r0, 2·r1)
+				row := 2 * W * s.out
+				copy(next[2*r0*row:2*r1*row], f32view(r.x)[2*(r0-a0)*row:2*(r1-a0)*row])
+				continue
+			}
+			// NHWC → [C, H, W], clamped.
+			src, dst := f32view(r.b2)[(r0-a0)*W*Co:], img.F32()
+			for p := range (r1 - r0) * W {
+				o := r0*W + p
+				for c := range Co {
+					dst[c*Ho*Wo+o] = min(max(src[p*Co+c], -1), 1)
+				}
+			}
+		}
+		cur = next
 	}
 	return img, nil
+}
+
+// encodePlan is Encode's floats per activation buffer and attention query
+// chunk for an H0×W0 image. (Encode runs whole-image: condition images are
+// about Resolution² pixels, and its peak is at 96 channels, not the
+// decoder's 288.)
+func (v *MetalVAE) encodePlan(H0, W0 int) (act, qc int) {
+	dims, _, _ := v.dims()
+	last := len(v.cfg.DimMult) - 1
+	act = H0 * W0 * max(v.cfg.InChannels, dims[0])
+	for i := range last + 1 {
+		act = max(act, (H0>>i)*(W0>>i)*max(dims[i], dims[i+1]))
+	}
+	P := (H0 >> last) * (W0 >> last)
+	return act, min(P, max(1, attnBytes/(4*P)))
+}
+
+// EncodeBytes is the GPU memory Encode needs for an H0×W0 image beyond the
+// mapped weights.
+func (v *MetalVAE) EncodeBytes(H0, W0 int) int {
+	act, qc := v.encodePlan(H0, W0)
+	last := len(v.cfg.DimMult) - 1
+	C := v.cfg.BaseDim * v.cfg.DimMult[last]
+	return 5*4*act + colsBytes + 4*qc*(H0>>last)*(W0>>last) + 4*max(3*C, v.cfg.BaseDim)
 }
 
 // Encode turns an image [in_channels, H, W] in [-1, 1] into normalised,
@@ -398,11 +512,7 @@ func (v *MetalVAE) Encode(px *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	dims, _, _ := v.dims()
 	last := len(cfg.DimMult) - 1
-	maxAct := H0 * W0 * max(C0, dims[0])
-	for i := range last + 1 {
-		hw := (H0 >> i) * (W0 >> i)
-		maxAct = max(maxAct, hw*max(dims[i], dims[i+1]))
-	}
+	maxAct, qc := v.encodePlan(H0, W0)
 	rw := &vaeWeights{v: v}
 	e := "encoder"
 	convIn := rw.conv(e+".conv_in", C0, dims[0], 3)
@@ -440,7 +550,7 @@ func (v *MetalVAE) Encode(px *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, rw.err
 	}
 	hl, wl := H0/f, W0/f
-	r, free, err := v.buffers(maxAct, hl*wl, max(3*C, dims[0]))
+	r, free, err := v.buffers(maxAct, qc*hl*wl, max(3*C, dims[0]))
 	if err != nil {
 		return nil, err
 	}
@@ -472,7 +582,7 @@ func (v *MetalVAE) Encode(px *tensor.Tensor) (*tensor.Tensor, error) {
 			H, W = H/2, W/2
 		}
 		r.res(H, W, mid0)
-		r.attn(H, W, midAttn)
+		r.attn(H, W, midAttn, qc)
 		r.res(H, W, mid1)
 		e.RMSNormRows(r.x.At(0), r.a.At(0), normOut.At(0), H*W, C, C, C, vaeEps)
 		e.SiLU(r.a.At(0), H*W*C)
