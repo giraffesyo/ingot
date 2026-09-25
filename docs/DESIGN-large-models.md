@@ -188,6 +188,12 @@ checks each GPU stage (weights + planned scratch) against the device's
 `recommendedMaxWorkingSetSize`, and it saves the denoised latents before
 decoding (`-from-latents` retries a decode).
 
+The DiT's GPU scratch is dominated by the prefix K/V cache (layers × 2 ×
+prefix tokens × 4096), which an edit's condition image makes large (~20k
+tokens at 2048-class sizes). Fast mode keeps it in bf16 only; f32 score
+matrices and the prefix mask exist only on the f32 attention paths; the
+prefix pass's working set is released before the steps allocate theirs.
+
 **Pipeline defaults:** 40 steps, no CFG (`true_cfg_scale=1`: the model is
 meant to be sampled without guidance — one DiT pass per step),
 FlowMatchEuler with dynamic exponential shift (seq-len 256→8192 maps

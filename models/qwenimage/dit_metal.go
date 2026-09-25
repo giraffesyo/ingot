@@ -37,14 +37,17 @@ type MetalDiT struct {
 	imgIn   metal.Region
 	projOut metal.Region
 
-	tw, pw             *metalWork // target and prefix working sets
+	tw                 *metalWork // target working set (allocated by the first Step)
 	lat, out           *metal.Buffer
 	s1, g1, s2, g2, fs *metal.Buffer
-	pmask, pvalid      *metal.Buffer   // prefix attention mask, valid-row indices
-	pkend              *metal.Buffer   // per-row key limits when the prefix mask is prefix-shaped (fast prefix)
-	kp, vp             []*metal.Buffer // per-layer prefix K/V [valid prefix, dim]
-	kp16, vp16         []*metal.Buffer // their bf16 copies (Fast)
+	pvalid             *metal.Buffer   // valid prefix rows
+	kp, vp             []*metal.Buffer // per-layer prefix K/V [valid prefix, dim] (f32 mode)
+	kp16, vp16         []*metal.Buffer // bf16 prefix K/V (Fast)
+	ktmp, vtmp         *metal.Buffer   // f32 staging for an f32 prefix pass under Fast
 	textIn             *graph.Session
+
+	mode        int8 // buffers allocated for: 0 not yet, 1 f32, 2 Fast
+	bytes, peak int  // scratch allocated through buf: now and at most
 }
 
 // metalWork is one token set's activations: x the residual stream, y/o
@@ -54,17 +57,12 @@ type metalWork struct {
 	T                         int
 	x, y, q, k, v, o, g, p, s *metal.Buffer
 	cos, sin                  *metal.Buffer
-	// bf16 GEMM inputs for Fast mode (allocated on first use).
-	y16, q16, k16, v16, s16 *metal.Buffer
+	// bf16 GEMM inputs for Fast mode.
+	y16, q16, k16, v16 *metal.Buffer
 }
 
-func (w *metalWork) release() {
-	for _, b := range []*metal.Buffer{w.x, w.y, w.q, w.k, w.v, w.o, w.g, w.p, w.s, w.cos, w.sin,
-		w.y16, w.q16, w.k16, w.v16, w.s16} {
-		if b != nil {
-			b.Release()
-		}
-	}
+func (w *metalWork) buffers() []*metal.Buffer {
+	return []*metal.Buffer{w.x, w.y, w.q, w.k, w.v, w.o, w.g, w.p, w.s, w.cos, w.sin, w.y16, w.q16, w.k16, w.v16}
 }
 
 type metalLayer struct {
@@ -90,11 +88,6 @@ func NewMetalDiT(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers int) 
 		shards: map[unsafe.Pointer]*metal.Buffer{}}
 	if m.pv == 0 {
 		return nil, fmt.Errorf("qwenimage: metal DiT needs a non-empty prefix")
-	}
-	ok := func(e error) {
-		if err == nil {
-			err = e
-		}
 	}
 	var r metal.Region
 	D, T := cfg.dim(), l.Target
@@ -131,28 +124,10 @@ func NewMetalDiT(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers int) 
 		}
 		m.lw = append(m.lw, lw)
 	}
-	nb := func(floats int) *metal.Buffer {
-		b, e := dev.NewBuffer(4 * max(floats, 1))
-		ok(e)
-		return b
-	}
-	work := func(T, sw int, cos, sin []float32) *metalWork {
-		w := &metalWork{T: T, x: nb(T * D), y: nb(T * D), q: nb(T * D), k: nb(T * D), v: nb(T * D), o: nb(T * D),
-			g: nb(T * hid), p: nb(T * hid), s: nb(T * sw), cos: nb(len(cos)), sin: nb(len(sin))}
-		if err == nil {
-			copy(f32view(w.cos), cos)
-			copy(f32view(w.sin), sin)
-		}
-		return w
-	}
-	m.tw = work(T, m.pv+T, l.targetCos, l.targetSin)
-	m.pw = work(l.Prefix, l.Prefix, l.prefixCos, l.prefixSin)
+	nb := func(floats int) *metal.Buffer { return m.buf(4*floats, &err) }
 	m.lat, m.out = nb(T*cfg.InChannels), nb(T*cfg.OutChannels)
 	m.s1, m.g1, m.s2, m.g2, m.fs = nb(D), nb(D), nb(D), nb(D), nb(D)
-	m.pmask, m.pvalid = nb(l.Prefix*l.Prefix), nb(m.pv)
-	for range layers {
-		m.kp, m.vp = append(m.kp, nb(m.pv*D)), append(m.vp, nb(m.pv*D))
-	}
+	m.pvalid = nb(m.pv)
 	if err == nil {
 		m.textIn, err = compile(BuildDiTTextIn(cfg, set, l))
 	}
@@ -160,7 +135,6 @@ func NewMetalDiT(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers int) 
 		m.Close()
 		return nil, err
 	}
-	copy(f32view(m.pmask), l.prefixMask)
 	idx := unsafe.Slice((*uint32)(unsafe.Pointer(&m.pvalid.Bytes()[0])), m.pv)
 	for i, v := range l.prefixValid {
 		idx[i] = uint32(v)
@@ -168,22 +142,124 @@ func NewMetalDiT(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers int) 
 	return m, nil
 }
 
-// metalDiTScratch is the GPU memory NewMetalDiT and Fast mode's buffers
-// allocate for layout l beyond the mapped weights, in bytes (the preflight
-// estimate; TestMetalDiTParity checks it against the device's count).
+// metalDiTScratch is the peak GPU memory a MetalDiT allocates for layout l
+// beyond the mapped weights, in bytes, running as the pipeline does
+// (Prefix, then Steps): the persistent buffers and prefix K/V, plus the
+// larger of the prefix pass's working set (freed when it ends) and the
+// steps'. The preflight's estimate; TestMetalDiTParity checks it against
+// what a run allocates.
 func metalDiTScratch(cfg DiTConfig, l *DiTLayout, layers int, fast bool) int {
 	D, T, P, pv := cfg.dim(), l.Target, l.Prefix, len(l.prefixValid)
 	hid := D * cfg.MLPRatio
-	work := func(T, sw, rope int) int { return 4 * (6*T*D + 2*T*hid + T*sw + rope) }
-	n := work(T, pv+T, len(l.targetCos)+len(l.targetSin)) + work(P, P, len(l.prefixCos)+len(l.prefixSin))
-	n += 4 * (T*(cfg.InChannels+cfg.OutChannels) + 5*D + P*P + pv + 2*layers*pv*D)
-	if fast {
-		n += 2 * (T*max(D, hid) + 3*T*D + T*(pv+T) + 2*layers*pv*D)
-		if prefixKeyEnds(l) != nil {
-			n += 2 * (P*max(D, hid) + 3*P*D + 2*P)
+	fastPrefix := fast && prefixKeyEnds(l) != nil
+	work := func(T, sw, rope int, fast, scores bool) int {
+		n := 4 * (6*T*D + 2*T*hid + rope)
+		if scores {
+			n += 4 * T * sw
+		}
+		if fast {
+			n += 2 * (T*max(D, hid) + 3*T*D)
+		}
+		return n
+	}
+	n := 4 * (T*(cfg.InChannels+cfg.OutChannels) + 5*D + pv)
+	switch {
+	case !fast:
+		n += 2 * layers * 4 * pv * D
+	case fastPrefix:
+		n += 2 * layers * 2 * pv * D
+	default:
+		n += 2*layers*2*pv*D + 2*4*pv*D
+	}
+	prefix := work(P, P, len(l.prefixCos)+len(l.prefixSin), fastPrefix, !fastPrefix)
+	if fastPrefix {
+		prefix += 4 * P
+	} else {
+		prefix += 4 * P * P
+	}
+	return n + max(prefix, work(T, pv+T, len(l.targetCos)+len(l.targetSin), fast, !fast))
+}
+
+// buf allocates n bytes of scratch (counted in bytes/peak), keeping the
+// first error in *err.
+func (m *MetalDiT) buf(n int, err *error) *metal.Buffer {
+	n = max(n, 4)
+	b, e := m.dev.NewBuffer(n)
+	if e != nil {
+		if *err == nil {
+			*err = e
+		}
+		return nil
+	}
+	m.bytes += n
+	m.peak = max(m.peak, m.bytes)
+	return b
+}
+
+// free releases buf-allocated buffers (nil ones are skipped).
+func (m *MetalDiT) free(bs ...*metal.Buffer) {
+	for _, b := range bs {
+		if b != nil {
+			m.bytes -= b.Len()
+			b.Release()
 		}
 	}
-	return n
+}
+
+// work allocates a working set over T tokens: scores (sw columns) for the
+// f32 attention path, bf16 operands for Fast.
+func (m *MetalDiT) work(T, sw int, cos, sin []float32, fast, scores bool) (*metalWork, error) {
+	D, hid := m.cfg.dim(), m.cfg.dim()*m.cfg.MLPRatio
+	var err error
+	f32 := func(n int) *metal.Buffer { return m.buf(4*n, &err) }
+	bf16 := func(n int) *metal.Buffer { return m.buf(2*n, &err) }
+	w := &metalWork{T: T, x: f32(T * D), y: f32(T * D), q: f32(T * D), k: f32(T * D), v: f32(T * D), o: f32(T * D),
+		g: f32(T * hid), p: f32(T * hid), cos: f32(len(cos)), sin: f32(len(sin))}
+	if scores {
+		w.s = f32(T * sw)
+	}
+	if fast {
+		w.y16, w.q16, w.k16, w.v16 = bf16(T*max(D, hid)), bf16(T*D), bf16(T*D), bf16(T*D)
+	}
+	if err != nil {
+		m.free(w.buffers()...)
+		return nil, err
+	}
+	copy(f32view(w.cos), cos)
+	copy(f32view(w.sin), sin)
+	return w, nil
+}
+
+// prepare allocates the prefix K/V for the mode Fast selects, on the first
+// pass; the mode cannot change afterwards.
+func (m *MetalDiT) prepare() error {
+	mode := int8(1)
+	if m.Fast {
+		mode = 2
+	}
+	if m.mode != 0 {
+		if m.mode != mode {
+			return fmt.Errorf("qwenimage: MetalDiT.Fast changed after the first pass")
+		}
+		return nil
+	}
+	D := m.cfg.dim()
+	var err error
+	for range m.layers {
+		if m.Fast {
+			m.kp16, m.vp16 = append(m.kp16, m.buf(2*m.pv*D, &err)), append(m.vp16, m.buf(2*m.pv*D, &err))
+		} else {
+			m.kp, m.vp = append(m.kp, m.buf(4*m.pv*D, &err)), append(m.vp, m.buf(4*m.pv*D, &err))
+		}
+	}
+	if m.Fast && prefixKeyEnds(m.l) == nil {
+		m.ktmp, m.vtmp = m.buf(4*m.pv*D, &err), m.buf(4*m.pv*D, &err)
+	}
+	if err != nil {
+		return err
+	}
+	m.mode = mode
+	return nil
 }
 
 // weight wraps name's shard (once) and returns its bf16 [out, in] region.
@@ -204,6 +280,12 @@ func f32view(b *metal.Buffer) []float32 {
 // SetPrefix loads the prefix pass's per-layer K/V ("k<i>", "v<i>" [valid
 // prefix tokens, dim]) — once per generation.
 func (m *MetalDiT) SetPrefix(kv map[string]*tensor.Tensor) error {
+	if m.Fast {
+		return fmt.Errorf("qwenimage: SetPrefix needs Fast off")
+	}
+	if err := m.prepare(); err != nil {
+		return err
+	}
 	for i := range m.layers {
 		for _, p := range []struct {
 			name string
@@ -237,25 +319,49 @@ func (m *MetalDiT) setMod(t float32) error {
 // over the prefix tokens with t=0 modulation and block-causal attention.
 // Once per generation, before Step.
 func (m *MetalDiT) Prefix(txt, cond *tensor.Tensor) error {
-	in, err := m.textIn.Run(m.l.PrefixFeeds(txt, cond))
-	if err != nil {
-		return err
-	}
-	copy(f32view(m.pw.x), in["x"].F32())
-	m.textIn.Release(in)
-	if err := m.setMod(0); err != nil {
+	if err := m.prepare(); err != nil {
 		return err
 	}
 	D, dh, P := m.cfg.dim(), m.cfg.AttentionHeadDim, m.l.Prefix
 	scale := float32(1 / math.Sqrt(float64(dh)))
-	w := m.pw
+	// The prefix runs fast too when its mask is prefix-shaped: every row
+	// attends to keys [0, end) (block-causal, no padding) — Flash's KeyEnd.
+	var kends []int
 	if m.Fast {
-		if err := m.fastBuffers(); err != nil {
+		kends = prefixKeyEnds(m.l)
+	}
+	fastPrefix := kends != nil
+	w, err := m.work(P, P, m.l.prefixCos, m.l.prefixSin, fastPrefix, !fastPrefix)
+	if err != nil {
+		return err
+	}
+	var aux *metal.Buffer // key limits (fast) or the additive mask (f32)
+	defer func() { m.free(append(w.buffers(), aux)...) }()
+	if fastPrefix {
+		if aux = m.buf(4*P, &err); err != nil {
 			return err
 		}
+		iv := unsafe.Slice((*uint32)(unsafe.Pointer(&aux.Bytes()[0])), P)
+		for r, e := range kends {
+			iv[r] = uint32(e)
+		}
+	} else {
+		if aux = m.buf(4*P*P, &err); err != nil {
+			return err
+		}
+		copy(f32view(aux), m.l.prefixMask)
 	}
-	if m.Fast && m.pkend != nil {
-		kend := m.pkend.At(0)
+	in, err := m.textIn.Run(m.l.PrefixFeeds(txt, cond))
+	if err != nil {
+		return err
+	}
+	copy(f32view(w.x), in["x"].F32())
+	m.textIn.Release(in)
+	if err := m.setMod(0); err != nil {
+		return err
+	}
+	if fastPrefix {
+		kend := aux.At(0)
 		return m.dev.Run(func(e *metal.Encoder) {
 			for li := range m.lw {
 				m.blockAttn(e, li, w, true, func() {
@@ -272,15 +378,18 @@ func (m *MetalDiT) Prefix(txt, cond *tensor.Tensor) error {
 	return m.dev.Run(func(e *metal.Encoder) {
 		for li := range m.lw {
 			m.block(e, li, w, false, func() {
+				if m.Fast { // stage in f32, keep bf16
+					e.GatherRows(w.k.At(0), m.ktmp.At(0), m.pvalid.At(0), m.pv, D, D, D)
+					e.GatherRows(w.v.At(0), m.vtmp.At(0), m.pvalid.At(0), m.pv, D, D, D)
+					e.CastBF16(m.ktmp.At(0), m.kp16[li].At(0), m.pv, D, D, D)
+					e.CastBF16(m.vtmp.At(0), m.vp16[li].At(0), m.pv, D, D, D)
+					return
+				}
 				e.GatherRows(w.k.At(0), m.kp[li].At(0), m.pvalid.At(0), m.pv, D, D, D)
 				e.GatherRows(w.v.At(0), m.vp[li].At(0), m.pvalid.At(0), m.pv, D, D, D)
-				if m.Fast {
-					e.CastBF16(m.kp[li].At(0), m.kp16[li].At(0), m.pv, D, D, D)
-					e.CastBF16(m.vp[li].At(0), m.vp16[li].At(0), m.pv, D, D, D)
-				}
 			}, func(ho int) {
 				e.Gemm(metal.Gemm{M: P, N: P, K: dh, A: w.q.At(ho), LDA: D, B: w.k.At(ho), LDB: D, C: w.s.At(0), TransB: true})
-				e.SoftmaxRowsMasked(w.s.At(0), m.pmask.At(0), P, P, P, P, scale)
+				e.SoftmaxRowsMasked(w.s.At(0), aux.At(0), P, P, P, P, scale)
 				e.Gemm(metal.Gemm{M: P, N: dh, K: P, A: w.s.At(0), B: w.v.At(ho), LDB: D, C: w.o.At(ho), LDC: D})
 			})
 		}
@@ -302,11 +411,18 @@ func (m *MetalDiT) Step(x *tensor.Tensor, t float32) (*tensor.Tensor, error) {
 	}
 	scale := float32(1 / math.Sqrt(float64(dh)))
 	SW := P + T
-	w := m.tw
 	fast := m.Fast
-	if fast && len(m.kp16) == 0 {
-		return nil, fmt.Errorf("qwenimage: Fast set after Prefix")
+	if err := m.prepare(); err != nil {
+		return nil, err
 	}
+	if m.tw == nil {
+		w, err := m.work(T, SW, m.l.targetCos, m.l.targetSin, fast, !fast)
+		if err != nil {
+			return nil, err
+		}
+		m.tw = w
+	}
+	w := m.tw
 	err := m.dev.Run(func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: T, N: D, K: cfg.InChannels, A: m.lat.At(0), B: m.imgIn, C: w.x.At(0), TransB: true, BF16: true})
 		for li := range m.lw {
@@ -447,62 +563,16 @@ func prefixKeyEnds(l *DiTLayout) []int {
 	return ends
 }
 
-// fastBuffers allocates the bf16 scratch Fast mode needs.
-func (m *MetalDiT) fastBuffers() error {
-	if len(m.kp16) > 0 {
-		return nil
-	}
-	D, hid, T := m.cfg.dim(), m.cfg.dim()*m.cfg.MLPRatio, m.tw.T
-	var err error
-	nb := func(elems int) *metal.Buffer {
-		b, e := m.dev.NewBuffer(2 * max(elems, 1))
-		if err == nil {
-			err = e
-		}
-		return b
-	}
-	w := m.tw
-	w.y16, w.q16, w.k16, w.v16, w.s16 = nb(T*max(D, hid)), nb(T*D), nb(T*D), nb(T*D), nb(T*(m.pv+T))
-	for range m.layers {
-		m.kp16, m.vp16 = append(m.kp16, nb(m.pv*D)), append(m.vp16, nb(m.pv*D))
-	}
-	// The prefix runs fast too when its mask is prefix-shaped: every row
-	// attends to keys [0, end) (block-causal, no padding) — Flash's KeyEnd.
-	if kend := prefixKeyEnds(m.l); kend != nil {
-		P := m.l.Prefix
-		p := m.pw
-		p.y16, p.q16, p.k16, p.v16 = nb(P*max(D, hid)), nb(P*D), nb(P*D), nb(P*D)
-		m.pkend = nb(2 * P) // P uint32s
-		if err == nil {
-			iv := unsafe.Slice((*uint32)(unsafe.Pointer(&m.pkend.Bytes()[0])), P)
-			for r, e := range kend {
-				iv[r] = uint32(e)
-			}
-		}
-	}
-	return err
-}
-
 // Close releases the GPU buffers (the mapped weights stay the caller's).
 func (m *MetalDiT) Close() {
-	for _, w := range []*metalWork{m.tw, m.pw} {
-		if w != nil {
-			w.release()
-		}
+	if m.tw != nil {
+		m.free(m.tw.buffers()...)
 	}
-	for _, b := range []*metal.Buffer{m.lat, m.out, m.s1, m.g1, m.s2, m.g2, m.fs, m.pmask, m.pvalid, m.pkend} {
-		if b != nil {
-			b.Release()
-		}
-	}
-	for i := range m.kp {
-		m.kp[i].Release()
-		m.vp[i].Release()
-	}
-	for i := range m.kp16 {
-		m.kp16[i].Release()
-		m.vp16[i].Release()
-	}
+	m.free(m.lat, m.out, m.s1, m.g1, m.s2, m.g2, m.fs, m.pvalid, m.ktmp, m.vtmp)
+	m.free(m.kp...)
+	m.free(m.vp...)
+	m.free(m.kp16...)
+	m.free(m.vp16...)
 	for _, lw := range m.lw {
 		lw.normQ.Release()
 		lw.normK.Release()

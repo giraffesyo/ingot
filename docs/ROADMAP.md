@@ -331,6 +331,10 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       nondeterministic at 2048²), chunked mid attention, working-set
       preflight for every GPU stage, latents saved before decoding
       (CLI -from-latents)
+- [x] DiT GPU memory by mode: Fast keeps only the bf16 prefix K/V (no f32
+      copy, no score matrices or prefix mask — flash attention needs none),
+      the prefix working set is freed before the steps allocate theirs;
+      a 2048-class edit (1760×2368, ~20k prefix tokens) 49.8 -> 25.0 GB
 - [x] image editing: vision tower, multimodal text encoder (image tokens,
       deepstack, 3D M-RoPE), VAE encoder, condition-aware layout — all on
       the GPU; parity 1.5e-4 (f32) vs diffusers; CLI -image
