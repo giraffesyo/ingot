@@ -168,6 +168,24 @@ func NewMetalDiT(cfg DiTConfig, set *safetensors.Set, l *DiTLayout, layers int) 
 	return m, nil
 }
 
+// metalDiTScratch is the GPU memory NewMetalDiT and Fast mode's buffers
+// allocate for layout l beyond the mapped weights, in bytes (the preflight
+// estimate; TestMetalDiTParity checks it against the device's count).
+func metalDiTScratch(cfg DiTConfig, l *DiTLayout, layers int, fast bool) int {
+	D, T, P, pv := cfg.dim(), l.Target, l.Prefix, len(l.prefixValid)
+	hid := D * cfg.MLPRatio
+	work := func(T, sw, rope int) int { return 4 * (6*T*D + 2*T*hid + T*sw + rope) }
+	n := work(T, pv+T, len(l.targetCos)+len(l.targetSin)) + work(P, P, len(l.prefixCos)+len(l.prefixSin))
+	n += 4 * (T*(cfg.InChannels+cfg.OutChannels) + 5*D + P*P + pv + 2*layers*pv*D)
+	if fast {
+		n += 2 * (T*max(D, hid) + 3*T*D + T*(pv+T) + 2*layers*pv*D)
+		if prefixKeyEnds(l) != nil {
+			n += 2 * (P*max(D, hid) + 3*P*D + 2*P)
+		}
+	}
+	return n
+}
+
 // weight wraps name's shard (once) and returns its bf16 [out, in] region.
 func (m *MetalDiT) weight(set *safetensors.Set, name string, out, in int) (metal.Region, error) {
 	return wrapWeight(m.dev, m.shards, set, name, out, in)
@@ -454,7 +472,7 @@ func (m *MetalDiT) fastBuffers() error {
 		P := m.l.Prefix
 		p := m.pw
 		p.y16, p.q16, p.k16, p.v16 = nb(P*max(D, hid)), nb(P*D), nb(P*D), nb(P*D)
-		m.pkend = nb(P)
+		m.pkend = nb(2 * P) // P uint32s
 		if err == nil {
 			iv := unsafe.Slice((*uint32)(unsafe.Pointer(&m.pkend.Bytes()[0])), P)
 			for r, e := range kend {

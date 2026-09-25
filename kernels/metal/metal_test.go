@@ -92,3 +92,25 @@ func BenchmarkSaxpy(b *testing.B) {
 		by.Release()
 	}
 }
+
+func TestWorkingSet(t *testing.T) {
+	d, err := Open()
+	if err != nil {
+		t.Skip(err)
+	}
+	ws := d.MaxWorkingSet()
+	if ws <= 0 {
+		t.Fatalf("MaxWorkingSet = %d", ws)
+	}
+	before := d.Allocated()
+	b, err := d.NewBuffer(64 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grew := d.Allocated() - before
+	b.Release()
+	if grew < 64<<20 {
+		t.Errorf("Allocated grew %d bytes for a 64 MiB buffer", grew)
+	}
+	t.Logf("%s: working set %.1f GB", d.Name, float64(ws)/(1<<30))
+}

@@ -177,6 +177,17 @@ the DESIGN-kvcache.md machinery generalised from T=1 decode to T=4096
 pixel shuffles; one single-head attention (d=1152) in the mid block at
 latent resolution. Every op already exists in `ops/`.
 
+The GPU decoder runs in bands: everything after the mid attention is local
+(3×3 convs, nearest upsampling, per-pixel norms), so each up block runs
+over horizontal bands of its input with 2·resblocks+1 halo rows either
+side, and the rows it keeps are bit-identical to a whole-image decode. At
+2048² the whole-image decoder's buffers were 5 × 4.8 GB (the 288-channel
+upsampled tensor); banded, GPU scratch is ~3 GB at any size. The mid
+attention runs in query chunks. Before any stage runs, the pipeline
+checks each GPU stage (weights + planned scratch) against the device's
+`recommendedMaxWorkingSetSize`, and it saves the denoised latents before
+decoding (`-from-latents` retries a decode).
+
 **Pipeline defaults:** 40 steps, no CFG (`true_cfg_scale=1`: the model is
 meant to be sampled without guidance — one DiT pass per step),
 FlowMatchEuler with dynamic exponential shift (seq-len 256→8192 maps

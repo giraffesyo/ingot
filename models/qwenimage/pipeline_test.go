@@ -137,20 +137,66 @@ func generateParity(t *testing.T, device string) {
 	snap := snapshotDir(t)
 	ref := loadRef(t, "pipeline")
 	hw := ref.Meta["hw"].([]any)
+	saved := filepath.Join(t.TempDir(), "x.latents")
 	res, err := Generate(snap, Options{
-		Device:  device,
-		Prompt:  ref.Meta["prompt"].(string),
-		Width:   int(hw[1].(float64)),
-		Height:  int(hw[0].(float64)),
-		Steps:   int(ref.Meta["steps"].(float64)),
-		Latents: ref.tensor(t, "latents0"),
-		Log:     t.Logf,
+		Device:      device,
+		Prompt:      ref.Meta["prompt"].(string),
+		Width:       int(hw[1].(float64)),
+		Height:      int(hw[0].(float64)),
+		Steps:       int(ref.Meta["steps"].(float64)),
+		Latents:     ref.tensor(t, "latents0"),
+		SaveLatents: saved,
+		Log:         t.Logf,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("peak RSS %.1f GB", peakRSSGB())
 	compare(t, "image", res.Float.F32(), ref.tensor(t, "image").F32(), 5e-3)
+
+	// Resuming from the saved latents decodes the same image.
+	x, lh, lw, err := LoadLatents(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := DecodeLatents(snap, x, lh, lw, device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compare(t, "image from saved latents", again.Float.F32(), res.Float.F32(), 0)
+}
+
+func TestLatentsFile(t *testing.T) {
+	x := tensor.New(tensor.F32, 6, 4)
+	for i := range x.F32() {
+		x.F32()[i] = float32(i)*0.37 - 3
+	}
+	x.F32()[5] = float32(math.Inf(-1))
+	path := filepath.Join(t.TempDir(), "l")
+	if err := SaveLatents(path, x, 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	y, lh, lw, err := LoadLatents(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lh != 2 || lw != 3 || !y.Shape().Equal(x.Shape()) {
+		t.Fatalf("loaded %v %d×%d", y.Shape(), lh, lw)
+	}
+	for i, v := range y.F32() {
+		if v != x.F32()[i] {
+			t.Fatalf("value %d: %v, want %v", i, v, x.F32()[i])
+		}
+	}
+	if err := SaveLatents(path, x, 3, 3); err == nil {
+		t.Error("saved 6 rows as 3×3 latents")
+	}
+	if err := os.WriteFile(path, []byte("QILATNT1\x02\x00\x00\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := LoadLatents(path); err == nil {
+		t.Error("loaded a truncated file")
+	}
 }
 
 // TestEditPromptIDs: the edit chat template, pad-expanded for the
