@@ -158,6 +158,9 @@ func Load(dir string) (*Model, error) {
 	if m.codecSet, err = safetensors.OpenDir(filepath.Join(dir, "speech_tokenizer")); err != nil {
 		return nil, err
 	}
+	// Every weight is read on the first utterance: start the page-in now.
+	m.set.WillNeed()
+	m.codecSet.WillNeed()
 	w := weights{set: m.set}
 	defer catch(&err)
 	t := m.Cfg.Talker

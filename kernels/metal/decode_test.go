@@ -377,3 +377,147 @@ func TestFusedDecode(t *testing.T) {
 		}
 	}
 }
+
+// TestAttnDecodeRoPE: attention with the q/k RMSNorm + RoPE folded in,
+// against the oracle "normalise and rotate on the host, then attend"; the
+// new keys must land, finished, in the cache rows.
+func TestAttnDecodeRoPE(t *testing.T) {
+	d := decodeDev(t)
+	r := rand.New(rand.NewPCG(39, 40))
+	for _, c := range []struct{ H, KV, dh, pos0, T, mode int }{{16, 8, 128, 23, 1, RopeHalf}, {8, 4, 64, 9, 2, RopeHalf}, {4, 4, 64, 5, 2, RopePairs}} {
+		n := c.pos0 + c.T
+		ld := c.KV * c.dh
+		q, out, kn := buf(t, d, c.T*c.H*c.dh), buf(t, d, c.T*c.H*c.dh), buf(t, d, c.T*ld)
+		kc, vc := buf(t, d, n*ld), buf(t, d, n*ld)
+		qw, kw := buf(t, d, c.dh), buf(t, d, c.dh)
+		cs, sn := buf(t, d, n*c.dh/2), buf(t, d, n*c.dh/2)
+		qf, knf := fill(r, q), fill(r, kn)
+		kcf, vf := fill(r, kc), fill(r, vc)
+		qwf, kwf, cf, sf := fill(r, qw), fill(r, kw), fill(r, cs), fill(r, sn)
+		normRope := func(src []float32, w []float32, p int) []float64 {
+			var ss float64
+			for i := range c.dh {
+				ss += float64(src[i]) * float64(src[i])
+			}
+			inv := 1 / math.Sqrt(ss/float64(c.dh)+1e-6)
+			row := make([]float64, c.dh)
+			for i := range row {
+				row[i] = float64(src[i]) * inv * float64(w[i])
+			}
+			out := make([]float64, c.dh)
+			hd := c.dh / 2
+			for i := range out {
+				if c.mode == RopeHalf {
+					j := i % hd
+					co, si := float64(cf[p*hd+j]), float64(sf[p*hd+j])
+					if i < hd {
+						out[i] = row[j]*co - row[j+hd]*si
+					} else {
+						out[i] = row[j+hd]*co + row[j]*si
+					}
+				} else {
+					j := i / 2
+					co, si := float64(cf[p*hd+j]), float64(sf[p*hd+j])
+					if i%2 == 0 {
+						out[i] = row[2*j]*co - row[2*j+1]*si
+					} else {
+						out[i] = row[2*j]*si + row[2*j+1]*co
+					}
+				}
+			}
+			return out
+		}
+		// Oracle keys: cached ones as they are, new ones finished.
+		keys := make([][]float64, n*c.KV)
+		for j := range n {
+			for kh := range c.KV {
+				if j < c.pos0 {
+					row := make([]float64, c.dh)
+					for i := range row {
+						row[i] = float64(kcf[j*ld+kh*c.dh+i])
+					}
+					keys[j*c.KV+kh] = row
+				} else {
+					keys[j*c.KV+kh] = normRope(knf[(j-c.pos0)*ld+kh*c.dh:], kwf, j)
+				}
+			}
+		}
+		scale := float32(1 / math.Sqrt(float64(c.dh)))
+		if err := d.Run(func(e *Encoder) {
+			e.AttnDecodeRoPE(q.At(0), kc.At(0), vc.At(0), out.At(0), kn.At(0), qw.At(0), kw.At(0), cs.At(0), sn.At(0),
+				c.T, c.H, c.KV, c.dh, c.pos0, c.mode, scale, 1e-6)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		of, kcAfter := f32s(out.Bytes()), f32s(kc.Bytes())
+		for tt := range c.T {
+			for h := range c.H {
+				kh := h / (c.H / c.KV)
+				qv := normRope(qf[tt*c.H*c.dh+h*c.dh:], qwf, c.pos0+tt)
+				keysN := c.pos0 + tt + 1
+				s := make([]float64, keysN)
+				m := math.Inf(-1)
+				for j := range keysN {
+					for i := range c.dh {
+						s[j] += qv[i] * keys[j*c.KV+kh][i]
+					}
+					s[j] *= float64(scale)
+					m = math.Max(m, s[j])
+				}
+				var sum float64
+				for j := range s {
+					s[j] = math.Exp(s[j] - m)
+					sum += s[j]
+				}
+				for i := range c.dh {
+					var want float64
+					for j := range keysN {
+						want += s[j] / sum * float64(vf[j*ld+kh*c.dh+i])
+					}
+					near(t, "attn_rope", of[tt*c.H*c.dh+h*c.dh+i], want, 1e-5)
+				}
+			}
+		}
+		for u := range c.T {
+			for kh := range c.KV {
+				for i := range c.dh {
+					near(t, "cached new key", kcAfter[(c.pos0+u)*ld+kh*c.dh+i], keys[(c.pos0+u)*c.KV+kh][i], 1e-5)
+				}
+			}
+		}
+	}
+}
+
+// TestSampleEmbed: the sampled code's embedding row lands in dst (argmax
+// and sampled), and the code matches SampleLogits on the same draw.
+func TestSampleEmbed(t *testing.T) {
+	d := decodeDev(t)
+	r := rand.New(rand.NewPCG(41, 42))
+	const V, D = 2048, 1100
+	lg, codes, dst := buf(t, d, V), buf(t, d, 8), buf(t, d, D)
+	tab := buf(t, d, V*D/2)
+	fill(r, lg)
+	tb := unsafe.Slice((*uint16)(unsafe.Pointer(&tab.Bytes()[0])), V*D)
+	for i := range tb {
+		tb[i] = uint16(math.Float32bits(r.Float32()*2-1) >> 16)
+	}
+	cf := unsafe.Slice((*uint32)(unsafe.Pointer(&codes.Bytes()[0])), 8)
+	for i, greedy := range []bool{true, false, false} {
+		u := r.Float32()
+		if err := d.Run(func(e *Encoder) {
+			e.SampleLogits(lg.At(0), codes.At(0), V, 50, greedy, 0.9, u, 2*i)
+			e.SampleEmbed(lg.At(0), codes.At(0), V, 50, greedy, 0.9, u, 2*i+1, tab.At(0), dst.At(0), D)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if cf[2*i] != cf[2*i+1] {
+			t.Fatalf("SampleEmbed chose %d, SampleLogits %d", cf[2*i+1], cf[2*i])
+		}
+		code := int(cf[2*i+1])
+		for c, v := range f32s(dst.Bytes())[:D] {
+			if want := math.Float32frombits(uint32(tb[code*D+c]) << 16); v != want {
+				t.Fatalf("dst[%d] = %g, want row %d's %g", c, v, code, want)
+			}
+		}
+	}
+}

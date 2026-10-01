@@ -343,6 +343,99 @@ kernel void attn_decode(device const float* Q [[buffer(0)]], device const float*
 	}
 }
 
+// attn_decode_rope: attn_decode for up to 4 new tokens whose q and k rows
+// arrive raw (straight from the QKV GEMV): q and the new k rows are
+// RMS-normalised (qw / kw) and rotated (rotate_half or pairs; cos/sin
+// rows per position) inside the kernel — no separate norm/RoPE dispatch.
+// Keys before pos0 come from the cache (already normalised); the new
+// ones are recomputed by every threadgroup from Kn [n, KV·dh], and the
+// threadgroups with h % (H/KV) == 0, t == 0 write them, finished, to the
+// cache rows pos0.. for later steps (no one reads those rows in this
+// dispatch). p = (H, KV, dh, pos0); p2 = (n, mode, 0, 0); f = (scale, eps).
+static void norm_rope_lane(thread float* v, uint per, device const float* w, device const float* cs,
+                           device const float* sn, uint mode, float eps, uint lane, uint dh) {
+	float ss = 0;
+	for (uint i = 0; i < per; i++) ss += v[i] * v[i];
+	const float inv = rsqrt(simd_sum(ss) / dh + eps);
+	for (uint i = 0; i < per; i++) v[i] *= inv * w[lane + 32 * i];
+	const uint hp = per / 2;
+	if (mode == 1) { // rotate_half: element i pairs with i + per/2 in the same lane
+		for (uint i = 0; i < hp; i++) {
+			const uint j = lane + 32 * i;
+			const float c = cs[j], s = sn[j], a = v[i], b = v[i + hp];
+			v[i] = a * c - b * s;
+			v[i + hp] = b * c + a * s;
+		}
+	} else { // pairs (2j, 2j+1): neighbours across lanes
+		for (uint i = 0; i < per; i++) {
+			const uint e = lane + 32 * i, j = e / 2;
+			const float o = simd_shuffle_xor(v[i], 1u);
+			const float c = cs[j], s = sn[j];
+			v[i] = (e % 2 == 0) ? v[i] * c - o * s : o * s + v[i] * c;
+		}
+	}
+}
+
+kernel void attn_decode_rope(device const float* Q [[buffer(0)]], device float* Kc [[buffer(1)]],
+                             device const float* Vc [[buffer(2)]], device float* O [[buffer(3)]],
+                             device const float* Kn [[buffer(4)]], device const float* qw [[buffer(5)]],
+                             device const float* kw [[buffer(6)]], device const float* COS [[buffer(7)]],
+                             device const float* SIN [[buffer(8)]], constant uint4& p [[buffer(9)]],
+                             constant uint4& p2 [[buffer(10)]], constant float4& f [[buffer(11)]],
+                             uint2 g [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+                             uint lane [[thread_index_in_simdgroup]]) {
+	const uint H = p.x, KV = p.y, dh = p.z, pos0 = p.w, h = g.x, t = g.y, nn = p2.x, mode = p2.y;
+	const uint group = H / KV, kvh = h / group, ldk = KV * dh, per = dh / 32, hd = dh / 2;
+	const uint n = pos0 + t + 1;
+	float qv[4], acc[4] = {0, 0, 0, 0};
+	for (uint i = 0; i < per; i++) qv[i] = Q[t * H * dh + h * dh + lane + 32 * i];
+	norm_rope_lane(qv, per, qw, COS + (pos0 + t) * hd, SIN + (pos0 + t) * hd, mode, f.y, lane, dh);
+	float m = -INFINITY, l = 0;
+	for (uint j = sg; j < n; j += SG) {
+		float kv[4];
+		if (j < pos0) {
+			for (uint i = 0; i < per; i++) kv[i] = Kc[j * ldk + kvh * dh + lane + 32 * i];
+		} else {
+			const uint u = j - pos0;
+			for (uint i = 0; i < per; i++) kv[i] = Kn[u * ldk + kvh * dh + lane + 32 * i];
+			norm_rope_lane(kv, per, kw, COS + j * hd, SIN + j * hd, mode, f.y, lane, dh);
+		}
+		float s = 0;
+		for (uint i = 0; i < per; i++) s += qv[i] * kv[i];
+		s = simd_sum(s) * f.x;
+		const float mn = max(m, s), c = exp(m - mn), e = exp(s - mn);
+		l = l * c + e;
+		device const float* vr = Vc + j * ldk + kvh * dh;
+		for (uint i = 0; i < per; i++) acc[i] = acc[i] * c + e * vr[lane + 32 * i];
+		m = mn;
+	}
+	threadgroup float tm[SG], tl[SG], ta[SG * 128];
+	if (lane == 0) { tm[sg] = m; tl[sg] = l; }
+	for (uint i = 0; i < per; i++) ta[sg * 128 + lane + 32 * i] = acc[i];
+	threadgroup_barrier(mem_flags::mem_threadgroup);
+	if (sg == 0) {
+		float M = -INFINITY;
+		for (uint s = 0; s < SG; s++) M = max(M, tm[s]);
+		float L = 0, w[SG];
+		for (uint s = 0; s < SG; s++) { w[s] = exp(tm[s] - M); L += tl[s] * w[s]; }
+		device float* orow = O + t * H * dh + h * dh;
+		for (uint i = 0; i < per; i++) {
+			float v = 0;
+			for (uint s = 0; s < SG; s++) v += ta[s * 128 + lane + 32 * i] * w[s];
+			orow[lane + 32 * i] = v / L;
+		}
+	}
+	// One threadgroup per kv head stores the finished new keys.
+	if (h % group == 0 && t == 0 && sg == 1) {
+		for (uint u = 0; u < nn; u++) {
+			float kv[4];
+			for (uint i = 0; i < per; i++) kv[i] = Kn[u * ldk + kvh * dh + lane + 32 * i];
+			norm_rope_lane(kv, per, kw, COS + (pos0 + u) * hd, SIN + (pos0 + u) * hd, mode, f.y, lane, dh);
+			for (uint i = 0; i < per; i++) Kc[(pos0 + u) * ldk + kvh * dh + lane + 32 * i] = kv[i];
+		}
+	}
+}
+
 constant uint ST = 1024; // sample_logits threads (one threadgroup)
 
 static float tsum(float v, threadgroup float* sc, uint sg, uint lane) {
@@ -361,12 +454,18 @@ static uint fkey(float f) { uint b = as_type<uint>(f); return (b & 0x80000000u) 
 // logits [V]; p = (V, topK, greedy, outIndex); f = (temperature, u, 0, 0);
 // writes the token to codes[outIndex]. Each thread owns the contiguous
 // indices [tid·per, (tid+1)·per) so the draw runs in index order.
+// With p2.y != 0 the chosen code's bf16 embedding row (table [*, p2.x])
+// is also written to dst — the next decode step's input, no extra
+// dispatch.
 kernel void sample_logits(device const float* logits [[buffer(0)]], device uint* codes [[buffer(1)]],
                           constant uint4& p [[buffer(2)]], constant float4& f [[buffer(3)]],
+                          device const bfloat* table [[buffer(4)]], device float* dst [[buffer(5)]],
+                          constant uint4& p2 [[buffer(6)]],
                           uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
                           uint lane [[thread_index_in_simdgroup]]) {
 	threadgroup float sc[ST / 32];
 	threadgroup uint si[ST / 32];
+	threadgroup uint chosen;
 	const uint V = p.x, per = (V + ST - 1) / ST, lo = tid * per, hi = min(lo + per, V);
 	if (p.z != 0) { // argmax, first index of the maximum
 		float bv = -INFINITY; uint bi = 0xffffffffu;
@@ -380,9 +479,9 @@ kernel void sample_logits(device const float* logits [[buffer(0)]], device uint*
 			for (uint s = 0; s < ST / 32; s++)
 				if (sc[s] > best || (sc[s] == best && si[s] < idx)) { best = sc[s]; idx = si[s]; }
 			codes[p.w] = idx;
+			chosen = idx;
 		}
-		return;
-	}
+	} else {
 	const float temp = f.x > 0 ? f.x : 1.0f;
 	// k-th largest key by bitwise radix select: the largest K with
 	// count(key >= K) >= k.
@@ -428,13 +527,20 @@ kernel void sample_logits(device const float* logits [[buffer(0)]], device uint*
 			pick = i;
 		}
 		codes[p.w] = pick;
+		chosen = pick;
 	}
 	// target >= total (rounding): the last kept index.
 	if (tid == ST - 1 && !(target < total)) {
 		uint last = 0;
 		for (uint i = 0; i < V; i++) if (fkey(logits[i] / temp) >= K) last = i;
 		codes[p.w] = last;
+		chosen = last;
 	}
+	}
+	if (p2.y == 0) return;
+	threadgroup_barrier(mem_flags::mem_threadgroup);
+	const uint code = chosen;
+	for (uint c = tid; c < p2.x; c += ST) dst[c] = float(table[code * p2.x + c]);
 }
 
 // dst[c] = float(table[codes[p.y] · p.x + c]) for c < p.x (bf16 table).
@@ -452,7 +558,7 @@ var decodePSO struct {
 	gemvQ8S, gemvBF16S     *Pipeline
 	gemvFBF16, gemvFQ8     *Pipeline
 	gluFBF16, gluFQ8       *Pipeline
-	ropeQK                 *Pipeline
+	ropeQK, attnRope       *Pipeline
 	sample, embed          *Pipeline
 	err                    error
 }
@@ -467,7 +573,7 @@ func (d *Device) PrepareDecode() error {
 			{"gemv_q8s", &decodePSO.gemvQ8S}, {"gemv_bf16s", &decodePSO.gemvBF16S},
 			{"gemv_f_bf16", &decodePSO.gemvFBF16}, {"gemv_f_q8", &decodePSO.gemvFQ8},
 			{"glu_f_bf16", &decodePSO.gluFBF16}, {"glu_f_q8", &decodePSO.gluFQ8},
-			{"rmsnorm_rope_qk", &decodePSO.ropeQK},
+			{"rmsnorm_rope_qk", &decodePSO.ropeQK}, {"attn_decode_rope", &decodePSO.attnRope},
 			{"sample_logits", &decodePSO.sample}, {"embed_row", &decodePSO.embed}} {
 			if *k.dst, decodePSO.err = d.Compile(decodeSrc, k.name); decodePSO.err != nil {
 				return
@@ -553,6 +659,25 @@ func (e *Encoder) AttnDecode(q, k, v, out Region, t, heads, kvHeads, dh, pos0, l
 	}
 }
 
+// AttnDecodeRoPE is AttnDecode for t ≤ 4 new tokens with q [t, heads·dh]
+// and the new keys kNew [t, kvHeads·dh] raw: both are RMS-normalised (qw,
+// kw; eps) and rotated (mode; cos/sin tables [pos, dh/2] from position 0)
+// in the kernel, and the finished new keys are written to k's cache rows
+// pos0... The V rows must already be in the cache.
+func (e *Encoder) AttnDecodeRoPE(q, k, v, out, kNew, qw, kw, cos, sin Region, t, heads, kvHeads, dh, pos0, mode int, scale, eps float32) {
+	if e.err != nil {
+		return
+	}
+	if dh > 128 || dh%64 != 0 || kvHeads <= 0 || heads%kvHeads != 0 || t < 1 || t > 4 || heads/kvHeads < 1 {
+		e.err = fmt.Errorf("metal: attn_decode_rope heads %d/%d dh %d t %d", heads, kvHeads, dh, t)
+		return
+	}
+	if e.ready(decodePSO.attnRope) {
+		e.Dispatch(decodePSO.attnRope, [3]int{heads * 256, t, 1}, [3]int{256, 1, 1}, q, k, v, out, kNew, qw, kw, cos, sin,
+			u32s(heads, kvHeads, dh, pos0), u32s(t, mode, 0, 0), f32c(scale, eps))
+	}
+}
+
 // SampleLogits encodes drawing one token from logits [v] into
 // codes[outIndex] (uint32): argmax when greedy (first maximum), else
 // softmax over temperature-scaled logits restricted to the top k (k <= 0:
@@ -561,7 +686,16 @@ func (e *Encoder) AttnDecode(q, k, v, out Region, t, heads, kvHeads, dh, pos0, l
 func (e *Encoder) SampleLogits(logits, codes Region, v, topK int, greedy bool, temperature, u float32, outIndex int) {
 	if e.ready(decodePSO.sample) {
 		e.Dispatch(decodePSO.sample, [3]int{1024, 1, 1}, [3]int{1024, 1, 1}, logits, codes,
-			u32s(v, topK, b2i(greedy), outIndex), f32c(temperature, u))
+			u32s(v, topK, b2i(greedy), outIndex), f32c(temperature, u), codes, codes, u32s(0, 0, 0, 0))
+	}
+}
+
+// SampleEmbed is SampleLogits that also writes the chosen code's bf16
+// embedding row (table [*, d]) to dst, as EmbedRow would.
+func (e *Encoder) SampleEmbed(logits, codes Region, v, topK int, greedy bool, temperature, u float32, outIndex int, table, dst Region, d int) {
+	if e.ready(decodePSO.sample) {
+		e.Dispatch(decodePSO.sample, [3]int{1024, 1, 1}, [3]int{1024, 1, 1}, logits, codes,
+			u32s(v, topK, b2i(greedy), outIndex), f32c(temperature, u), table, dst, u32s(d, 1, 0, 0))
 	}
 }
 

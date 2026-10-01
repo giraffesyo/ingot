@@ -82,6 +82,15 @@ func (s *Set) Close() error {
 	return errors.Join(errs...)
 }
 
+// WillNeed asks the OS to start reading every mapped shard in (async,
+// best effort): a model about to touch all its weights pays the page-in
+// during setup instead of on its first forward pass.
+func (s *Set) WillNeed() {
+	for _, f := range s.files {
+		willNeed(f.raw)
+	}
+}
+
 // Names lists every tensor across shards, sorted.
 func (s *Set) Names() []string {
 	out := make([]string, 0, len(s.byName))

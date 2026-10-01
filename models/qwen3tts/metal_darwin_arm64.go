@@ -386,14 +386,7 @@ func (m *metalLM) load(x []float32, n int) error {
 // already in xin/x) and the final norm of the last row into hid.
 func (m *metalLM) encodeStack(e *metal.Encoder, n, pos int) {
 	D, eps := m.c.HiddenSize, m.c.RMSNormEps
-	if m.proj != nil {
-		m.lin(e, m.xin.At(0), m.x.At(0), m.proj, n, false, m.projB)
-	}
-	if n <= 4 {
-		m.encodeDecodeLayers(e, n, pos)
-	} else {
-		m.encodePrefillLayers(e, n, pos)
-	}
+	m.encodeLayers(e, n, pos)
 	e.RMSNormRows(m.x.At(4*(n-1)*D), m.hid.At(0), m.norm.At(0), 1, D, D, D, eps)
 }
 
@@ -402,7 +395,8 @@ func (m *metalLM) encodeStack(e *metal.Encoder, n, pos int) {
 // norm folded in and its outputs split into q and the cache rows; q/k
 // norm + RoPE; then attention over the cache for all rows; then the O GEMV
 // accumulating into the residual, the gate/up GEMV (post-norm folded in,
-// SiLU·mul in-kernel) and the down GEMV accumulating.
+// SiLU·mul in-kernel) and the down GEMV accumulating. Attention does the
+// q/k norm + RoPE (AttnDecodeRoPE).
 func (m *metalLM) encodeDecodeLayers(e *metal.Encoder, n, pos int) {
 	c := m.c
 	D, H, KV, dh, I := c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, c.IntermediateSize
@@ -412,13 +406,15 @@ func (m *metalLM) encodeDecodeLayers(e *metal.Encoder, n, pos int) {
 	for li, l := range m.layers {
 		for r := range n {
 			p := pos + r
+			// q raw, the new k raw into scratch (u), v straight into the cache.
 			e.Gemv1(metal.FusedGemv{N: Hd + 2*ldkv, K: D, X: m.x.At(4 * r * D), W: l.qkv,
-				Y0: m.q.At(4 * r * Hd), Y1: m.kc[li].At(4 * p * ldkv), Y2: m.vc[li].At(4 * p * ldkv),
+				Y0: m.q.At(4 * r * Hd), Y1: m.u.At(4 * r * ldkv), Y2: m.vc[li].At(4 * p * ldkv),
 				N1: Hd, N2: Hd + ldkv, Norm: true, NormW: l.inNorm.At(0), Eps: eps})
-			e.RMSNormRoPEQK(m.q.At(4*r*Hd), m.kc[li].At(4*p*ldkv), l.qNorm.At(0), l.kNorm.At(0),
-				m.cos.At(4*p*dh/2), m.sin.At(4*p*dh/2), H, KV, dh, metal.RopeHalf, eps)
 		}
-		e.AttnDecode(m.q.At(0), m.kc[li].At(0), m.vc[li].At(0), m.o.At(0), n, H, KV, dh, pos, Hd, Hd, scale)
+		// Attention normalises and rotates q and the new k itself, and
+		// stores the finished k rows in the cache.
+		e.AttnDecodeRoPE(m.q.At(0), m.kc[li].At(0), m.vc[li].At(0), m.o.At(0), m.u.At(0), l.qNorm.At(0), l.kNorm.At(0),
+			m.cos.At(0), m.sin.At(0), n, H, KV, dh, pos, metal.RopeHalf, scale, eps)
 		for r := range n {
 			e.Gemv1(metal.FusedGemv{N: D, K: Hd, X: m.o.At(4 * r * Hd), W: l.o.dec(), Y0: m.x.At(4 * r * D), Accumulate: true})
 			e.GLU1(I, D, m.x.At(4*r*D), l.gate.dec(), l.up.dec(), m.g.At(4*r*I), true, l.postNorm.At(0), eps)
@@ -451,6 +447,19 @@ func (m *metalLM) encodePrefillLayers(e *metal.Encoder, n, pos int) {
 		m.lin(e, m.y.At(0), m.u.At(0), l.up, n, false, nil)
 		e.SiLUMul(m.g.At(0), m.u.At(0), m.g.At(0), n, I, I, I, I)
 		m.lin(e, m.g.At(0), m.x.At(0), l.down, n, true, nil)
+	}
+}
+
+// encodeLayers encodes the input projection (if any) and the decoder
+// layers over n rows at positions pos.. (input already in xin/x).
+func (m *metalLM) encodeLayers(e *metal.Encoder, n, pos int) {
+	if m.proj != nil {
+		m.lin(e, m.xin.At(0), m.x.At(0), m.proj, n, false, m.projB)
+	}
+	if n <= 4 {
+		m.encodeDecodeLayers(e, n, pos)
+	} else {
+		m.encodePrefillLayers(e, n, pos)
 	}
 }
 
@@ -491,15 +500,21 @@ func (m *metalLM) runFrame(x []float32, fs frameSampler, us []float32, keepLogit
 	if m.proj != nil {
 		in = m.xin.At(0)
 	}
+	D := m.c.HiddenSize
 	err := m.dev.Run(func(e *metal.Encoder) {
 		n, pos := 2, m.p
 		for g := range steps {
-			m.encodeStack(e, n, pos)
+			m.encodeLayers(e, n, pos)
+			// Head with the final norm folded in (the frame never returns
+			// the hidden state), then sampling that also writes the chosen
+			// code's embedding as the next step's input.
 			lg := m.allLogits.At(4 * g * V)
-			m.lin(e, m.hid.At(0), lg, m.heads[g], 1, false, nil)
-			e.SampleLogits(lg, m.codes.At(0), V, fs.topK, fs.greedy, fs.temperature, us[g], g)
+			e.Gemv1(metal.FusedGemv{N: V, K: D, X: m.x.At(4 * (n - 1) * D), W: m.heads[g].dec(), Y0: lg,
+				Norm: true, NormW: m.norm.At(0), Eps: m.c.RMSNormEps})
 			if g+1 < steps {
-				e.EmbedRow(tables[g], m.codes.At(0), in, m.in, g)
+				e.SampleEmbed(lg, m.codes.At(0), V, fs.topK, fs.greedy, fs.temperature, us[g], g, tables[g], in, m.in)
+			} else {
+				e.SampleLogits(lg, m.codes.At(0), V, fs.topK, fs.greedy, fs.temperature, us[g], g)
 			}
 			pos += n
 			n = 1

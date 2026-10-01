@@ -206,10 +206,23 @@ func (m *Model) newSynth(maxT int, q Quant, device string, talkerLayers, codecLa
 		return nil, err
 	}
 	if device == "gpu" {
-		// Warm-up: the GPU codec builds its constant tables (transposed
-		// conv weights) on first use; pay that here, not on the first line.
+		// Warm-up, so the first line runs at full speed: the codec builds
+		// its constant tables (transposed conv weights) on first use, and
+		// the first command buffers touching the wrapped weights make them
+		// resident.
 		if _, err := s.codec.Decode([][]int64{make([]int64, t.NumCodeGroups)}); err != nil {
 			return nil, err
+		}
+		D := t.HiddenSize
+		if _, _, err := s.talker.run(make([]float32, D), 1, 0); err != nil {
+			return nil, err
+		}
+		s.talker.reset()
+		if cp, ok := s.cp.(*metalLM); ok {
+			if _, _, err := cp.runFrame(make([]float32, 2*D), frameSampler{greedy: true}, make([]float32, t.NumCodeGroups-1), false); err != nil {
+				return nil, err
+			}
+			cp.reset()
 		}
 	}
 	return s, nil

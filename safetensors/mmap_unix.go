@@ -5,6 +5,8 @@ package safetensors
 import (
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // mapFile maps path read-only. Empty files fall back to a read (mmap of
@@ -27,4 +29,11 @@ func mapFile(path string) ([]byte, func() error, error) {
 		return nil, nil, err
 	}
 	return b, func() error { return syscall.Munmap(b) }, nil
+}
+
+// willNeed asks the kernel to read b ahead (MADV_WILLNEED; best effort).
+func willNeed(b []byte) {
+	if len(b) > 0 {
+		_ = unix.Madvise(b, unix.MADV_WILLNEED)
+	}
 }

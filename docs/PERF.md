@@ -2500,38 +2500,46 @@ NEGATIVE / neutral:
 - Encoding cost is not the GPU bottleneck: 0.2-0.4 ms per talker step of
   CPU encode against 8-9 ms of GPU time.
 
-OPEN — remaining gains, largest first (estimates from the measured gaps):
+Remaining-gains round (2026-10-01; load average 9-40 throughout — the
+machine was shared with a dozen busy processes, so only A/B-interleaved
+best-of results are quoted):
 
-1. Code-predictor frame bubbles, GPU: 10.6 ms vs a ~6.8 ms bandwidth
-   floor (1.26 GB of int8 weights at ~185 GB/s). ~35 dependent dispatches
-   per step × 16 steps ≈ 560 per frame, each a pipeline drain. Options: a
-   per-layer (or persistent, whole-step) kernel with grid-wide sync via
-   atomics; fold the final RMSNorm into the head GEMV (the code predictor
-   never returns its hidden state: −1 dispatch/step); fold the 1.7B's
-   small_to_mtp projection into the first QKV GEMV. Estimate −3-4
-   ms/frame (17.3 → ~14).
-2. int8 GEMV efficiency, GPU: ~185 GB/s vs ~220 for bf16 — the char4 →
-   float4 dequant per weight. Packing two weights per 16-bit lane, or a
-   half-precision dot with the scale applied per group, may close half
-   the gap: ~1-1.5 ms/frame.
-3. Talker step, GPU: 8.1 ms vs ~7.5 ms of pure GEMV; the remaining
-   ~0.6 ms is rope/attention/residual dispatches — folding q/k RoPE into
-   attention would take one more dispatch per layer (~0.3 ms).
-4. Codec on the GPU: Conv is 47 of 74 ms (1-D convs on the 2-D im2col
-   path, f32); the GPUBF16 option or a 1-D implicit-GEMM path ~2×: ~0.5
-   ms per frame of audio.
-5. In-context cloning decodes the reference's codes with the new ones
-   (the reference implementation does; exact parity). Decoding only the
-   codec's receptive field of reference context (sliding window 72 ×
-   8 layers, causal convs) would save ~0.1-0.2 s per line for an 8 s
-   reference, at the cost of bit-exactness vs the reference.
-6. CPU decode: the worker pool's wake/park dominates the profile at decode
-   shapes (pthread_cond_wait / usleep ~35-60% of samples) — every GEMV is
-   a ~25-100 µs parallel region. A spinning/affine pool for decode, or
-   fewer, larger regions per layer, is cross-cutting (kernels/par).
-7. amd64: vek.Q8Fast is false (portable DotQ8), so int8 decode stays off
-   on x86 CPUs; an AVX2 (VPMADDUBSW / AVX-VNNI VPDPBUSD) split-activation
-   kernel would give x86 the same ~2× over bf16.
-8. First line per process: ~0.3 s of first-touch on the mmap'd bf16
-   weights (prefill reads them in place); a prefetch pass at load would
-   move it into setup.
+1. Code-predictor dispatches — DONE (partial). Attention now does the q/k
+   RMSNorm + RoPE itself (attn_decode_rope: q and the new keys normalised
+   and rotated in registers, one threadgroup per kv head stores the
+   finished keys), the head GEMV folds the final norm (the frame never
+   returns its hidden state), and sampling writes the chosen code's
+   embedding (sample_logits + embed in one dispatch): 6 -> 5 dispatches
+   per layer, 4 -> 2 per code-predictor step tail, also on the talker.
+   1.7B GPU: int8 17.3 -> 17.1, bf16 27.4 -> 26.2 ms/frame; greedy codes
+   still exact. Per-step cost measured ~0.55-1.0 ms for ~79 MB of int8
+   weights (~0.43 ms at bandwidth). DECLINED: a persistent whole-step
+   kernel with grid-wide atomics barriers — Metal does not guarantee the
+   threadgroups are co-resident, so it can deadlock when another process
+   holds GPU cores; not acceptable in a library.
+2. int8 GEMV efficiency — CLOSED, no gap. Interleaved best-of: int8
+   per-lane 7.06 ms, staged 6.99 ms, staged with the dequant + dot in
+   half 7.01 ms (~200 GB/s) per talker step's GEMVs — the earlier
+   185-vs-220 GB/s gap was load noise; the half variant was removed.
+3. Talker RoPE fusion — DONE with item 1 (same kernel).
+4. Codec convolutions in bf16 (GPUBF16) — DECLINED: 62 -> 43 ms per 47
+   frames, but the waveform moves 2.9% (max abs 0.016 vs 4e-6 f32) for
+   ~0.4 ms per frame of audio.
+5. Shorter reference context for clone decode — DECLINED: decoding only
+   the reference's last 25 frames (the reference implementation's own
+   chunk context) puts the cloned line at 23 dB SNR vs the full decode
+   (12 frames: 18 dB) — the codec's transformer reaches further back.
+6. CPU worker-pool spin — measured WORSE under load: SpinNS 50 µs /
+   500 µs / 2 ms gave 35 / 45-50 / 64-75 ms/frame (0.6B CPU, load ~40).
+   Kept at 50 µs; needs a quiet-machine measurement before anything else.
+7. x86 int8 kernel — BLOCKED here: Rosetta on this Mac exposes no AVX2 /
+   FMA / VNNI (cpu.X86.Has* all false), so an AVX2 DotQ8 cannot be tested
+   against its reference on this machine; vek.Q8Fast stays false on amd64.
+8. First line per process — DONE: NewSynth warms the GPU path (one talker
+   step and one code-predictor frame, then reset; plus the codec's tables)
+   and Load asks the OS to read the checkpoints ahead (safetensors
+   Set.WillNeed, MADV_WILLNEED). First VoiceDesign line 3.35x -> 3.8-3.95x
+   realtime, later lines 4.2-4.4x.
+
+Still open: the code predictor's fixed per-step cost (item 1) without a
+co-residency guarantee; items 6 and 7 need a quiet machine / an x86 host.
