@@ -178,6 +178,14 @@ func gpuOpFor(n *Node) gpuOp {
 			return unaryGPU{metal.UnGeluErf}
 		case "SiLU":
 			return unaryGPU{metal.UnSiLU}
+		case "Snake":
+			return snakeGPU{}
+		case "RoPE":
+			mode := metal.RopePairs
+			if a.Int("layout", 0) == 1 {
+				mode = metal.RopeHalf
+			}
+			return ropeGPU{mode: mode}
 		case "LayerNorm":
 			return layerNormGPU{axis: int(a.Int("axis", -1)), eps: a.Float("epsilon", 1e-5)}
 		case "AddLayerNorm":
@@ -336,6 +344,61 @@ func (o unaryGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.T
 	}
 	n := x.Numel()
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.Unary(o.op, rx[0], ro[0], n) }, true
+}
+
+type snakeGPU struct{}
+
+func (snakeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) != 3 || in[0] == nil || in[1] == nil || in[2] == nil || !allF32(in...) || !onlyFirstOutput(st) {
+		return nil, nil, false
+	}
+	x := in[0]
+	xs := x.Shape()
+	if len(xs) < 2 || in[1].Numel() != xs[1] || in[2].Numel() != xs[1] || x.Numel() == 0 {
+		return nil, nil, false
+	}
+	rs, ok := c.regions(x, in[1], in[2])
+	if !ok {
+		return nil, nil, false
+	}
+	out := c.out(xs...)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	n, C := x.Numel(), xs[1]
+	inner := n / (xs[0] * C)
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.Snake(rs[0], ro[0], rs[1], rs[2], n, C, inner) }, true
+}
+
+type ropeGPU struct{ mode int }
+
+func (o ropeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	if len(in) != 3 || in[0] == nil || in[1] == nil || in[2] == nil || !allF32(in...) || !onlyFirstOutput(st) {
+		return nil, nil, false
+	}
+	x := in[0]
+	xs := x.Shape()
+	if len(xs) < 2 || x.Numel() == 0 {
+		return nil, nil, false
+	}
+	T, dh := xs[0], xs[len(xs)-1]
+	if dh%2 != 0 || dh > 512 || in[1].Numel() != T*dh/2 || in[2].Numel() != T*dh/2 {
+		return nil, nil, false
+	}
+	rs, ok := c.regions(x, in[1], in[2])
+	if !ok {
+		return nil, nil, false
+	}
+	out := c.out(xs...)
+	ro, ok := c.regions(out)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	heads := x.Numel() / (T * dh)
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.RoPE(rs[0], ro[0], rs[1], rs[2], T, heads, dh, o.mode) }, true
 }
 
 // ---- matrix products ----

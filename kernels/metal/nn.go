@@ -221,6 +221,18 @@ kernel void silu_mul(device const float* a [[buffer(0)]], device const float* b 
 kernel void silu_mul_bf16(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device bfloat* o [[buffer(2)]],
                           constant uint4& p [[buffer(3)]], uint2 i [[thread_position_in_grid]]) { silu_mul_t<bfloat>(a, b, o, p, i); }
 
+// Snake (vocoder activation) over channel-first x [N, C, inner]:
+// y = x + sc[c] · sin²(fr[c] · x); p = (inner, C, n, 0). precise::sin:
+// fast-math sin loses accuracy at the large arguments audio reaches.
+kernel void snake(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
+                  device const float* fr [[buffer(2)]], device const float* sc [[buffer(3)]],
+                  constant uint4& p [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+	if (i >= p.z) return;
+	const uint c = (i / p.x) % p.y;
+	const float v = x[i], s = precise::sin(v * fr[c]);
+	y[i] = v + sc[c] * (s * s);
+}
+
 // x[r, c] += g[c] · y[r, c]; p = (cols, ldx, ldy, 0).
 kernel void gated_add(device float* x [[buffer(0)]], device const float* g [[buffer(1)]],
                       device const float* y [[buffer(2)]], constant uint4& p [[buffer(3)]],
@@ -234,7 +246,7 @@ var nnPSO struct {
 	once                                                               sync.Once
 	layerNorm, rmsRope, softmax, softmaxMask, siluMul, gateAdd, gather *Pipeline
 	rmsRows, softmaxBF16, layerNormBF16, rmsRopeBF16, siluMulBF16      *Pipeline
-	scatterAdd, gather16                                               *Pipeline
+	scatterAdd, gather16, snake                                        *Pipeline
 	err                                                                error
 }
 
@@ -243,7 +255,7 @@ func (d *Device) nnPipelines() error {
 		for _, k := range []struct {
 			name string
 			dst  **Pipeline
-		}{{"layernorm_mod", &nnPSO.layerNorm}, {"rmsnorm_rope", &nnPSO.rmsRope}, {"softmax_rows", &nnPSO.softmax},
+		}{{"layernorm_mod", &nnPSO.layerNorm}, {"snake", &nnPSO.snake}, {"rmsnorm_rope", &nnPSO.rmsRope}, {"softmax_rows", &nnPSO.softmax},
 			{"silu_mul", &nnPSO.siluMul}, {"gated_add", &nnPSO.gateAdd},
 			{"softmax_rows_masked", &nnPSO.softmaxMask}, {"gather_rows", &nnPSO.gather},
 			{"rmsnorm_rows", &nnPSO.rmsRows}, {"softmax_rows_bf16", &nnPSO.softmaxBF16},
@@ -400,5 +412,27 @@ func (e *Encoder) SiLUMul(a, b, o Region, rows, cols, lda, ldb, ldo int) {
 func (e *Encoder) GatedAdd(x, g, y Region, rows, cols, ldx, ldy int) {
 	if e.ready(nnPSO.gateAdd) {
 		e.Dispatch(nnPSO.gateAdd, [3]int{cols, rows, 1}, [3]int{256, 1, 1}, x, g, y, u32s(cols, ldx, ldy, 0))
+	}
+}
+
+// Snake writes y = x + scale[c]·sin²(freq[c]·x) over channel-first x
+// [N, C, inner] (n = N·C·inner elements).
+func (e *Encoder) Snake(x, y, freq, scale Region, n, c, inner int) {
+	if e.ready(nnPSO.snake) {
+		e.Dispatch(nnPSO.snake, [3]int{n, 1, 1}, [3]int{256, 1, 1}, x, y, freq, scale, u32s(inner, c, n, 0))
+	}
+}
+
+// RoPE writes out = x rotated by cos/sin [T, dh/2] (mode RopePairs or
+// RopeHalf), x and out [T, heads·dh] — rotation only, no normalisation.
+func (e *Encoder) RoPE(x, out, cos, sin Region, t, heads, dh, mode int) {
+	if dh > 512 || dh%2 != 0 {
+		e.err = fmt.Errorf("metal: RoPE head dim %d", dh)
+		return
+	}
+	if e.ready(nnPSO.rmsRope) {
+		// w (buffer 1) is unread in rotate-only mode.
+		e.Dispatch(nnPSO.rmsRope, [3]int{heads * dh, t, 1}, [3]int{dh, 1, 1}, x, cos, cos, sin,
+			u32s(heads, dh, heads*dh, mode|RopeNoNorm), f32c(0), out)
 	}
 }

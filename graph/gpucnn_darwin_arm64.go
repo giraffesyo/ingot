@@ -85,8 +85,39 @@ type convGPU struct {
 	epi           gpuEpilogue
 }
 
+// spatial2D lifts 1-D conv attributes to the 2-D form over a unit height
+// (as the CPU ops do), so 1-D convs reuse the 2-D GPU kernels.
+func spatial2D(st, di, pa []int64) ([]int64, []int64, []int64) {
+	if len(st) == 1 {
+		st = []int64{1, st[0]}
+	}
+	if len(di) == 1 {
+		di = []int64{1, di[0]}
+	}
+	if len(pa) == 2 {
+		pa = []int64{0, pa[0], 0, pa[1]}
+	}
+	return st, di, pa
+}
+
+// conv4 views rank-3 (N, C, W) conv operands as rank-4 (N, C, 1, W).
+func conv4(s tensor.Shape) []int {
+	if len(s) == 3 {
+		return []int{s[0], s[1], 1, s[2]}
+	}
+	return s
+}
+
+// convOut allocates a conv output, rank 3 for 1-D convs.
+func (c *gpuCtx) convOut(oneD bool, n, m, oh, ow int) *tensor.Tensor {
+	if oneD {
+		return c.out(n, m, ow)
+	}
+	return c.out(n, m, oh, ow)
+}
+
 func newConvGPU(a ops.Attrs) gpuOp {
-	st, di, pa := a.Ints("strides", []int64{1, 1}), a.Ints("dilations", []int64{1, 1}), a.Ints("pads", []int64{0, 0, 0, 0})
+	st, di, pa := spatial2D(a.Ints("strides", []int64{1, 1}), a.Ints("dilations", []int64{1, 1}), a.Ints("pads", []int64{0, 0, 0, 0}))
 	epi, ok := epilogueOf(a)
 	if len(st) != 2 || len(di) != 2 || len(pa) != 4 || !ok {
 		return nil
@@ -108,8 +139,9 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	if len(in) > 2 {
 		bias = in[2]
 	}
-	xs, ws := x.Shape(), w.Shape()
-	if len(xs) != 4 || len(ws) != 4 {
+	oneD := len(x.Shape()) == 3 && len(w.Shape()) == 3
+	xs, ws := conv4(x.Shape()), conv4(w.Shape())
+	if len(xs) != 4 || len(ws) != 4 || (oneD && o.strides[0] != 1) {
 		return nil, nil, false
 	}
 	g := metal.ConvGeom{N: xs[0], C: xs[1], H: xs[2], W: xs[3], M: ws[0], KH: ws[2], KW: ws[3],
@@ -140,7 +172,7 @@ func (o convGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	if bias != nil {
 		rb = rs[2]
 	}
-	out := c.out(g.N, g.M, g.OH, g.OW)
+	out := c.convOut(oneD, g.N, g.M, g.OH, g.OW)
 	ro, ok := c.regions(out)
 	if !ok {
 		c.release(out)
@@ -477,8 +509,14 @@ type convTransposeGPU struct {
 }
 
 func newConvTransposeGPU(a ops.Attrs) gpuOp {
-	st, di, pa := a.Ints("strides", []int64{1, 1}), a.Ints("dilations", []int64{1, 1}), a.Ints("pads", []int64{0, 0, 0, 0})
+	st, di, pa := spatial2D(a.Ints("strides", []int64{1, 1}), a.Ints("dilations", []int64{1, 1}), a.Ints("pads", []int64{0, 0, 0, 0}))
 	op := a.Ints("output_padding", []int64{0, 0})
+	if len(op) == 1 {
+		op = []int64{0, op[0]}
+	}
+	if len(a.Ints("output_shape", nil)) == 1 {
+		return nil // 1-D explicit output shape: the CPU op handles it
+	}
 	epi, ok := epilogueOf(a)
 	if len(st) != 2 || len(di) != 2 || len(pa) != 4 || len(op) != 2 || !ok {
 		return nil
@@ -500,8 +538,10 @@ func (o convTransposeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*
 	if len(in) > 2 {
 		bias = in[2]
 	}
-	xs, ws := x.Shape(), w.Shape()
-	if len(xs) != 4 || len(ws) != 4 || ws[0] != xs[1] || o.group <= 0 || xs[1]%o.group != 0 {
+	oneD := len(x.Shape()) == 3 && len(w.Shape()) == 3
+	xs, ws := conv4(x.Shape()), conv4(w.Shape())
+	if len(xs) != 4 || len(ws) != 4 || ws[0] != xs[1] || o.group <= 0 || xs[1]%o.group != 0 ||
+		(oneD && (o.strides[0] != 1 || o.pads[0] != 0 || o.pads[2] != 0)) {
 		return nil, nil, false
 	}
 	g := metal.ConvGeom{N: xs[0], C: xs[1], H: xs[2], W: xs[3], M: ws[1] * o.group, KH: ws[2], KW: ws[3],
@@ -529,13 +569,47 @@ func (o convTransposeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*
 	if bias != nil {
 		rb = rs[2]
 	}
-	out := c.out(g.N, g.M, g.OH, g.OW)
+	out := c.convOut(oneD, g.N, g.M, g.OH, g.OW)
 	ro, ok := c.regions(out)
 	if !ok {
 		c.release(out)
 		return nil, nil, false
 	}
 	n, epi := out.Numel(), o.epi
+	if oneD && o.group == 1 && g.N == 1 && g.DW == 1 && g.PL == 0 && o.pads[3] == 0 && o.outPad[1] == 0 &&
+		len(o.outShape) == 0 && g.C*g.M >= 1<<14 && st.node.Inputs[1].Const != nil {
+		// Wide 1-D (vocoder upsampling): GEMM against the transposed
+		// weight, then col2im.
+		K, T := g.KW, g.W
+		wf := w.F32()
+		wT, ok := c.s.table(st.node.Name+"/convT1d", func() []byte {
+			t := make([]float32, g.M*K*g.C) // [M·K, C]
+			for ci := range g.C {
+				for m := range g.M {
+					for k := range K {
+						t[(m*K+k)*g.C+ci] = wf[(ci*g.M+m)*K+k]
+					}
+				}
+			}
+			b := make([]byte, 0, 4*len(t))
+			for _, v := range t {
+				b = binary.LittleEndian.AppendUint32(b, math.Float32bits(v))
+			}
+			return b
+		})
+		if ok {
+			chunk := min(T, max(64, im2colBudget/(g.M*K)))
+			col := c.out(g.M * K * chunk)
+			rcs, ok := c.regions(col)
+			c.release(col) // scratch: later users run after this node
+			if ok {
+				return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+					e.ConvTranspose1D(rs[0], wT, rb, ro[0], rcs[0], g.C, T, g.M, K, g.SW, chunk, bias != nil)
+					epi.encode(e, ro[0], n)
+				}, true
+			}
+		}
+	}
 	// Blocked over output channels when a group has ≥ 8 of them: inputs are
 	// read once per block (DBNet's [24,24,2,2] head: 1.52 -> 0.57 ms on Apple
 	// Silicon); a single output channel wastes the block.
