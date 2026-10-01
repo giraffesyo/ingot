@@ -364,3 +364,74 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       a CPU DiT step, not worth fusing now
 - [x] GPU executor: fused bias/act epilogues (-6% det), per-batch command
       buffer commits (-12% gptish/mobilenet_v2), dispatch counts
+
+## Phase 7 — speech (Qwen3-TTS) + generic autoregressive driver
+
+- [ ] generic ONNX autoregressive driver (ORT-GenAI-like): detect the
+      `past_key_values.*` / `present.*` I/O convention (HF optimum and
+      onnx-community exports), bind it to `Session.RunDecode` state, own
+      the loop (greedy / temperature / top-k / top-p / repetition penalty,
+      EOS + max-length stop), `cmd/onnxrun -generate`. Any decoder-only
+      LLM export runs with no model-specific Go. Verified vs ORT greedy
+      token-for-token on a small export (tiny Qwen/Llama).
+- [x] models/qwen3tts: Qwen3-TTS-12Hz CustomVoice (0.6B; the 1.7B's
+      small_to_mtp_projection is wired but untested) over the HF
+      safetensors — talker (28-layer Qwen3, codebook 0 per 12.5 Hz frame),
+      code predictor (5 layers, codebooks 1..15 per frame, head per
+      codebook as a host bf16 GEMV), speech-tokenizer decoder (RVQ on the
+      host; sliding-window transformer, ConvNeXt upsamplers, SnakeBeta
+      vocoder as one graph over dynamic frames). Parity vs qwen-tts 0.1.1
+      (tools/export/qwen3tts_ref.py): greedy codes exact (47 frames × 16),
+      prefill logits 1.7e-6 rel, prompt 4e-7, waveform 7e-6. cmd/qwen3tts
+      writes WAV. Apple Silicon (loaded machine, PyTorch 2.14 f32 CPU alongside):
+      talker+predictor 33.5 ms/frame vs 102–111; codec 0.46 s vs 0.41–0.60
+      per 3.8 s of audio; ~1.8x realtime end to end.
+- [x] tokenizer: Mistral-style pre-tokenizer split (transformers'
+      fix_mistral_regex installs it on the Qwen3-TTS processor), and
+      vocab.json + merges.txt checkpoints (LoadBPE); ids exact.
+- [x] ops: 1-D Conv / ConvTranspose (rank-3, as the 2-D kernels over a
+      unit height), ingot.Snake (fused vocoder activation: codec Mul/Sin
+      chain 625 -> 57 ms), cached SDPA with grouped-query K/V and
+      [1,T,H,dh] operand/output layouts, Decode.Reset; bf16 Gemm at M <= 4
+      streams the bf16 rows (gemm.GemvBF16) instead of widening packed
+      panels (Qwen3-TTS decode 149 -> 38 ms/frame).
+- [x] generate: HF logits pipeline (repetition penalty, suppress, min-new
+      EOS mask, temperature, top-k, top-p) + seeded sampling — the driver's
+      sampler.
+- [x] qwen3tts: VoiceDesign (1.7B: a voice from a text description) and
+      Base cloning (speaker encoder: log-mel as a strided DFT conv + Slaney
+      filterbank, ECAPA-TDNN; codec encoder: Mimi SEANet + causal
+      transformer + RVQ encode, graph built per clip length), every prompt
+      layout (instruction rows; in-context clone with the text in the
+      prompt or streamed as trailing rows; x-vector-only). Parity on the
+      1.7B checkpoints vs qwen-tts: greedy codes exact for design, clone,
+      long-text clone and x-vector clone; reference codes exact; x-vector
+      1.9e-7; mel 2e-5; waveforms <= 1.6e-5. Voice prompts save/load
+      (cmd/qwen3tts -save-voice / -voice) so one cloned voice renders
+      every line; -lines batches. 1.7B codes 64.6 ms/frame on CPU (loaded
+      Apple Silicon), ~1.2x realtime — weight bandwidth bound (talker 29 ms, code
+      predictor 26 ms per frame).
+- [x] int8 weight-only decode (CPU): gemm.I8GWeights (symmetric, one f32
+      scale per 64 weights) × activations split into ~14-bit fixed point
+      (vek.QuantizeX16: hi·128 + lo int8 parts), two SDOTs per weight
+      block — 2.1–2.8x the bf16 GEMV at decode shapes (4096²: 205 -> 101 µs);
+      plain Q8 activations were faster still but moved logits ~2.2% vs ~1%.
+      Opt-in per Linear (Gemm ingot_weight_quant / Builder.QuantizeLinear);
+      prefill stays bf16. qwen3tts -int8: logits within ~1% of full.
+- [x] Metal decode loop (models/qwen3tts metalLM over new generic kernels
+      in kernels/metal: GEMV bf16/int8 with residual accumulate, decode
+      attention with online softmax over a GPU-resident GQA KV cache,
+      on-GPU sampling (argmax / temperature + exact top-k radix select,
+      host uniforms) and embedding feedback, so a code-predictor frame is
+      one command buffer). Greedy codes exact vs the reference on the 1.7B
+      design and clone cases. 1.7B codes, loaded Apple Silicon: CPU 49 / CPU int8
+      38 / GPU 30 / GPU int8 20 ms/frame.
+- [x] GPU executor: 1-D Conv/ConvTranspose (lifted to 2-D), ingot.Snake,
+      ingot.RoPE; wide 1-D ConvTranspose as GEMM + col2im (vocoder
+      upsampling 166 -> 6 ms). Qwen3-TTS codec on the GPU: 450 -> 74 ms per
+      47 frames, waveform 7e-6. End to end (cmd/qwen3tts, GPU int8):
+      cloned lines ~2.5x realtime, VoiceDesign ~2.1x.
+- [ ] qwen3tts: resampling for non-24 kHz references; streaming decode;
+      fewer talker dispatches (fused QKV / gate-up GEMVs); unverified
+      layouts: in-context clone with streaming off, 1.7B CustomVoice
+      instructions.

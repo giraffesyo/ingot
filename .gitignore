@@ -25,6 +25,8 @@ __pycache__/
 /testdata/iiit5k/
 # Qwen-Image-2.1 reference activations (tools/export/qwenimage21_ref.py; derived from licence-bound weights).
 /testdata/qwenimage21/
+# Qwen3-TTS reference activations (tools/export/qwen3tts_ref.py; derived from the checkpoint).
+/testdata/qwen3tts/
 
 # Layout/table models (RapidAI ONNX builds of PaddleOCR PP-DocLayout / SLANet).
 /testdata/layout/*.onnx

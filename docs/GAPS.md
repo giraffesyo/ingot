@@ -43,6 +43,12 @@ Plus **If** and **Loop** as executor-level control flow (compiled
 sub-Sessions; see below). This list is `ops.Supported()` — the previous
 hand-curated list here had drifted badly.
 
+Conv and ConvTranspose take 1-D (NCW, rank-3) as well as 2-D operands
+(2026-09-29; the 1-D case runs the 2-D kernels over a unit height, 3-D
+errors loudly), on the CPU and in the GPU executor. Built graphs also get
+ingot.Snake, the fused BigVGAN-family vocoder activation, and Gemm's
+opt-in int8 weight decode (ingot_weight_quant="int8").
+
 ## Gaps, by priority
 
 ### Blocks OCR (phase 3) — do first
