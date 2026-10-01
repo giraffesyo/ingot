@@ -214,3 +214,10 @@ func SumBlk8(dst, src []float32) {
 		dst[i&7] += v
 	}
 }
+
+// Q8Fast: no SIMD DotQ8 on this architecture yet.
+const Q8Fast = false
+
+// DotQ8 computes Σ_g sx[g]·sw[g]·Σ_{i in g} w[i]·(128·xh[i] + xl[i])
+// (portable Go; see dotQ8Ref).
+func DotQ8(w, xh, xl []int8, sx, sw []float32) float32 { return dotQ8Ref(w, xh, xl, sx, sw) }

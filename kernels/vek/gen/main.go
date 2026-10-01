@@ -279,6 +279,7 @@ func main() {
 	g.axpy()
 	g.dot()
 	g.dotBF16()
+	g.dotQ8()
 	g.quantKernels()
 
 	// erf: two vectors per iteration (register budget), see erfBody.
@@ -526,6 +527,58 @@ func (g *gen) dotBF16() {
 	g.w("\tB dotbf16_loop")
 	g.w("dotbf16_done:")
 	g.w("\tVST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)")
+	g.w("\tRET")
+	g.w("")
+}
+
+// dotQ8 emits func dotq8_asm(w, xh, xl []int8, sx, sw []float32, groups
+// int, out []float32): out[0:4] = partial sums of Σ_g sx[g]·sw[g]·Σ_{i in
+// g} w[i]·(128·xh[i] + xl[i]) over groups of 64. Weights are int8; the
+// activation carries ~14 bits as a high and a low int8 part (QuantizeX16),
+// so the int8 weight rounding is the only real approximation. Each 16-byte
+// weight block meets both parts in two SDOTs — compute the memory-bound
+// GEMV has to spare. Per group: hi and lo int32 sums, hi<<7 + lo,
+// converted, scaled by sx·sw into v16.
+func (g *gen) dotQ8() {
+	g.w("// func dotq8_asm(w, xh, xl []int8, sx, sw []float32, groups int, out []float32)")
+	g.w("TEXT ·dotq8_asm(SB), NOSPLIT, $0-152")
+	g.w("\tMOVD w_base+0(FP), R0")
+	g.w("\tMOVD xh_base+24(FP), R1")
+	g.w("\tMOVD xl_base+48(FP), R2")
+	g.w("\tMOVD sx_base+72(FP), R3")
+	g.w("\tMOVD sw_base+96(FP), R4")
+	g.w("\tMOVD groups+120(FP), R5")
+	g.w("\tMOVD out_base+128(FP), R6")
+	g.movi0(16)
+	g.w("dotq8_group:")
+	g.w("\tCBZ R5, dotq8_done")
+	for i := 20; i < 24; i++ {
+		g.movi0(i)
+	}
+	g.w("\tVLD1.P 64(R0), [V0.B16, V1.B16, V2.B16, V3.B16]")
+	g.w("\tVLD1.P 64(R1), [V4.B16, V5.B16, V6.B16, V7.B16]")
+	g.w("\tVLD1.P 64(R2), [V8.B16, V9.B16, V10.B16, V11.B16]")
+	g.w("\tWORD $0x4E849414 // sdot v20.4s, v0.16b, v4.16b (hi)")
+	g.w("\tWORD $0x4E859435 // sdot v21.4s, v1.16b, v5.16b")
+	g.w("\tWORD $0x4E869454 // sdot v20.4s, v2.16b, v6.16b")
+	g.w("\tWORD $0x4E879475 // sdot v21.4s, v3.16b, v7.16b")
+	g.w("\tWORD $0x4E889416 // sdot v22.4s, v0.16b, v8.16b (lo)")
+	g.w("\tWORD $0x4E899437 // sdot v23.4s, v1.16b, v9.16b")
+	g.w("\tWORD $0x4E8A9456 // sdot v22.4s, v2.16b, v10.16b")
+	g.w("\tWORD $0x4E8B9477 // sdot v23.4s, v3.16b, v11.16b")
+	g.w("\tWORD $0x4EB58694 // add v20.4s, v20.4s, v21.4s")
+	g.w("\tWORD $0x4EB786D6 // add v22.4s, v22.4s, v23.4s")
+	g.w("\tWORD $0x4F275694 // shl v20.4s, v20.4s, #7")
+	g.w("\tWORD $0x4EB68694 // add v20.4s, v20.4s, v22.4s")
+	g.w("\tWORD $0x4E21DA94 // scvtf v20.4s, v20.4s")
+	g.w("\tWORD $0x4DDFC878 // ld1r {v24.4s}, [x3], #4 (sx)")
+	g.w("\tWORD $0x4DDFC899 // ld1r {v25.4s}, [x4], #4 (sw)")
+	g.w("\tWORD $0x6E39DF18 // fmul v24.4s, v24.4s, v25.4s")
+	g.w("\tWORD $0x%08X // fmla v16 += v20*v24", fmla(16, 20, 24))
+	g.w("\tSUB $1, R5")
+	g.w("\tB dotq8_group")
+	g.w("dotq8_done:")
+	g.w("\tVST1 [V16.S4], (R6)")
 	g.w("\tRET")
 	g.w("")
 }

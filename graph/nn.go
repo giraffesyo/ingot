@@ -17,7 +17,11 @@ func (b *Builder) Linear(x *Value, w, bias *tensor.Tensor) *Value {
 	if bias != nil {
 		in = append(in, b.Const("bias", bias))
 	}
-	return b.Op("Gemm", Attr("transB", 1), in...)
+	attrs := Attr("transB", 1)
+	if b.QuantizeLinear != "" {
+		attrs["ingot_weight_quant"] = Attr("q", b.QuantizeLinear)["q"]
+	}
+	return b.Op("Gemm", attrs, in...)
 }
 
 // LayerNorm normalises over the last axis. A nil scale is all-ones (PyTorch
@@ -59,6 +63,13 @@ func (b *Builder) SiLU(x *Value) *Value { return b.Op("ingot.SiLU", nil, x) }
 func (b *Builder) GeluTanh(x *Value) *Value { return b.Op("Gelu", Attr("approximate", "tanh"), x) }
 
 func (b *Builder) Tanh(x *Value) *Value { return b.Op("Tanh", nil, x) }
+
+// Snake is the vocoder activation x + scale[c]·sin²(freq[c]·x) over
+// channel-first x [N, C, …], as one fused op (ingot.Snake). freq and scale
+// are per-channel [C] (Snake: scale = 1/freq; SnakeBeta: e^α, 1/(e^β+ε)).
+func (b *Builder) Snake(x *Value, freq, scale *tensor.Tensor) *Value {
+	return b.Op("ingot.Snake", nil, x, b.Const("freq", freq), b.Const("scale", scale))
+}
 
 // Reshape to shape (int64 semantics: 0 copies the input dim, -1 infers).
 func (b *Builder) Reshape(x *Value, shape ...int64) *Value {

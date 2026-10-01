@@ -1047,6 +1047,48 @@ dotbf16_done:
 	VST1 [V16.S4, V17.S4, V18.S4, V19.S4], (R2)
 	RET
 
+// func dotq8_asm(w, xh, xl []int8, sx, sw []float32, groups int, out []float32)
+TEXT ·dotq8_asm(SB), NOSPLIT, $0-152
+	MOVD w_base+0(FP), R0
+	MOVD xh_base+24(FP), R1
+	MOVD xl_base+48(FP), R2
+	MOVD sx_base+72(FP), R3
+	MOVD sw_base+96(FP), R4
+	MOVD groups+120(FP), R5
+	MOVD out_base+128(FP), R6
+	WORD $0x4F000410 // movi v16.4s, #0
+dotq8_group:
+	CBZ R5, dotq8_done
+	WORD $0x4F000414 // movi v20.4s, #0
+	WORD $0x4F000415 // movi v21.4s, #0
+	WORD $0x4F000416 // movi v22.4s, #0
+	WORD $0x4F000417 // movi v23.4s, #0
+	VLD1.P 64(R0), [V0.B16, V1.B16, V2.B16, V3.B16]
+	VLD1.P 64(R1), [V4.B16, V5.B16, V6.B16, V7.B16]
+	VLD1.P 64(R2), [V8.B16, V9.B16, V10.B16, V11.B16]
+	WORD $0x4E849414 // sdot v20.4s, v0.16b, v4.16b (hi)
+	WORD $0x4E859435 // sdot v21.4s, v1.16b, v5.16b
+	WORD $0x4E869454 // sdot v20.4s, v2.16b, v6.16b
+	WORD $0x4E879475 // sdot v21.4s, v3.16b, v7.16b
+	WORD $0x4E889416 // sdot v22.4s, v0.16b, v8.16b (lo)
+	WORD $0x4E899437 // sdot v23.4s, v1.16b, v9.16b
+	WORD $0x4E8A9456 // sdot v22.4s, v2.16b, v10.16b
+	WORD $0x4E8B9477 // sdot v23.4s, v3.16b, v11.16b
+	WORD $0x4EB58694 // add v20.4s, v20.4s, v21.4s
+	WORD $0x4EB786D6 // add v22.4s, v22.4s, v23.4s
+	WORD $0x4F275694 // shl v20.4s, v20.4s, #7
+	WORD $0x4EB68694 // add v20.4s, v20.4s, v22.4s
+	WORD $0x4E21DA94 // scvtf v20.4s, v20.4s
+	WORD $0x4DDFC878 // ld1r {v24.4s}, [x3], #4 (sx)
+	WORD $0x4DDFC899 // ld1r {v25.4s}, [x4], #4 (sw)
+	WORD $0x6E39DF18 // fmul v24.4s, v24.4s, v25.4s
+	WORD $0x4E38CE90 // fmla v16 += v20*v24
+	SUB $1, R5
+	B dotq8_group
+dotq8_done:
+	VST1 [V16.S4], (R6)
+	RET
+
 // func quantu8_asm(dst, src, n, scale, zp) — see quantKernels.
 TEXT ·quantu8_asm(SB), NOSPLIT, $0-64
 	MOVD dst_base+0(FP), R0

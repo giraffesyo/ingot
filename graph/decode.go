@@ -16,6 +16,10 @@ type Decode struct {
 // Pos returns the number of cached positions.
 func (d *Decode) Pos() int { return d.state.Pos }
 
+// Reset rewinds d to position 0, keeping its slot buffers: the next
+// RunDecode starts a fresh sequence without reallocating the caches.
+func (d *Decode) Reset() { d.state.Pos = 0 }
+
 // NewDecode creates decode state with capacity for maxT positions. Slots
 // allocate lazily on first use (shapes are only known at Run time).
 func (s *Session) NewDecode(maxT int) *Decode {

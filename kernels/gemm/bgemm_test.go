@@ -112,7 +112,9 @@ func TestGemvBF16VsRef(t *testing.T) {
 // (weights far beyond cache: pure bandwidth).
 func BenchmarkGemv(b *testing.B) {
 	r := rand.New(rand.NewPCG(33, 34))
-	for _, sh := range []struct{ n, k int }{{4096, 4096}, {11008, 4096}} {
+	// 7B-class projections, then 0.6B-class decode shapes (Qwen3-TTS
+	// talker / code predictor: q/o, k/v, gate/up, down).
+	for _, sh := range []struct{ n, k int }{{4096, 4096}, {11008, 4096}, {2048, 1024}, {1024, 1024}, {3072, 1024}, {1024, 3072}} {
 		w := make([]float32, sh.n*sh.k)
 		x := make([]float32, sh.k)
 		for i := range w {

@@ -71,6 +71,9 @@ func dot_asm(a, b []float32, n int, out []float32)
 func dotbf16_asm(a []float32, b []uint16, n int, out []float32)
 
 //go:noescape
+func dotq8_asm(w, xh, xl []int8, sx, sw []float32, groups int, out []float32)
+
+//go:noescape
 func dwconv3x3s1_asm(dst, src, wpacked []float32, ncols, W int)
 
 //go:noescape
@@ -353,6 +356,27 @@ func DwRowS1(dst, src, wpacked []float32, ncols, W, KH, KW int) {
 
 // Dot returns Σ a[i]*b[i] over min lengths, accumulated in several
 // independent SIMD lanes (the summation order differs from a sequential loop).
+// Q8Fast reports whether DotQ8 is a SIMD kernel here (arm64 SDOT); where
+// it is not, int8 weight decode is slower than bf16 and callers skip it.
+const Q8Fast = true
+
+// DotQ8 computes Σ_g sx[g]·sw[g]·Σ_{i in g} w[i]·(128·xh[i] + xl[i]):
+// int8 weights in groups of I8Group (scales sw) against an activation split
+// by QuantizeX16 (scales sx).
+func DotQ8(w, xh, xl []int8, sx, sw []float32) float32 {
+	groups := len(w) / I8Group
+	if groups == 0 {
+		return 0
+	}
+	_ = xh[groups*I8Group-1]
+	_ = xl[groups*I8Group-1]
+	_ = sx[groups-1]
+	_ = sw[groups-1]
+	var parts [4]float32
+	dotq8_asm(w, xh, xl, sx, sw, groups, parts[:])
+	return (parts[0] + parts[1]) + (parts[2] + parts[3])
+}
+
 // DotBF16 computes Σ a[i]·widen(b[i]) for bf16 weights b (bits, f32 = bits<<16).
 func DotBF16(a []float32, b []uint16) float32 {
 	n := min(len(a), len(b))

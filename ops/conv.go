@@ -12,6 +12,7 @@ import (
 
 // convOp implements 2-D Conv (NCHW) via im2col + GEMM, with fast paths for
 // 1×1/stride-1/no-pad (GEMM directly on the input) and depthwise (direct).
+// 1-D Conv (NCW, rank-3 X and W) runs as the 2-D case with H = KH = 1.
 type convOp struct {
 	n         NodeInfo
 	group     int
@@ -62,8 +63,9 @@ func buildConv(n NodeInfo) (Op, error) {
 	st := n.Attrs.Ints("strides", []int64{1, 1})
 	di := n.Attrs.Ints("dilations", []int64{1, 1})
 	pa := n.Attrs.Ints("pads", []int64{0, 0, 0, 0})
+	st, di, pa = spatial2D(st, di, pa)
 	if len(st) != 2 || len(di) != 2 || len(pa) != 4 {
-		return nil, n.Errorf("only 2-D conv supported (strides=%v dilations=%v pads=%v)", st, di, pa)
+		return nil, n.Errorf("only 1-D and 2-D conv supported (strides=%v dilations=%v pads=%v)", st, di, pa)
 	}
 	o.strides = [2]int{int(st[0]), int(st[1])}
 	o.dilations = [2]int{int(di[0]), int(di[1])}
@@ -73,6 +75,29 @@ func buildConv(n NodeInfo) (Op, error) {
 		return nil, err
 	}
 	return o, nil
+}
+
+// spatial2D lifts 1-D conv attributes (one stride/dilation, two pads) to
+// the 2-D form over a unit height, so 1-D convs share the 2-D kernels.
+func spatial2D(st, di, pa []int64) ([]int64, []int64, []int64) {
+	if len(st) == 1 {
+		st = []int64{1, st[0]}
+	}
+	if len(di) == 1 {
+		di = []int64{1, di[0]}
+	}
+	if len(pa) == 2 {
+		pa = []int64{0, pa[0], 0, pa[1]}
+	}
+	return st, di, pa
+}
+
+// shape2D views rank-3 conv operands (N, C, W) as rank-4 (N, C, 1, W).
+func shape2D(s tensor.Shape) []int {
+	if len(s) == 3 {
+		return []int{s[0], s[1], 1, s[2]}
+	}
+	return s
 }
 
 // convGeom resolves padding/output size for one spatial dim.
@@ -116,9 +141,10 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if x.DType() != tensor.F32 || w.DType() != tensor.F32 {
 		return nil, o.n.Errorf("only f32 supported")
 	}
-	xs, ws := x.Shape(), w.Shape()
-	if len(xs) != 4 || len(ws) != 4 {
-		return nil, o.n.Errorf("only 2-D conv supported (X %v, W %v)", xs, ws)
+	oneD := len(x.Shape()) == 3 && len(w.Shape()) == 3
+	xs, ws := shape2D(x.Shape()), shape2D(w.Shape())
+	if len(xs) != 4 || len(ws) != 4 || (oneD && o.strides[0] != 1) {
+		return nil, o.n.Errorf("only 1-D and 2-D conv supported (X %v, W %v)", x.Shape(), w.Shape())
 	}
 	N, C, H, W := xs[0], xs[1], xs[2], xs[3]
 	M, Cg, KH, KW := ws[0], ws[1], ws[2], ws[3]
@@ -136,6 +162,9 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		return nil, o.n.Errorf("non-positive output size %dx%d", OH, OW)
 	}
 	out := ctx.NewUninit(tensor.F32, N, M, OH, OW)
+	if oneD {
+		out = ctx.NewUninit(tensor.F32, N, M, OW)
+	}
 	xf, wf, of := x.F32(), w.F32(), out.F32()
 	Mg := M / G
 	K := Cg * KH * KW

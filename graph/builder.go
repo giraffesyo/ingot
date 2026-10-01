@@ -20,6 +20,11 @@ type Builder struct {
 	g      *Graph
 	prefix string
 	names  map[string]int // shared across scopes: auto-name counters
+
+	// QuantizeLinear, when "int8", marks every Linear this builder (and
+	// scopes derived after setting it) emits for int8 weight decode
+	// (Gemm ingot_weight_quant; see ops). Empty keeps full precision.
+	QuantizeLinear string
 }
 
 // Default opsets for built graphs: the newest standard semantics the ops

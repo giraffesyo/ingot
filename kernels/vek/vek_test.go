@@ -599,3 +599,49 @@ func TestPwBlk6x16Tiles(t *testing.T) {
 		}
 	}
 }
+
+// TestDotQ8: the int8-weight × split-activation dot against the portable
+// reference and float64, and QuantizeX16's split (exact recombination,
+// half-step error, parts in range).
+func TestDotQ8(t *testing.T) {
+	r := rand.New(rand.NewPCG(93, 94))
+	for _, groups := range []int{1, 3, 48} {
+		n := groups * I8Group
+		x, w := make([]float32, n), make([]int8, n)
+		sw := make([]float32, groups)
+		for i := range x {
+			x[i] = r.Float32()*2 - 1
+			if i%37 == 0 {
+				x[i] *= 40 // outliers
+			}
+			w[i] = int8(r.IntN(255) - 127)
+		}
+		for i := range sw {
+			sw[i] = r.Float32() * 0.02
+		}
+		xh, xl, sx := make([]int8, n), make([]int8, n), make([]float32, groups)
+		QuantizeX16(xh, xl, sx, x)
+		var want float64
+		for g := range groups {
+			var p int64
+			for i := g * I8Group; i < (g+1)*I8Group; i++ {
+				p += int64(w[i]) * (128*int64(xh[i]) + int64(xl[i]))
+			}
+			want += float64(sx[g]) * float64(sw[g]) * float64(p)
+		}
+		got, ref := DotQ8(w, xh, xl, sx, sw), dotQ8Ref(w, xh, xl, sx, sw)
+		tol := 1e-6 * float64(groups) * (1 + math.Abs(want))
+		if math.Abs(float64(got)-want) > tol || math.Abs(float64(ref)-want) > tol {
+			t.Errorf("groups=%d: asm %g ref %g want %g", groups, got, ref, want)
+		}
+		for i := range x {
+			s := float64(sx[i/I8Group])
+			if xl[i] < -64 || xl[i] > 63 {
+				t.Fatalf("x[%d]: low part %d out of range", i, xl[i])
+			}
+			if e := math.Abs(s*float64(128*int32(xh[i])+int32(xl[i])) - float64(x[i])); e > s/2*1.0001 {
+				t.Fatalf("x[%d] error %g > half step %g", i, e, s/2)
+			}
+		}
+	}
+}

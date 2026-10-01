@@ -9,7 +9,8 @@ import (
 	"github.com/giraffesyo/ingot/tensor"
 )
 
-// convTransposeOp implements 2-D ConvTranspose (NCHW). Weight layout is
+// convTransposeOp implements 2-D ConvTranspose (NCHW), and 1-D (NCW) as
+// the 2-D case over a unit height. Weight layout is
 // [C_in, C_out/group, kH, kW]. Computed as GEMM (Wᵀ·X → column matrix) followed
 // by col2im scatter, parallelised over output channels so writes never race.
 type convTransposeOp struct {
@@ -35,14 +36,21 @@ func buildConvTranspose(n NodeInfo) (Op, error) {
 	di := n.Attrs.Ints("dilations", []int64{1, 1})
 	pa := n.Attrs.Ints("pads", []int64{0, 0, 0, 0})
 	op := n.Attrs.Ints("output_padding", []int64{0, 0})
+	st, di, pa = spatial2D(st, di, pa)
+	if len(op) == 1 {
+		op = []int64{0, op[0]}
+	}
+	o.outShape = n.Attrs.Ints("output_shape", nil)
+	if len(o.outShape) == 1 { // 1-D spatial output shape → the rank-4 form below
+		o.outShape = []int64{0, 0, 1, o.outShape[0]}
+	}
 	if len(st) != 2 || len(di) != 2 || len(pa) != 4 || len(op) != 2 {
-		return nil, n.Errorf("only 2-D ConvTranspose supported")
+		return nil, n.Errorf("only 1-D and 2-D ConvTranspose supported")
 	}
 	o.strides = [2]int{int(st[0]), int(st[1])}
 	o.dilations = [2]int{int(di[0]), int(di[1])}
 	o.pads = [4]int{int(pa[0]), int(pa[1]), int(pa[2]), int(pa[3])}
 	o.outPad = [2]int{int(op[0]), int(op[1])}
-	o.outShape = n.Attrs.Ints("output_shape", nil)
 	var err error
 	if o.epi, err = parseEpilogue(n); err != nil {
 		return nil, err
@@ -58,9 +66,10 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 	if x.DType() != tensor.F32 || w.DType() != tensor.F32 {
 		return nil, o.n.Errorf("only f32")
 	}
-	xs, ws := x.Shape(), w.Shape()
-	if len(xs) != 4 || len(ws) != 4 {
-		return nil, o.n.Errorf("only 2-D (X %v, W %v)", xs, ws)
+	oneD := len(x.Shape()) == 3 && len(w.Shape()) == 3
+	xs, ws := shape2D(x.Shape()), shape2D(w.Shape())
+	if len(xs) != 4 || len(ws) != 4 || (oneD && (o.strides[0] != 1 || o.pads[0] != 0 || o.pads[2] != 0)) {
+		return nil, o.n.Errorf("only 1-D and 2-D (X %v, W %v)", x.Shape(), w.Shape())
 	}
 	var bias []float32
 	if len(in) > 2 && in[2] != nil {
@@ -89,9 +98,14 @@ func (o *convTransposeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, 
 	KK := CoutG * KH * KW
 	overlap := KH > sh || KW > sw || pt != 0 || pl != 0 || pb != 0 || pr != 0 || dh != 1 || dw != 1 || len(o.outShape) == 4
 	var out *tensor.Tensor
-	if overlap {
+	switch {
+	case overlap && oneD:
+		out = ctx.New(tensor.F32, N, Cout, OW)
+	case overlap:
 		out = ctx.New(tensor.F32, N, Cout, OH, OW) // zeroed: we scatter-add
-	} else {
+	case oneD:
+		out = ctx.NewUninit(tensor.F32, N, Cout, OW)
+	default:
 		out = ctx.NewUninit(tensor.F32, N, Cout, OH, OW) // every output written exactly once
 	}
 	xf, wf, of := x.F32(), w.F32(), out.F32()

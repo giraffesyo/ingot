@@ -16,6 +16,11 @@ type gemmOp struct {
 	n              NodeInfo
 	alpha, beta    float32
 	transA, transB bool
+	// quantI8: ingot_weight_quant="int8" — decode-shaped calls (M <=
+	// gemvMaxRows, B a constant [N×K] weight) run on an int8 copy of B
+	// (gemm.I8GWeights). Opt-in: outputs move by the weights' int8 rounding
+	// (half a step of each 64-group's range).
+	quantI8 bool
 	bCache
 }
 
@@ -69,6 +74,26 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		}
 		beta = o.beta
 	}
+	if o.quantI8 && vek.Q8Fast && o.transB && !o.transA && M <= gemvMaxRows && K%vek.I8Group == 0 {
+		if w := quantizedI8(b, N, K); w != nil {
+			af, lda := a.F32(), a.Dim(1)
+			for i := range M {
+				gemm.GemvI8G(of[i*N:(i+1)*N], w, af[i*lda:i*lda+K], o.alpha, beta)
+			}
+			return ctx.Out(out), nil
+		}
+	}
+	if bf16B && M <= gemvMaxRows && o.transB {
+		// Decode shapes: a few activation rows against [N×K] bf16 weights
+		// are bandwidth-bound GEMVs — stream the bf16 rows directly (one
+		// pass per row; the weights stay cache-hot between rows) instead of
+		// widening packed panels.
+		af, lda := a.F32(), a.Dim(1)
+		for i := range M {
+			gemvBF16(of[i*N:(i+1)*N], af[i*lda:i*lda+K], b.BF16(), K, N, o.alpha, beta)
+		}
+		return ctx.Out(out), nil
+	}
 	if bf16B {
 		gemm.SgemmPackedB(M, o.alpha, a.F32(), a.Dim(1), packedBF16(b, o.transB, K, N), beta, of, N)
 		return ctx.Out(out), nil
@@ -111,6 +136,57 @@ func (o *gemmOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	gemm.SgemmT(o.transA, o.transB, M, N, K, o.alpha, a.F32(), a.Dim(1), b.F32(), b.Dim(1), beta, of, N)
 	return ctx.Out(out), nil
+}
+
+// i8Packs shares int8 quantisations of weights across ops and graphs,
+// weakly keyed like bf16Packs.
+var i8Packs sync.Map // weak.Pointer[tensor.Tensor] → *i8Pack
+
+type i8Pack struct {
+	once sync.Once
+	w    *gemm.I8GWeights
+}
+
+// quantizedI8 returns the shared int8 quantisation of the [n×k] weight b
+// (bf16 or f32), or nil for other dtypes.
+func quantizedI8(b *tensor.Tensor, n, k int) *gemm.I8GWeights {
+	if b.DType() != tensor.BF16 && b.DType() != tensor.F32 {
+		return nil
+	}
+	key := weak.Make(b)
+	v, loaded := i8Packs.LoadOrStore(key, &i8Pack{})
+	if !loaded {
+		runtime.AddCleanup(b, func(k weak.Pointer[tensor.Tensor]) { i8Packs.Delete(k) }, key)
+	}
+	e := v.(*i8Pack)
+	e.once.Do(func() {
+		if b.DType() == tensor.BF16 {
+			e.w = gemm.QuantizeI8GBF16(b.BF16(), b.Dim(1), n, k)
+		} else {
+			e.w = gemm.QuantizeI8GF32(b.F32(), b.Dim(1), n, k)
+		}
+	})
+	return e.w
+}
+
+// gemvMaxRows is the largest M the bf16 Gemm runs as per-row GEMVs.
+const gemvMaxRows = 4
+
+// gemvBF16 is y[j] = alpha·dot(x, W[j]) + beta·y[j] over bf16 rows W
+// [n×k] (y holds the broadcast C when beta != 0).
+func gemvBF16(y, x []float32, w []uint16, k, n int, alpha, beta float32) {
+	if alpha == 1 && beta == 0 {
+		gemm.GemvBF16(y, w, k, x, n, k)
+		return
+	}
+	grain := max(1, (1<<16)/max(k, 1))
+	par.For(n, grain, func(j, _ int) {
+		v := alpha * vek.DotBF16(x, w[j*k:(j+1)*k])
+		if beta != 0 {
+			v += beta * y[j]
+		}
+		y[j] = v
+	})
 }
 
 // bf16Weights: opt-in bf16 storage+compute for constant MatMul/Gemm weights
@@ -378,11 +454,12 @@ var mmScratchPool = sync.Pool{New: func() any { return new(mmScratch) }}
 func init() {
 	Register("", "Gemm", 7, func(n NodeInfo) (Op, error) {
 		return &gemmOp{
-			n:      n,
-			alpha:  n.Attrs.Float("alpha", 1),
-			beta:   n.Attrs.Float("beta", 1),
-			transA: n.Attrs.Int("transA", 0) != 0,
-			transB: n.Attrs.Int("transB", 0) != 0,
+			n:       n,
+			alpha:   n.Attrs.Float("alpha", 1),
+			beta:    n.Attrs.Float("beta", 1),
+			transA:  n.Attrs.Int("transA", 0) != 0,
+			transB:  n.Attrs.Int("transB", 0) != 0,
+			quantI8: n.Attrs.String("ingot_weight_quant", "") == "int8",
 		}, nil
 	})
 	Register("", "MatMul", 1, func(n NodeInfo) (Op, error) {
