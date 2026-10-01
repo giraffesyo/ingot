@@ -221,6 +221,11 @@
       segnet (ConvTranspose+Resize). LLM/BERT/ViT run via primitive decomposition.
 - [x] external-data loader (onnx.DecodeFile), Resize (nearest/linear), ConvTranspose,
       Pad (constant/reflect/edge), Dropout
+- [x] cmd/onnxrun (was a stub): any ONNX file on cpu/gpu/gpu-bf16/auto,
+      inputs from .npy or seeded random (dynamic dims via -dim / -shape),
+      outputs summarised / written as .npy, -ref compares with reference
+      outputs (wav2vec2-base-960h vs ONNX Runtime: 5.9e-5 rel on CPU,
+      5.5e-5 on GPU), -runs timing.
 - [ ] gaps documented in docs/GAPS.md; OCR-blocking: If/Loop/Scan, GridSample,
       NMS/TopK. Quantization (int8) and LSTM/GRU also open.
 
