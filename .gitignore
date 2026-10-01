@@ -27,6 +27,8 @@ __pycache__/
 /testdata/qwenimage21/
 # Qwen3-TTS reference activations (tools/export/qwen3tts_ref.py; derived from the checkpoint).
 /testdata/qwen3tts/
+# wav2vec2 aligner export + reference alignment (tools/export/align_ref.py).
+/testdata/align/
 
 # Layout/table models (RapidAI ONNX builds of PaddleOCR PP-DocLayout / SLANet).
 /testdata/layout/*.onnx

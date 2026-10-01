@@ -459,3 +459,19 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       cosine 0.9995 vs native).
 - [ ] qwen3tts features: streaming decode; unverified layouts: in-context
       clone with streaming off, 1.7B CustomVoice instructions.
+- [x] Word stress meter (models/align, cmd/prosody): wav2vec2-base-960h
+      CTC (ONNX export, generic graph path; log-probs 4.5e-4 rel vs
+      PyTorch) + CTC forced alignment (path and spans exact vs torchaudio;
+      brute-force oracle) + YIN pitch (exact overlap difference; tones
+      within 0.1%, voiced frames within 2% of librosa) and RMS. Per word:
+      pitch (st above the line), loudness (dB), duration (vs the line's
+      pace); against a plain rendering, a stressed / not verdict. First
+      measurement, "I never said she stole the money" stressing "never",
+      3 seeds: cloned (Base) lines are stable across seeds (|Δ| ≤ 1.1 st,
+      0.1 dB) and CAPS / *asterisks* change nothing (0/6); VoiceDesign
+      varies a lot between seeds (±6.6 st on the word, 1/6 plain pairs
+      "stressed"), CAPS / asterisks reliably lengthen the word (×1.36-1.65
+      vs ×0.87-1.15 plain) and an emphasis instruction stresses 2/3.
+- [ ] Word stress for cloned voices: DSP emphasis on the aligned word
+      (pitch / level / duration), then optionally a fine-tune with
+      emphasis markup — judged with cmd/prosody.
