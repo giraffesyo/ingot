@@ -441,7 +441,12 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       (talker 9.2 -> 8.1, code-predictor frame 12.0 -> 10.6 ms). End to
       end, GPU int8: VoiceDesign ~4.3x realtime, cloned lines ~3.6x;
       full precision 2.9x / 2.4x. Greedy codes still exact vs reference.
-- [ ] qwen3tts: code-predictor frame still ~4 ms above its bandwidth
-      floor (~560 dependent dispatches per frame); resampling for
-      non-24 kHz references; streaming decode; unverified layouts:
-      in-context clone with streaming off, 1.7B CustomVoice instructions.
+- [ ] qwen3tts speed: the remaining gains are listed with measurements
+      and estimates in PERF.md ("Qwen3-TTS decode", OPEN) — code-predictor
+      dispatch bubbles (~3-4 ms/frame), int8 GEMV efficiency (~1-1.5),
+      talker rope/attention fusion (~0.3), codec convs on the GPU, clone
+      reference decode, CPU worker-pool wake cost, x86 int8 kernel,
+      first-line page-in.
+- [ ] qwen3tts features: resampling for non-24 kHz references; streaming
+      decode; unverified layouts: in-context clone with streaming off,
+      1.7B CustomVoice instructions.

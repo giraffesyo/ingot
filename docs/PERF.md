@@ -2464,3 +2464,74 @@ mode needs adjacent f32 panels and is skipped for bf16 packs.
 
 Qwen-Image 2.1 DiT step, 256 target tokens, Apple Silicon CPU: 3.9 s best / 5-9
 typical -> 2.56-2.62 s (1.38-1.42 TFLOPS of GEMM), peak RSS 37 -> 29 GB.
+
+## Qwen3-TTS decode: CPU → int8 → Metal → fused kernels (2026-09-29 – 10-01)
+
+All numbers Apple Silicon (Metal), Qwen3-TTS-12Hz, measured on a
+machine shared with unrelated jobs (load average 7-21) — treat single
+runs as ±15%; A/B comparisons were interleaved. A frame is 80 ms of audio.
+
+Per-frame codes (talker step + 15 code-predictor steps):
+
+| model / path                         | ms/frame | notes |
+|---|---|---|
+| 0.6B CPU, first build                | 149      | bf16 Gemm at M=1 widened packed panels every call |
+| 0.6B CPU, bf16 rows streamed (M ≤ 4) | 38 → 33.5 | gemm.GemvBF16; PyTorch f32 CPU alongside: 102-111 |
+| 1.7B CPU bf16                        | 49-52    | weight bandwidth: talker 29 + code predictor 26 ms |
+| 1.7B CPU int8                        | 37-44    | Q8 weights × ~14-bit split activations |
+| 1.7B GPU bf16                        | 30 → 27.4 | Metal decode loop; fused kernels |
+| 1.7B GPU int8                        | 24.6 → 20.2 → 17.3 | + GPU sampling (one command buffer per code-predictor frame), + fused kernels |
+
+Codec decoder (47 frames, 3.76 s): CPU 1.1 s → 0.45 s (ingot.Snake) → GPU
+0.23 s (1-D conv/Snake/RoPE on the executor) → 74 ms (ConvTranspose as
+GEMM + col2im, 166 → 6 ms). End to end, steady state, GPU int8:
+VoiceDesign ~4.3× realtime, cloned lines ~3.6× (full precision 2.9× /
+2.4×); an MLX 8-bit port on the same machine measured ~3.5× / ~2.2×.
+
+NEGATIVE / neutral:
+- int8 with plain Q8 (8-bit) activations: ~30% faster GEMV than the
+  split ~14-bit activations, but code-predictor logits moved ~2.2% vs
+  ~1% (one hidden-state outlier crushes its 64-group). Kept the split.
+- GPU GEMV: staging x in threadgroup memory, or 16 weights per lane per
+  step instead of 8: within noise (best-of-3 bf16 12.7 vs 13.0 ms, int8
+  7.7 vs 7.5 ms per talker step's GEMVs). The kernels sit at ~220 GB/s
+  (bf16) / ~185 GB/s (int8) on the loaded machine; staging is kept for
+  the fused kernels, where it also carries the folded RMSNorm.
+- Encoding cost is not the GPU bottleneck: 0.2-0.4 ms per talker step of
+  CPU encode against 8-9 ms of GPU time.
+
+OPEN — remaining gains, largest first (estimates from the measured gaps):
+
+1. Code-predictor frame bubbles, GPU: 10.6 ms vs a ~6.8 ms bandwidth
+   floor (1.26 GB of int8 weights at ~185 GB/s). ~35 dependent dispatches
+   per step × 16 steps ≈ 560 per frame, each a pipeline drain. Options: a
+   per-layer (or persistent, whole-step) kernel with grid-wide sync via
+   atomics; fold the final RMSNorm into the head GEMV (the code predictor
+   never returns its hidden state: −1 dispatch/step); fold the 1.7B's
+   small_to_mtp projection into the first QKV GEMV. Estimate −3-4
+   ms/frame (17.3 → ~14).
+2. int8 GEMV efficiency, GPU: ~185 GB/s vs ~220 for bf16 — the char4 →
+   float4 dequant per weight. Packing two weights per 16-bit lane, or a
+   half-precision dot with the scale applied per group, may close half
+   the gap: ~1-1.5 ms/frame.
+3. Talker step, GPU: 8.1 ms vs ~7.5 ms of pure GEMV; the remaining
+   ~0.6 ms is rope/attention/residual dispatches — folding q/k RoPE into
+   attention would take one more dispatch per layer (~0.3 ms).
+4. Codec on the GPU: Conv is 47 of 74 ms (1-D convs on the 2-D im2col
+   path, f32); the GPUBF16 option or a 1-D implicit-GEMM path ~2×: ~0.5
+   ms per frame of audio.
+5. In-context cloning decodes the reference's codes with the new ones
+   (the reference implementation does; exact parity). Decoding only the
+   codec's receptive field of reference context (sliding window 72 ×
+   8 layers, causal convs) would save ~0.1-0.2 s per line for an 8 s
+   reference, at the cost of bit-exactness vs the reference.
+6. CPU decode: the worker pool's wake/park dominates the profile at decode
+   shapes (pthread_cond_wait / usleep ~35-60% of samples) — every GEMV is
+   a ~25-100 µs parallel region. A spinning/affine pool for decode, or
+   fewer, larger regions per layer, is cross-cutting (kernels/par).
+7. amd64: vek.Q8Fast is false (portable DotQ8), so int8 decode stays off
+   on x86 CPUs; an AVX2 (VPMADDUBSW / AVX-VNNI VPDPBUSD) split-activation
+   kernel would give x86 the same ~2× over bf16.
+8. First line per process: ~0.3 s of first-touch on the mmap'd bf16
+   weights (prefill reads them in place); a prefetch pass at load would
+   move it into setup.
