@@ -26,6 +26,16 @@ type metalWeight struct {
 type metalLayer struct {
 	q, k, v, o, gate, up, down     *metalWeight
 	inNorm, postNorm, qNorm, kNorm *metal.Buffer
+	qkv                            metal.DecodeWeight // [q; k; v] rows for the fused decode GEMV
+}
+
+// dec is w in the fused decode kernels' form: its int8 copy, else the
+// bf16 bytes in place.
+func (w *metalWeight) dec() metal.DecodeWeight {
+	if w.q != nil {
+		return metal.DecodeWeight{W: w.q.At(0), S: w.s.At(0)}
+	}
+	return metal.DecodeWeight{W: w.bf16, BF16: true}
 }
 
 // metalLM runs a Qwen3 decoder stack (talker or code predictor) on the GPU
@@ -96,15 +106,19 @@ func newMetalLM(set *safetensors.Set, c LMConfig, prefix string, in int, heads [
 			name    string
 			dst     **metalWeight
 			out, in int
+			quant   bool
 		}{
-			{"self_attn.q_proj.weight", &l.q, H * dh, D}, {"self_attn.k_proj.weight", &l.k, KV * dh, D},
-			{"self_attn.v_proj.weight", &l.v, KV * dh, D}, {"self_attn.o_proj.weight", &l.o, D, H * dh},
-			{"mlp.gate_proj.weight", &l.gate, I, D}, {"mlp.up_proj.weight", &l.up, I, D},
-			{"mlp.down_proj.weight", &l.down, D, I},
+			{"self_attn.q_proj.weight", &l.q, H * dh, D, false}, {"self_attn.k_proj.weight", &l.k, KV * dh, D, false},
+			{"self_attn.v_proj.weight", &l.v, KV * dh, D, false}, {"self_attn.o_proj.weight", &l.o, D, H * dh, true},
+			{"mlp.gate_proj.weight", &l.gate, I, D, true}, {"mlp.up_proj.weight", &l.up, I, D, true},
+			{"mlp.down_proj.weight", &l.down, D, I, true},
 		} {
-			if *w.dst, err = m.weight(set, p+w.name, w.out, w.in); err != nil {
+			if *w.dst, err = m.weightQ(set, p+w.name, w.out, w.in, w.quant); err != nil {
 				return nil, err
 			}
+		}
+		if l.qkv, err = m.concatQKV(set, []string{p + "self_attn.q_proj.weight", p + "self_attn.k_proj.weight", p + "self_attn.v_proj.weight"}, D); err != nil {
+			return nil, err
 		}
 		for _, n := range []struct {
 			name string
@@ -177,12 +191,17 @@ func newMetalLM(set *safetensors.Set, c LMConfig, prefix string, in int, heads [
 // weight wraps name's bf16 bytes in place (its shard once) and, for int8
 // decode, quantises a copy.
 func (m *metalLM) weight(set *safetensors.Set, name string, out, in int) (*metalWeight, error) {
+	return m.weightQ(set, name, out, in, true)
+}
+
+// weightQ is weight with the int8 copy optional (quant).
+func (m *metalLM) weightQ(set *safetensors.Set, name string, out, in int, quant bool) (*metalWeight, error) {
 	r, err := m.weightBF16(set, name, out, in)
 	if err != nil {
 		return nil, err
 	}
 	w := &metalWeight{n: out, k: in, bf16: r}
-	if m.int8 && in%64 == 0 {
+	if quant && m.int8 && in%64 == 0 {
 		mem, off, _, _ := set.Locate(name)
 		bits := unsafe.Slice((*uint16)(unsafe.Pointer(&mem[off])), out*in)
 		qw := gemm.QuantizeI8GBF16(bits, in, out, in)
@@ -198,6 +217,60 @@ func (m *metalLM) weight(set *safetensors.Set, name string, out, in int) (*metal
 		copy(f32view(w.s), qw.S)
 	}
 	return w, nil
+}
+
+// concatQKV builds the decode weight with the rows of names stacked (q,
+// k, v projections, each [*, in]): int8 when quantising, else a bf16 copy
+// (the checkpoint stores them apart).
+func (m *metalLM) concatQKV(set *safetensors.Set, names []string, in int) (metal.DecodeWeight, error) {
+	var rows int
+	var bits [][]uint16
+	for _, name := range names {
+		mem, off, info, err := set.Locate(name)
+		if err != nil {
+			return metal.DecodeWeight{}, err
+		}
+		if info.DType != "BF16" || len(info.Shape) != 2 || info.Shape[1] != in {
+			return metal.DecodeWeight{}, fmt.Errorf("qwen3tts: %s is %s%v, want BF16[*, %d]", name, info.DType, info.Shape, in)
+		}
+		bits = append(bits, unsafe.Slice((*uint16)(unsafe.Pointer(&mem[off])), info.Shape[0]*in))
+		rows += info.Shape[0]
+	}
+	if m.int8 && in%64 == 0 {
+		qb, err := m.dev.NewBuffer(rows * in)
+		if err != nil {
+			return metal.DecodeWeight{}, err
+		}
+		sb, err := m.dev.NewBuffer(4 * rows * in / 64)
+		if err != nil {
+			qb.Release()
+			return metal.DecodeWeight{}, err
+		}
+		m.owned = append(m.owned, qb, sb)
+		qd := unsafe.Slice((*int8)(unsafe.Pointer(&qb.Bytes()[0])), rows*in)
+		sd := f32view(sb)
+		r0 := 0
+		for _, b := range bits {
+			n := len(b) / in
+			qw := gemm.QuantizeI8GBF16(b, in, n, in)
+			copy(qd[r0*in:], qw.Q)
+			copy(sd[r0*in/64:], qw.S)
+			r0 += n
+		}
+		return metal.DecodeWeight{W: qb.At(0), S: sb.At(0)}, nil
+	}
+	wb, err := m.dev.NewBuffer(2 * rows * in)
+	if err != nil {
+		return metal.DecodeWeight{}, err
+	}
+	m.owned = append(m.owned, wb)
+	dst := unsafe.Slice((*uint16)(unsafe.Pointer(&wb.Bytes()[0])), rows*in)
+	r0 := 0
+	for _, b := range bits {
+		copy(dst[r0*in:], b)
+		r0 += len(b) / in
+	}
+	return metal.DecodeWeight{W: wb.At(0), BF16: true}, nil
 }
 
 // weightBF16 wraps name's bf16 [out, in] bytes in place (its shard once).
@@ -312,14 +385,56 @@ func (m *metalLM) load(x []float32, n int) error {
 // encodeStack encodes the decoder over n rows at positions pos.. (input
 // already in xin/x) and the final norm of the last row into hid.
 func (m *metalLM) encodeStack(e *metal.Encoder, n, pos int) {
+	D, eps := m.c.HiddenSize, m.c.RMSNormEps
+	if m.proj != nil {
+		m.lin(e, m.xin.At(0), m.x.At(0), m.proj, n, false, m.projB)
+	}
+	if n <= 4 {
+		m.encodeDecodeLayers(e, n, pos)
+	} else {
+		m.encodePrefillLayers(e, n, pos)
+	}
+	e.RMSNormRows(m.x.At(4*(n-1)*D), m.hid.At(0), m.norm.At(0), 1, D, D, D, eps)
+}
+
+// encodeDecodeLayers is the decoder over n ≤ 4 rows on the fused one-row
+// kernels (looped per row): per layer and row, the QKV GEMV with the input
+// norm folded in and its outputs split into q and the cache rows; q/k
+// norm + RoPE; then attention over the cache for all rows; then the O GEMV
+// accumulating into the residual, the gate/up GEMV (post-norm folded in,
+// SiLU·mul in-kernel) and the down GEMV accumulating.
+func (m *metalLM) encodeDecodeLayers(e *metal.Encoder, n, pos int) {
+	c := m.c
+	D, H, KV, dh, I := c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, c.IntermediateSize
+	eps := c.RMSNormEps
+	scale := float32(1 / math.Sqrt(float64(dh)))
+	ldkv, Hd := KV*dh, H*dh
+	for li, l := range m.layers {
+		for r := range n {
+			p := pos + r
+			e.Gemv1(metal.FusedGemv{N: Hd + 2*ldkv, K: D, X: m.x.At(4 * r * D), W: l.qkv,
+				Y0: m.q.At(4 * r * Hd), Y1: m.kc[li].At(4 * p * ldkv), Y2: m.vc[li].At(4 * p * ldkv),
+				N1: Hd, N2: Hd + ldkv, Norm: true, NormW: l.inNorm.At(0), Eps: eps})
+			e.RMSNormRoPEQK(m.q.At(4*r*Hd), m.kc[li].At(4*p*ldkv), l.qNorm.At(0), l.kNorm.At(0),
+				m.cos.At(4*p*dh/2), m.sin.At(4*p*dh/2), H, KV, dh, metal.RopeHalf, eps)
+		}
+		e.AttnDecode(m.q.At(0), m.kc[li].At(0), m.vc[li].At(0), m.o.At(0), n, H, KV, dh, pos, Hd, Hd, scale)
+		for r := range n {
+			e.Gemv1(metal.FusedGemv{N: D, K: Hd, X: m.o.At(4 * r * Hd), W: l.o.dec(), Y0: m.x.At(4 * r * D), Accumulate: true})
+			e.GLU1(I, D, m.x.At(4*r*D), l.gate.dec(), l.up.dec(), m.g.At(4*r*I), true, l.postNorm.At(0), eps)
+			e.Gemv1(metal.FusedGemv{N: D, K: I, X: m.g.At(4 * r * I), W: l.down.dec(), Y0: m.x.At(4 * r * D), Accumulate: true})
+		}
+	}
+}
+
+// encodePrefillLayers is the decoder over n > 4 rows: bf16 GEMMs on the
+// in-place weights, separate norms.
+func (m *metalLM) encodePrefillLayers(e *metal.Encoder, n, pos int) {
 	c := m.c
 	D, H, KV, dh, I := c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, c.IntermediateSize
 	eps := c.RMSNormEps
 	scale := float32(1 / math.Sqrt(float64(dh)))
 	ldkv := KV * dh
-	if m.proj != nil {
-		m.lin(e, m.xin.At(0), m.x.At(0), m.proj, n, false, m.projB)
-	}
 	cos, sin := m.cos.At(4*pos*dh/2), m.sin.At(4*pos*dh/2)
 	for li, l := range m.layers {
 		kAt, vAt := m.kc[li].At(4*pos*ldkv), m.vc[li].At(4*pos*ldkv)
@@ -337,7 +452,6 @@ func (m *metalLM) encodeStack(e *metal.Encoder, n, pos int) {
 		e.SiLUMul(m.g.At(0), m.u.At(0), m.g.At(0), n, I, I, I, I)
 		m.lin(e, m.g.At(0), m.x.At(0), l.down, n, true, nil)
 	}
-	e.RMSNormRows(m.x.At(4*(n-1)*D), m.hid.At(0), m.norm.At(0), 1, D, D, D, eps)
 }
 
 // frameSampler is the GPU sampler's setting for the code predictor.

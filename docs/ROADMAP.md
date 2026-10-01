@@ -431,7 +431,17 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       upsampling 166 -> 6 ms). Qwen3-TTS codec on the GPU: 450 -> 74 ms per
       47 frames, waveform 7e-6. End to end (cmd/qwen3tts, GPU int8):
       cloned lines ~2.5x realtime, VoiceDesign ~2.1x.
-- [ ] qwen3tts: resampling for non-24 kHz references; streaming decode;
-      fewer talker dispatches (fused QKV / gate-up GEMVs); unverified
-      layouts: in-context clone with streaming off, 1.7B CustomVoice
-      instructions.
+- [x] Fused one-row decode kernels (kernels/metal): QKV GEMV with the
+      input RMSNorm folded into x staging and outputs split into q and the
+      K/V cache rows; one-dispatch q/k RMSNorm + RoPE; gate/up GEMV with
+      the post-norm folded in and SiLU·mul in-kernel. 13 -> 6 dispatches
+      per layer and row. GEMVs themselves measured near the loaded
+      machine's bandwidth (bf16 ~220 GB/s, int8 ~185 GB/s), so the win is
+      fewer pipeline bubbles: 1.7B GPU int8 codes 20.2 -> 17.3 ms/frame
+      (talker 9.2 -> 8.1, code-predictor frame 12.0 -> 10.6 ms). End to
+      end, GPU int8: VoiceDesign ~4.3x realtime, cloned lines ~3.6x;
+      full precision 2.9x / 2.4x. Greedy codes still exact vs reference.
+- [ ] qwen3tts: code-predictor frame still ~4 ms above its bandwidth
+      floor (~560 dependent dispatches per frame); resampling for
+      non-24 kHz references; streaming decode; unverified layouts:
+      in-context clone with streaming off, 1.7B CustomVoice instructions.

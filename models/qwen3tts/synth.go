@@ -205,6 +205,13 @@ func (m *Model) newSynth(maxT int, q Quant, device string, talkerLayers, codecLa
 	if s.codec, err = m.newCodec(codecLayers, device); err != nil {
 		return nil, err
 	}
+	if device == "gpu" {
+		// Warm-up: the GPU codec builds its constant tables (transposed
+		// conv weights) on first use; pay that here, not on the first line.
+		if _, err := s.codec.Decode([][]int64{make([]int64, t.NumCodeGroups)}); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
 }
 
