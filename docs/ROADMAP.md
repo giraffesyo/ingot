@@ -451,6 +451,11 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
 - [ ] qwen3tts speed, open: the code predictor's fixed per-step GPU cost;
       CPU worker-pool behaviour on a quiet machine; an AVX2 / VNNI int8
       kernel (needs an x86 host — Rosetta here has no AVX2).
-- [ ] qwen3tts features: resampling for non-24 kHz references; streaming
-      decode; unverified layouts: in-context clone with streaming off,
-      1.7B CustomVoice instructions.
+- [x] audio package: WAV I/O (moved from qwen3tts) and Resample — Kaiser-
+      windowed sinc, polyphase for rational ratios; rolloff/length swept
+      against librosa's soxr_hq (52-56 dB SNR at 16-48 kHz → 24 kHz;
+      passband ±0.02 dB, stopband ≥ 90 dB); 10 s of audio in 5-8 ms.
+      Cloning accepts references at any rate (44.1 kHz round trip: x-vector
+      cosine 0.9995 vs native).
+- [ ] qwen3tts features: streaming decode; unverified layouts: in-context
+      clone with streaming off, 1.7B CustomVoice instructions.

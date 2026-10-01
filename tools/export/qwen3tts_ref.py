@@ -30,7 +30,7 @@ Needs its own venv (qwen-tts pins transformers==4.57.3):
     uv pip install --python tools/export/.venv-tts/bin/python torch torchaudio \
         transformers==4.57.3 accelerate==1.12.0 einops librosa soundfile sox onnxruntime
     uv pip install --python tools/export/.venv-tts/bin/python --no-deps qwen-tts==0.1.1
-    HF_HUB_OFFLINE=1 tools/export/.venv-tts/bin/python tools/export/qwen3tts_ref.py [--design-clone | --all]
+    HF_HUB_OFFLINE=1 tools/export/.venv-tts/bin/python tools/export/qwen3tts_ref.py [--design-clone | --resample | --all]
 
 Writes testdata/qwen3tts/<name>.{in,out}.<i>.bin + <name>.json (same raw
 little-endian layout as zoo.py). Outputs derive from the checkpoint and are
@@ -177,6 +177,24 @@ def design_and_clone():
 LAST = {}
 
 
+def resample_cases():
+    """librosa.resample (soxr_hq, what qwen-tts runs on reference clips that
+    are not 24 kHz) on a speech-band test signal at common input rates."""
+    import librosa
+    rng = np.random.default_rng(0)
+    for sr in (16000, 22050, 44100, 48000):
+        n = sr * 3 // 2
+        t = np.arange(n) / sr
+        # Chirp 80 Hz -> 7 kHz plus band-limited noise and a few tones.
+        x = 0.3 * np.sin(2 * np.pi * (80 * t + (7000 - 80) / (2 * t[-1]) * t * t))
+        for f in (220, 1000, 3300):
+            x += 0.1 * np.sin(2 * np.pi * f * t)
+        x += 0.05 * rng.standard_normal(n)
+        x = x.astype(np.float32)
+        y = librosa.resample(x, orig_sr=sr, target_sr=24000).astype(np.float32)
+        save(f"resample_{sr}", [("x", x)], [("y", y)], {"orig_sr": sr, "target_sr": 24000})
+
+
 def main():
     torch.manual_seed(0)
     snap = snapshot_download(REPO, local_files_only=True)
@@ -271,6 +289,10 @@ if __name__ == "__main__":
         return codes, hid
 
     Qwen3TTSForConditionalGeneration.generate = _gen
+    if "--resample" in sys.argv or "--all" in sys.argv:
+        resample_cases()
+        if "--resample" in sys.argv:
+            sys.exit(0)
     if "--design-clone" in sys.argv or "--all" in sys.argv:
         design_and_clone()
     if "--design-clone" not in sys.argv:

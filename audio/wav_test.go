@@ -1,4 +1,4 @@
-package qwen3tts
+package audio
 
 import (
 	"bytes"

@@ -1,11 +1,13 @@
 package qwen3tts
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/giraffesyo/ingot/audio"
 	"github.com/giraffesyo/ingot/generate"
 )
 
@@ -288,4 +290,35 @@ func TestGPUParity(t *testing.T) {
 		check(t, "prefill logits", res.PrefillLogits, ref.f32(t, "prefill_logits").F32(), 1e-4)
 		checkCodes(t, got, ref, "codes")
 	})
+}
+
+// TestCloneResampled: a 44.1 kHz reference (the 24 kHz one round-tripped
+// through audio.Resample) clones to the same speaker: x-vector cosine
+// ≥ 0.999 against the native-rate prompt.
+func TestCloneResampled(t *testing.T) {
+	ref := loadRef(t, "clone")
+	m := loadNamed(t, "Qwen3-TTS-12Hz-1.7B-Base")
+	cl, err := m.NewCloner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wav := ref.f32(t, "ref_wav").F32()
+	native, err := cl.NewVoicePrompt(wav, 24000, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, err := cl.NewVoicePrompt(audio.Resample(wav, 24000, 44100), 44100, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d, a, b float64
+	for i := range native.SpeakerEmbed {
+		x, y := float64(native.SpeakerEmbed[i]), float64(up.SpeakerEmbed[i])
+		d, a, b = d+x*y, a+x*x, b+y*y
+	}
+	cos := d / math.Sqrt(a*b)
+	t.Logf("x-vector cosine, 44.1 kHz round trip vs native: %.5f", cos)
+	if cos < 0.999 {
+		t.Errorf("cosine %.5f < 0.999", cos)
+	}
 }

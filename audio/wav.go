@@ -1,4 +1,6 @@
-package qwen3tts
+// Package audio holds the audio plumbing models share: WAV I/O and
+// band-limited resampling.
+package audio
 
 import (
 	"encoding/binary"
@@ -40,7 +42,7 @@ func ReadWAV(r io.Reader) ([]float32, int, error) {
 	}
 	le := binary.LittleEndian
 	if len(raw) < 12 || string(raw[0:4]) != "RIFF" || string(raw[8:12]) != "WAVE" {
-		return nil, 0, fmt.Errorf("qwen3tts: not a RIFF/WAVE file")
+		return nil, 0, fmt.Errorf("audio: not a RIFF/WAVE file")
 	}
 	var format, channels, bits int
 	rate := 0
@@ -51,7 +53,7 @@ func ReadWAV(r io.Reader) ([]float32, int, error) {
 		switch id {
 		case "fmt ":
 			if len(body) < 16 {
-				return nil, 0, fmt.Errorf("qwen3tts: short fmt chunk")
+				return nil, 0, fmt.Errorf("audio: short fmt chunk")
 			}
 			format, channels = int(le.Uint16(body[0:])), int(le.Uint16(body[2:]))
 			rate, bits = int(le.Uint32(body[4:])), int(le.Uint16(body[14:]))
@@ -64,7 +66,7 @@ func ReadWAV(r io.Reader) ([]float32, int, error) {
 		p += 8 + size + size&1
 	}
 	if channels == 0 || data == nil {
-		return nil, 0, fmt.Errorf("qwen3tts: WAV without fmt or data chunk")
+		return nil, 0, fmt.Errorf("audio: WAV without fmt or data chunk")
 	}
 	width := bits / 8
 	var sample func(b []byte) float64
@@ -84,7 +86,7 @@ func ReadWAV(r io.Reader) ([]float32, int, error) {
 	case format == 3 && bits == 64:
 		sample = func(b []byte) float64 { return math.Float64frombits(le.Uint64(b)) }
 	default:
-		return nil, 0, fmt.Errorf("qwen3tts: WAV format %d with %d bits not supported", format, bits)
+		return nil, 0, fmt.Errorf("audio: WAV format %d with %d bits not supported", format, bits)
 	}
 	frame := width * channels
 	out := make([]float32, len(data)/frame)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 
+	"github.com/giraffesyo/ingot/audio"
 	"github.com/giraffesyo/ingot/graph"
 	"github.com/giraffesyo/ingot/kernels/gemm"
 	"github.com/giraffesyo/ingot/tensor"
@@ -69,13 +70,18 @@ func (m *Model) NewCloner() (cl *Cloner, err error) {
 	return cl, nil
 }
 
-// NewVoicePrompt clones the voice in wav (mono, 24 kHz, [-1, 1]). With
-// refText it is in-context cloning (the reference codes condition the
-// talker alongside its transcript, the reference's default); empty refText
-// is x-vector-only cloning.
+// NewVoicePrompt clones the voice in wav (mono, [-1, 1], at sampleRate;
+// other rates than 24 kHz are resampled first, as qwen-tts does with
+// librosa — see audio.Resample for how closely). With refText it is
+// in-context cloning (the reference codes condition the talker alongside
+// its transcript, the reference's default); empty refText is
+// x-vector-only cloning.
 func (cl *Cloner) NewVoicePrompt(wav []float32, sampleRate int, refText string) (*VoicePrompt, error) {
 	if sampleRate != melRate {
-		return nil, fmt.Errorf("qwen3tts: reference audio is %d Hz; resample it to %d Hz", sampleRate, melRate)
+		if sampleRate <= 0 {
+			return nil, fmt.Errorf("qwen3tts: reference sample rate %d", sampleRate)
+		}
+		wav = audio.Resample(wav, sampleRate, melRate)
 	}
 	emb, err := cl.SpeakerEmbedding(wav)
 	if err != nil {

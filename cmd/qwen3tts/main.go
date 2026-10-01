@@ -17,7 +17,7 @@
 // -model is a snapshot directory or a Qwen3-TTS-12Hz size+type found in the
 // HF cache (0.6B-CustomVoice, 1.7B-VoiceDesign, 1.7B-Base, ...). -lines
 // reads "name<TAB>text" per line and writes <out-dir>/<name>.wav. Reference
-// audio must be 24 kHz.
+// audio at other rates than 24 kHz is resampled.
 package main
 
 import (
@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/giraffesyo/ingot/audio"
 	"github.com/giraffesyo/ingot/models/qwen3tts"
 )
 
@@ -40,7 +41,7 @@ func main() {
 	out := flag.String("out", "out.wav", "output WAV (24 kHz mono, 16-bit) for -text")
 	speaker := flag.String("speaker", "ryan", "CustomVoice: preset speaker (-list shows them)")
 	instruct := flag.String("instruct", "", "VoiceDesign: description of the voice (CustomVoice 1.7B: a style instruction)")
-	refAudio := flag.String("ref-audio", "", "Base: reference clip to clone (WAV, 24 kHz)")
+	refAudio := flag.String("ref-audio", "", "Base: reference clip to clone (WAV; resampled to 24 kHz if needed)")
 	refText := flag.String("ref-text", "", "Base: transcript of -ref-audio (in-context cloning; empty: x-vector only)")
 	voice := flag.String("voice", "", "Base: a voice saved with -save-voice")
 	saveVoice := flag.String("save-voice", "", "Base: save the cloned voice to this file")
@@ -170,7 +171,7 @@ func cloneVoice(m *qwen3tts.Model, voice, refAudio, refText, save string) (*qwen
 		if err != nil {
 			return nil, err
 		}
-		wav, rate, err := qwen3tts.ReadWAV(f)
+		wav, rate, err := audio.ReadWAV(f)
 		f.Close()
 		if err != nil {
 			return nil, err
@@ -228,7 +229,7 @@ func writeWAV(path string, res *qwen3tts.Result) error {
 	if err != nil {
 		return err
 	}
-	if err := qwen3tts.WriteWAV(f, res.Wav, res.SampleRate); err != nil {
+	if err := audio.WriteWAV(f, res.Wav, res.SampleRate); err != nil {
 		f.Close()
 		return err
 	}
