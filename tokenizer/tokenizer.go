@@ -1,7 +1,9 @@
 // Package tokenizer implements the byte-level BPE subset of Hugging Face
 // tokenizer.json files used by GPT-2-family and Qwen models: added (special)
-// tokens split out first, NFC normalisation, the Qwen2/GPT-4-style
-// pre-tokenizer split, GPT-2 byte-to-unicode mapping, and merge-rank BPE.
+// tokens split out first, NFC normalisation, the Qwen2/GPT-4-style or the
+// Mistral-style pre-tokenizer split, GPT-2 byte-to-unicode mapping, and
+// merge-rank BPE. Checkpoints without a tokenizer.json (vocab.json +
+// merges.txt) load through LoadBPE.
 //
 // Configurations outside that subset are rejected at load time rather than
 // tokenised approximately.
@@ -26,6 +28,7 @@ type Tokenizer struct {
 	ranks  map[[2]string]int
 	added  []added // longest content first
 	byteCh [256]string
+	split  func(string) []string
 
 	mu    sync.Mutex
 	cache map[string][]int64 // pre-token → ids
@@ -36,9 +39,25 @@ type added struct {
 	id      int64
 }
 
-// qwen2Split is the pre-tokenizer regex this package implements by hand (Go's
-// regexp has no lookahead); a tokenizer.json with any other split is refused.
-const qwen2Split = `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+// qwen2Split and mistralSplit are the pre-tokenizer regexes this package
+// implements by hand (Go's regexp has no lookahead); a tokenizer.json with
+// any other split is refused.
+const (
+	qwen2Split   = `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+	mistralSplit = `[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+)
+
+// SplitKind selects the pre-tokenizer for LoadBPE.
+type SplitKind int
+
+const (
+	// PreQwen2 is the Qwen2 / GPT-4-style split (Split).
+	PreQwen2 SplitKind = iota
+	// PreMistral is the Mistral-style split (SplitMistral): case-aware
+	// letter runs, no contraction rule. transformers' fix_mistral_regex
+	// installs it on any tokenizer it loads, Qwen ones included.
+	PreMistral
+)
 
 // Load reads a tokenizer.json.
 func Load(path string) (*Tokenizer, error) {
@@ -89,11 +108,15 @@ func Load(path string) (*Tokenizer, error) {
 	case f.Normalizer != nil && f.Normalizer.Type != "NFC":
 		return nil, fmt.Errorf("tokenizer: normalizer %q not supported", f.Normalizer.Type)
 	case f.PreTokenizer.Type != "Sequence" || len(pt) != 2 || pt[0].Type != "Split" ||
-		pt[0].Pattern.Regex != qwen2Split || pt[0].Behavior != "Isolated" || pt[0].Invert ||
+		(pt[0].Pattern.Regex != qwen2Split && pt[0].Pattern.Regex != mistralSplit) ||
+		pt[0].Behavior != "Isolated" || pt[0].Invert ||
 		pt[1].Type != "ByteLevel" || pt[1].AddPrefixSpace || pt[1].UseRegex:
-		return nil, fmt.Errorf("tokenizer: pre-tokenizer not supported (want the Qwen2 split + ByteLevel)")
+		return nil, fmt.Errorf("tokenizer: pre-tokenizer not supported (want the Qwen2 or Mistral split + ByteLevel)")
 	}
-	t := &Tokenizer{vocab: f.Model.Vocab, ranks: map[[2]string]int{}, cache: map[string][]int64{}}
+	split := PreQwen2
+	if pt[0].Pattern.Regex == mistralSplit {
+		split = PreMistral
+	}
 	// Merges are either "a b" strings (older files) or ["a", "b"] pairs.
 	var pairs [][2]string
 	var strs []string
@@ -101,28 +124,116 @@ func Load(path string) (*Tokenizer, error) {
 		if err := json.Unmarshal(f.Model.Merges, &strs); err != nil {
 			return nil, fmt.Errorf("tokenizer: merges: %w", err)
 		}
-		for _, s := range strs {
-			a, b, ok := strings.Cut(s, " ")
-			if !ok {
-				return nil, fmt.Errorf("tokenizer: merge %q", s)
-			}
-			pairs = append(pairs, [2]string{a, b})
+		if pairs, err = parseMerges(strs); err != nil {
+			return nil, err
 		}
+	}
+	var add []AddedToken
+	for _, a := range f.AddedTokens {
+		if a.LStrip || a.RStrip || a.Single {
+			return nil, fmt.Errorf("tokenizer: added token %q: lstrip/rstrip/single_word not supported", a.Content)
+		}
+		add = append(add, AddedToken{a.Content, a.ID})
+	}
+	return build(f.Model.Vocab, pairs, add, split), nil
+}
+
+// AddedToken is a special token matched verbatim before pre-tokenisation.
+type AddedToken struct {
+	Content string
+	ID      int64
+}
+
+// LoadBPE builds a tokenizer from a slow-tokenizer checkpoint: vocab.json
+// (token → id), merges.txt (one "a b" pair per line, optional "#version"
+// header) and the added tokens (from tokenizer_config.json's
+// added_tokens_decoder). Normalisation is NFC, as in Qwen2Tokenizer.
+func LoadBPE(vocabPath, mergesPath string, add []AddedToken, split SplitKind) (*Tokenizer, error) {
+	raw, err := os.ReadFile(vocabPath)
+	if err != nil {
+		return nil, fmt.Errorf("tokenizer: %w", err)
+	}
+	var vocab map[string]int64
+	if err := json.Unmarshal(raw, &vocab); err != nil {
+		return nil, fmt.Errorf("tokenizer: %s: %w", vocabPath, err)
+	}
+	raw, err = os.ReadFile(mergesPath)
+	if err != nil {
+		return nil, fmt.Errorf("tokenizer: %w", err)
+	}
+	var lines []string
+	for l := range strings.SplitSeq(string(raw), "\n") {
+		if l = strings.TrimRight(l, "\r"); l != "" && !strings.HasPrefix(l, "#version") {
+			lines = append(lines, l)
+		}
+	}
+	pairs, err := parseMerges(lines)
+	if err != nil {
+		return nil, err
+	}
+	return build(vocab, pairs, add, split), nil
+}
+
+// AddedTokensFromConfig reads tokenizer_config.json's added_tokens_decoder.
+func AddedTokensFromConfig(path string) ([]AddedToken, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("tokenizer: %w", err)
+	}
+	var c struct {
+		Added map[string]struct {
+			Content string `json:"content"`
+			LStrip  bool   `json:"lstrip"`
+			RStrip  bool   `json:"rstrip"`
+			Single  bool   `json:"single_word"`
+		} `json:"added_tokens_decoder"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, fmt.Errorf("tokenizer: %s: %w", path, err)
+	}
+	var out []AddedToken
+	for id, a := range c.Added {
+		if a.LStrip || a.RStrip || a.Single {
+			return nil, fmt.Errorf("tokenizer: added token %q: lstrip/rstrip/single_word not supported", a.Content)
+		}
+		var n int64
+		if _, err := fmt.Sscan(id, &n); err != nil {
+			return nil, fmt.Errorf("tokenizer: added token id %q", id)
+		}
+		out = append(out, AddedToken{a.Content, n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func parseMerges(strs []string) ([][2]string, error) {
+	pairs := make([][2]string, 0, len(strs))
+	for _, s := range strs {
+		a, b, ok := strings.Cut(s, " ")
+		if !ok {
+			return nil, fmt.Errorf("tokenizer: merge %q", s)
+		}
+		pairs = append(pairs, [2]string{a, b})
+	}
+	return pairs, nil
+}
+
+func build(vocab map[string]int64, pairs [][2]string, add []AddedToken, split SplitKind) *Tokenizer {
+	t := &Tokenizer{vocab: vocab, ranks: map[[2]string]int{}, cache: map[string][]int64{}, split: Split}
+	if split == PreMistral {
+		t.split = SplitMistral
 	}
 	for i, p := range pairs {
 		if _, dup := t.ranks[p]; !dup {
 			t.ranks[p] = i
 		}
 	}
-	for _, a := range f.AddedTokens {
-		if a.LStrip || a.RStrip || a.Single {
-			return nil, fmt.Errorf("tokenizer: added token %q: lstrip/rstrip/single_word not supported", a.Content)
-		}
+	for _, a := range add {
 		t.added = append(t.added, added{a.Content, a.ID})
 	}
 	sort.SliceStable(t.added, func(i, j int) bool { return len(t.added[i].content) > len(t.added[j].content) })
 	t.byteCh = bytesToUnicode()
-	return t, nil
+	return t
 }
 
 // Encode tokenises text (no special tokens are added).
@@ -154,7 +265,7 @@ func (t *Tokenizer) Encode(text string) ([]int64, error) {
 
 func (t *Tokenizer) encodeSegment(ids []int64, s string) ([]int64, error) {
 	s = norm.NFC.String(s)
-	for _, piece := range Split(s) {
+	for _, piece := range t.split(s) {
 		t.mu.Lock()
 		c, ok := t.cache[piece]
 		t.mu.Unlock()
@@ -284,6 +395,12 @@ func matchAt(s string, i int) int {
 	if k := run(s, j, isPunct); k > j {
 		return run(s, k, isNL) - i
 	}
+	return matchSpace(s, i, w0)
+}
+
+// matchSpace is the whitespace alternatives both splits end with:
+// \s*[\r\n]+|\s+(?!\S)|\s+.
+func matchSpace(s string, i, w0 int) int {
 	// 5. \s*[\r\n]+ — the longest whitespace prefix ending in a newline.
 	ws := run(s, i, isS)
 	for k := ws; k > i; {
@@ -318,4 +435,84 @@ func run(s string, i int, f func(rune) bool) int {
 		i += w
 	}
 	return i
+}
+
+// SplitMistral is the Mistral-style pre-tokenizer (mistralSplit): like
+// Split, alternatives tried in order at each position with regex
+// backtracking resolved explicitly.
+func SplitMistral(s string) []string {
+	var out []string
+	for i := 0; i < len(s); {
+		n := matchMistralAt(s, i)
+		out = append(out, s[i:i+n])
+		i += n
+	}
+	return out
+}
+
+// isUp is [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}], isLow [\p{Ll}\p{Lm}\p{Lo}\p{M}].
+func isUp(r rune) bool {
+	return unicode.In(r, unicode.Lu, unicode.Lt, unicode.Lm, unicode.Lo, unicode.M)
+}
+func isLow(r rune) bool {
+	return unicode.In(r, unicode.Ll, unicode.Lm, unicode.Lo, unicode.M)
+}
+
+// upperLower matches [Up]*[Low]+ at j (greedy Up*, backtracking into it
+// until a Low follows) and returns the end, or -1.
+func upperLower(s string, j int) int {
+	ends := []int{j} // ends[u] = offset after u Up runes
+	for k := j; k < len(s); {
+		r, w := utf8.DecodeRuneInString(s[k:])
+		if !isUp(r) {
+			break
+		}
+		k += w
+		ends = append(ends, k)
+	}
+	for u := len(ends) - 1; u >= 0; u-- {
+		if e := run(s, ends[u], isLow); e > ends[u] {
+			return e
+		}
+	}
+	return -1
+}
+
+// upperThenLower matches [Up]+[Low]* at j and returns the end, or -1.
+func upperThenLower(s string, j int) int {
+	if k := run(s, j, isUp); k > j {
+		return run(s, k, isLow)
+	}
+	return -1
+}
+
+// matchMistralAt returns the byte length of the first alternative of
+// mistralSplit matching at i.
+func matchMistralAt(s string, i int) int {
+	r0, w0 := utf8.DecodeRuneInString(s[i:])
+	lead := !isNL(r0) && !isL(r0) && !isN(r0) // [^\r\n\p{L}\p{N}]
+	// 1-2. prefix? letters, prefix tried first (greedy ?).
+	for _, f := range []func(string, int) int{upperLower, upperThenLower} {
+		if lead && i+w0 < len(s) {
+			if e := f(s, i+w0); e >= 0 {
+				return e - i
+			}
+		}
+		if e := f(s, i); e >= 0 {
+			return e - i
+		}
+	}
+	// 3. \p{N}
+	if isN(r0) {
+		return w0
+	}
+	// 4.  ?[^\s\p{L}\p{N}]+[\r\n/]*
+	j := i
+	if r0 == ' ' {
+		j = i + 1
+	}
+	if k := run(s, j, isPunct); k > j {
+		return run(s, k, func(r rune) bool { return isNL(r) || r == '/' }) - i
+	}
+	return matchSpace(s, i, w0)
 }

@@ -94,3 +94,73 @@ func TestQwenReference(t *testing.T) {
 		}
 	}
 }
+
+// TestSplitMistral pins the Mistral-style split on hand-derived cases.
+func TestSplitMistral(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"hello world", []string{"hello", " world"}},
+		{"I'm don't", []string{"I", "'m", " don", "'t"}}, // no contraction rule: ' leads the letter run
+		{"HelloWorld", []string{"Hello", "World"}},       // case boundary splits
+		{"HTTPServer", []string{"HTTPServer"}},           // Up* backtracks only as far as a lower letter needs
+		{"ABC def", []string{"ABC", " def"}},             // all-caps via [Up]+[Low]*
+		{"abc123", []string{"abc", "1", "2", "3"}},
+		{"a  b", []string{"a", " ", " b"}},
+		{"x\n\ny", []string{"x", "\n\n", "y"}},
+		{"a+/b", []string{"a", "+/", "b"}},
+		{"hi!/\n/x", []string{"hi", "!/\n/", "x"}}, // [\r\n/]* after punctuation
+		{"東京 café", []string{"東京", " café"}},
+		{"$5.00", []string{"$", "5", ".", "0", "0"}},
+	} {
+		if got := SplitMistral(c.in); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("SplitMistral(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestQwen3TTSReference encodes tools/export/qwen3tts_ref.py's strings two
+// ways — the backend tokenizer.json the reference processor ran, and the
+// checkpoint's vocab.json + merges.txt through LoadBPE — and compares ids
+// exactly.
+func TestQwen3TTSReference(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	snaps, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice/snapshots/*"))
+	raw, err := os.ReadFile("../testdata/qwen3tts/tokenizer.json")
+	if len(snaps) == 0 || err != nil {
+		t.Skip("Qwen3-TTS snapshot or reference ids not present")
+	}
+	var ref struct {
+		Cases []struct {
+			Text string  `json:"text"`
+			IDs  []int64 `json:"ids"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := Load("../testdata/qwen3tts/backend_tokenizer.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	add, err := AddedTokensFromConfig(filepath.Join(snaps[0], "tokenizer_config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bpe, err := LoadBPE(filepath.Join(snaps[0], "vocab.json"), filepath.Join(snaps[0], "merges.txt"), add, PreMistral)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tok := range map[string]*Tokenizer{"backend": backend, "bpe": bpe} {
+		for _, c := range ref.Cases {
+			got, err := tok.Encode(c.Text)
+			if err != nil {
+				t.Fatalf("%s %q: %v", name, c.Text, err)
+			}
+			if !reflect.DeepEqual(got, c.IDs) {
+				t.Errorf("%s: Encode(%q)\n got %v\nwant %v", name, c.Text, got, c.IDs)
+			}
+		}
+	}
+}
