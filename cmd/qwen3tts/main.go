@@ -18,6 +18,12 @@
 // HF cache (0.6B-CustomVoice, 1.7B-VoiceDesign, 1.7B-Base, ...). -lines
 // reads "name<TAB>text" per line and writes <out-dir>/<name>.wav. Reference
 // audio at other rates than 24 kHz is resampled.
+//
+// Stress: mark words with asterisks — "I *never* said that" — and they are
+// emphasised after synthesis (a pitch accent, a level lift and a little
+// lengthening on the aligned word; -stress-pitch/-gain/-stretch). English;
+// needs the wav2vec2 aligner (tools/export/align_ref.py). cmd/prosody
+// measures the result.
 package main
 
 import (
@@ -31,6 +37,7 @@ import (
 	"time"
 
 	"github.com/giraffesyo/ingot/audio"
+	"github.com/giraffesyo/ingot/models/align"
 	"github.com/giraffesyo/ingot/models/qwen3tts"
 )
 
@@ -51,6 +58,13 @@ func main() {
 	maxFrames := flag.Int("max-frames", 0, "cap on generated frames per line, 12.5 per second (default: the checkpoint's max_new_tokens)")
 	model := flag.String("model", "0.6B-CustomVoice", "snapshot directory, or a Qwen3-TTS-12Hz size+type in the HF cache")
 	list := flag.Bool("list", false, "list speakers and languages, then exit")
+	markup := flag.Bool("markup", true, "treat *word* in the text as stress: the word is emphasised after synthesis (pitch accent, level, length)")
+	stress := audio.DefaultEmphasis
+	flag.Float64Var(&stress.PitchST, "stress-pitch", stress.PitchST, "stress: pitch accent peak in semitones")
+	flag.Float64Var(&stress.GainDB, "stress-gain", stress.GainDB, "stress: level lift in dB")
+	flag.Float64Var(&stress.Stretch, "stress-stretch", stress.Stretch, "stress: lengthening factor")
+	alignerModel := flag.String("aligner", "testdata/align/wav2vec2-base-960h.onnx", "stress: word aligner ONNX (tools/export/align_ref.py)")
+	alignerVocab := flag.String("aligner-vocab", "", "stress: aligner vocab.json (default: facebook/wav2vec2-base-960h in the HF cache)")
 	int8w := flag.Bool("int8", false, "int8 weights for the decode loop (GPU, or arm64 CPU; x86 CPUs keep bf16): faster, audio differs slightly from full precision")
 	device := flag.String("device", "auto", "where the decode loop runs: auto (the GPU when available), gpu, cpu")
 	flag.Parse()
@@ -112,6 +126,42 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Stress markup: synthesise the clean text, then emphasise the marked
+	// words (English; the aligner loads on first use).
+	type markedJob struct {
+		clean  string
+		marked []int
+	}
+	marks := make([]markedJob, len(jobs))
+	for i, j := range jobs {
+		marks[i].clean = j.text
+		if *markup {
+			marks[i].clean, marks[i].marked = align.ParseStress(j.text)
+			jobs[i].text = marks[i].clean
+		}
+	}
+	var aligner *align.Aligner
+	loadAligner := func() *align.Aligner {
+		if aligner != nil {
+			return aligner
+		}
+		vocab := *alignerVocab
+		if vocab == "" {
+			home, _ := os.UserHomeDir()
+			m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--facebook--wav2vec2-base-960h/snapshots/*/vocab.json"))
+			if len(m) == 0 {
+				fail(fmt.Errorf("stress markup needs the facebook/wav2vec2-base-960h aligner (HF cache) or -aligner-vocab"))
+			}
+			vocab = m[0]
+		}
+		a, err := align.Load(*alignerModel, vocab)
+		if err != nil {
+			fail(fmt.Errorf("stress markup: %w", err))
+		}
+		aligner = a
+		return a
+	}
+
 	// One compiled Synth sized for the longest line.
 	maxIDs := 0
 	for _, j := range jobs {
@@ -142,6 +192,11 @@ func main() {
 		res, err := s.Synthesize(j.text, o)
 		if err != nil {
 			fail(fmt.Errorf("%s: %w", j.out, err))
+		}
+		if mk := marks[i]; len(mk.marked) > 0 {
+			if res.Wav, err = loadAligner().StressMarked(res.Wav, res.SampleRate, mk.clean, mk.marked, stress); err != nil {
+				fail(fmt.Errorf("%s: %w", j.out, err))
+			}
 		}
 		if err := writeWAV(j.out, res); err != nil {
 			fail(err)

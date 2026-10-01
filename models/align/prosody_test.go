@@ -36,22 +36,18 @@ func TestMeasureSynthetic(t *testing.T) {
 	stressed := struct{ f0, amp, sec float64 }{150 * math.Pow(2, 3.0/12), 0.2 * math.Pow(10, 4.0/20), 0.45}
 	x, words := synthWords([]struct{ f0, amp, sec float64 }{base, stressed, base, base})
 	m := Measure(x, SampleRate, words)
-	// Utterance references include the stressed word itself.
+	// References are the other words (leave-one-out).
 	if got := m[1].PitchST; math.Abs(got-3) > 0.15 {
 		t.Errorf("pitch: %.3f st, want 3", got)
 	}
 	if got := m[0].PitchST; math.Abs(got) > 0.15 {
 		t.Errorf("plain word pitch %.3f st, want 0", got)
 	}
-	// Mean power over word frames: (3·0.3·1 + 0.45·10^0.4)/(0.9+0.45) of the
-	// plain level.
-	g := math.Pow(10, 0.4)
-	utt := (0.9 + 0.45*g) / 1.35
-	if want, got := 10*math.Log10(g/utt), m[1].LoudDB; math.Abs(got-want) > 0.3 {
-		t.Errorf("loudness %.3f dB, want %.3f", got, want)
+	if got := m[1].LoudDB; math.Abs(got-4) > 0.3 {
+		t.Errorf("loudness %.3f dB, want 4", got)
 	}
-	if want, got := 0.45/(1.35/4), m[1].DurRatio; math.Abs(got-want) > 0.02 {
-		t.Errorf("duration ratio %.3f, want %.3f", got, want)
+	if got := m[1].DurRatio; math.Abs(got-1.5) > 0.03 {
+		t.Errorf("duration ratio %.3f, want 1.5", got)
 	}
 	// Contrast with the plain rendering of the same "line".
 	px, pw := synthWords([]struct{ f0, amp, sec float64 }{base, base, base, base})

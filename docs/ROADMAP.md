@@ -477,6 +477,18 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       varies a lot between seeds (±6.6 st on the word, 1/6 plain pairs
       "stressed"), CAPS / asterisks reliably lengthen the word (×1.36-1.65
       vs ×0.87-1.15 plain) and an emphasis instruction stresses 2/3.
-- [ ] Word stress for cloned voices: DSP emphasis on the aligned word
-      (pitch / level / duration), then optionally a fine-tune with
-      emphasis markup — judged with cmd/prosody.
+- [x] Word stress for any voice, after synthesis: audio.Emphasize (TD-
+      PSOLA over the word + 60 ms margin: grains at pitch marks snapped to
+      waveform peaks, re-spaced for a half-sine pitch accent, re-timed for
+      a lengthening plateau, synthesis-period Hann windows with the window
+      sum divided out; identity reconstructs, spliced back with 10 ms
+      crossfades). Default +3 st accent, +3 dB, x1.2. cmd/qwen3tts reads
+      *word* markup: synthesise the clean text, align, emphasise. The
+      meter now references each word to the rest of the line (leave-one-
+      out — a boosted word raised its own reference). Cloned "I never said
+      she stole the money": *never* 3/3 seeds stressed (+2.0-2.6 st,
+      +2.3-2.5 dB, x1.11-1.18; other words within +-0.5 st); *never*,
+      *she*, *money* each stressed vs the same seed's plain take.
+- [ ] Word stress: listening tests of the DSP emphasis (artifacts at
+      larger accents?); a fine-tune with emphasis markup if it is not
+      natural enough — judged with cmd/prosody.

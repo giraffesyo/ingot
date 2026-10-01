@@ -29,14 +29,14 @@ const (
 type WordProsody struct {
 	Word
 	// PitchST is the word's peak voiced f0 (90th percentile of its voiced
-	// frames) in semitones above the utterance's median voiced f0; NaN when
-	// the word has no voiced frame.
+	// frames) in semitones above the median voiced f0 of the line's other
+	// words; NaN when the word has no voiced frame.
 	PitchST float64
 	// LoudDB is the word's energy (mean power over its frames) in dB above
-	// the utterance's speech frames.
+	// the line's other words.
 	LoudDB float64
-	// DurRatio is the word's duration over the utterance's mean duration
-	// for a word of its letter count (1 = the line's own pace).
+	// DurRatio is the word's duration over the other words' pace for a
+	// word of its letter count (1 = the line's own pace).
 	DurRatio float64
 	// Voiced is the fraction of the word's frames that are voiced.
 	Voiced float64
@@ -67,49 +67,58 @@ func Measure(wav []float32, rate int, words []Word) []WordProsody {
 		b := int(math.Round(w.End * SampleRate / prosodyHop))
 		return max(0, min(a, n)), max(0, min(b, n))
 	}
-	// Utterance references: median voiced f0, mean power over word
-	// frames, seconds per letter.
-	var f0s []float64
-	var pow float64
-	var frames, letters int
-	var secs float64
-	for _, w := range words {
-		a, b := span(w)
-		for i := a; i < b; i++ {
-			if voiced(i) {
-				f0s = append(f0s, pitch[i].F0)
-			}
-			pow += rms[i] * rms[i]
-			frames++
-		}
-		letters += letterCount(w.Text)
-		secs += w.End - w.Start
+	// Per-word frame statistics, then each word against the rest of the
+	// line (leave-one-out: a stressed word must not raise its own
+	// reference — boosting one word by +3 dB would otherwise read as
+	// ~+1 dB in a seven-word line).
+	type stats struct {
+		f0s     []float64
+		pow     float64
+		frames  int
+		letters int
+		secs    float64
 	}
-	medF0 := median(f0s)
-	uttDB := 10 * math.Log10(pow/math.Max(1, float64(frames))+1e-24)
-	secPerLetter := secs / math.Max(1, float64(letters))
-
-	out := make([]WordProsody, len(words))
+	st := make([]stats, len(words))
 	for k, w := range words {
 		a, b := span(w)
-		var vf []float64
-		var p float64
 		for i := a; i < b; i++ {
 			if voiced(i) {
-				vf = append(vf, pitch[i].F0)
+				st[k].f0s = append(st[k].f0s, pitch[i].F0)
 			}
-			p += rms[i] * rms[i]
+			st[k].pow += rms[i] * rms[i]
+			st[k].frames++
 		}
+		st[k].letters = letterCount(w.Text)
+		st[k].secs = w.End - w.Start
+	}
+	out := make([]WordProsody, len(words))
+	for k, w := range words {
+		var f0s []float64
+		var pow, secs float64
+		var frames, letters int
+		for j := range st {
+			if j == k && len(words) > 1 {
+				continue
+			}
+			f0s = append(f0s, st[j].f0s...)
+			pow += st[j].pow
+			frames += st[j].frames
+			letters += st[j].letters
+			secs += st[j].secs
+		}
+		medF0 := median(f0s)
+		refDB := 10 * math.Log10(pow/math.Max(1, float64(frames))+1e-24)
+		secPerLetter := secs / math.Max(1, float64(letters))
 		wp := WordProsody{Word: w, PitchST: math.NaN()}
-		if len(vf) > 0 && medF0 > 0 {
-			wp.PitchST = 12 * math.Log2(percentile(vf, 0.9)/medF0)
+		if len(st[k].f0s) > 0 && medF0 > 0 {
+			wp.PitchST = 12 * math.Log2(percentile(st[k].f0s, 0.9)/medF0)
 		}
-		if b > a {
-			wp.LoudDB = 10*math.Log10(p/float64(b-a)+1e-24) - uttDB
-			wp.Voiced = float64(len(vf)) / float64(b-a)
+		if st[k].frames > 0 {
+			wp.LoudDB = 10*math.Log10(st[k].pow/float64(st[k].frames)+1e-24) - refDB
+			wp.Voiced = float64(len(st[k].f0s)) / float64(st[k].frames)
 		}
-		if l := letterCount(w.Text); l > 0 && secPerLetter > 0 {
-			wp.DurRatio = (w.End - w.Start) / (float64(l) * secPerLetter)
+		if st[k].letters > 0 && secPerLetter > 0 {
+			wp.DurRatio = st[k].secs / (float64(st[k].letters) * secPerLetter)
 		}
 		out[k] = wp
 	}
