@@ -21,12 +21,34 @@ type poolOp struct {
 func buildPool(kind string) Builder {
 	return func(n NodeInfo) (Op, error) {
 		ks := n.Attrs.Ints("kernel_shape", nil)
-		if len(ks) != 2 {
-			return nil, n.Errorf("only 2-D pooling supported (kernel_shape=%v)", ks)
+		st := n.Attrs.Ints("strides", nil)
+		pa := n.Attrs.Ints("pads", nil)
+		di := n.Attrs.Ints("dilations", nil)
+		// 1-D pooling (NCW) runs as the 2-D case over a unit height, as
+		// 1-D Conv does.
+		if len(ks) == 1 {
+			ks = []int64{1, ks[0]}
+			if st == nil {
+				st = []int64{1}
+			}
+			if pa == nil {
+				pa = []int64{0, 0}
+			}
+			if di == nil {
+				di = []int64{1}
+			}
+			st, di, pa = spatial2D(st, di, pa)
 		}
-		st := n.Attrs.Ints("strides", []int64{1, 1})
-		pa := n.Attrs.Ints("pads", []int64{0, 0, 0, 0})
-		if di := n.Attrs.Ints("dilations", nil); di != nil && (di[0] != 1 || di[1] != 1) {
+		if len(ks) != 2 {
+			return nil, n.Errorf("only 1-D and 2-D pooling supported (kernel_shape=%v)", ks)
+		}
+		if st == nil {
+			st = []int64{1, 1}
+		}
+		if pa == nil {
+			pa = []int64{0, 0, 0, 0}
+		}
+		if di != nil && (len(di) != 2 || di[0] != 1 || di[1] != 1) {
 			return nil, n.Errorf("dilations not supported")
 		}
 		if len(st) != 2 || len(pa) != 4 {
@@ -49,9 +71,10 @@ func (o *poolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		return nil, o.n.Errorf("need f32 input")
 	}
 	x := in[0]
-	xs := x.Shape()
+	oneD := len(x.Shape()) == 3
+	xs := shape2D(x.Shape())
 	if len(xs) != 4 {
-		return nil, o.n.Errorf("only NCHW supported, got %v", xs)
+		return nil, o.n.Errorf("only NCW and NCHW supported, got %v", x.Shape())
 	}
 	N, C, H, W := xs[0], xs[1], xs[2], xs[3]
 	KH, KW := o.kernel[0], o.kernel[1]
@@ -88,7 +111,12 @@ func (o *poolOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	OH := outDim(H, KH, sh, pads[0], pads[2])
 	OW := outDim(W, KW, sw, pads[1], pads[3])
-	out := ctx.NewUninit(tensor.F32, N, C, OH, OW)
+	var out *tensor.Tensor
+	if oneD {
+		out = ctx.NewUninit(tensor.F32, N, C, OW)
+	} else {
+		out = ctx.NewUninit(tensor.F32, N, C, OH, OW)
+	}
 	xf, of := x.F32(), out.F32()
 	pt, pl := pads[0], pads[1]
 	isMax := o.kind == "max"

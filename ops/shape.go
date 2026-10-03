@@ -274,8 +274,11 @@ func transposeBytes(x, out *tensor.Tensor, perm []int) {
 	off := 0
 	inner := os[r-1]
 	is := sst[r-1]
+	// The 4-byte fast paths read the tensors as f32; other 4-byte dtypes
+	// (i32 PCM out of a codec) take the byte copy below.
+	f32 := x.DType() == tensor.F32
 	switch {
-	case esz == 4 && is == 1 && inner >= 8:
+	case f32 && is == 1 && inner >= 8:
 		// Last output dim contiguous in the source too (perm keeps the final
 		// axis, e.g. attention's [B,T,H,d]→[B,H,T,d]): each inner run is a
 		// straight copy; parallel over runs when the tensor is large.
@@ -296,7 +299,7 @@ func transposeBytes(x, out *tensor.Tensor, perm []int) {
 				copy(d4[ri*inner:(ri+1)*inner], s4[offs[ri]:offs[ri]+inner])
 			})
 		}
-	case esz == 4:
+	case f32:
 		s4 := x.F32()
 		d4 := out.F32()
 		for oi := 0; oi < n; oi += inner {

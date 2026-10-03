@@ -49,6 +49,16 @@ errors loudly), on the CPU and in the GPU executor. Built graphs also get
 ingot.Snake, the fused BigVGAN-family vocoder activation, and Gemm's
 opt-in int8 weight decode (ingot_weight_quant="int8").
 
+MaxPool, AveragePool and Resize take 1-D (NCW) operands the same way
+(2026-10-03, CPU; Stable Audio 3's decoder limiter needs them), Neg and Abs
+run on int64 / int32, and Transpose moves 4-byte integer tensors. The three
+Stable Audio 3 Small graphs (T5Gemma encoder, transformer, SAME-S decoder
+with limiter) run unmodified; the decoder build without the limiter needs
+RandomNormalLike (dither), which is not implemented. The GPU executor runs
+the transformer and the decoder to the same outputs as the CPU (the 1-D
+pooling and Resize nodes fall back to the CPU ops), slower on the
+transformer at this size.
+
 ## Gaps, by priority
 
 ### Blocks OCR (phase 3) — do first

@@ -492,3 +492,31 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
 - [ ] Word stress: listening tests of the DSP emphasis (artifacts at
       larger accents?); a fine-tune with emphasis markup if it is not
       natural enough — judged with cmd/prosody.
+
+## Phase 8 — sound effects (Stable Audio 3)
+
+- [x] models/stableaudio: Stable Audio 3 Small text-to-audio from the
+      ONNX graphs Stability AI publishes (stabilityai/stable-audio-3-
+      optimized; Stability AI Community License, T5Gemma under the Gemma
+      Terms): T5Gemma encoder (f16 weights), the 433M diffusion
+      transformer with its conditioner in the graph, the SAME-S decoder
+      with its limiter; host-side SentencePiece tokenizer and the 8-step
+      rectified-flow pingpong sampler over a logSNR schedule. The CPU and
+      GPU executors agree on the transformer; there is no PyTorch parity
+      run yet (no Python on this machine for it), so the tests check
+      determinism per seed and that prompts steer the result (thunder 84
+      Hz, a glass bell 7.3 kHz). Apple Silicon CPU: 176 ms per step and 0.23 s
+      to decode for 5 s of audio, about 3 s a clip; the GPU executor is
+      slower at this size (223 ms per step). The duration condition is
+      whole seconds, as trained: a fractional one gives noise.
+      cmd/stableaudio writes stereo WAV.
+- [x] tokenizer: SentencePiece BPE .model files (Gemma, T5Gemma): pieces
+      and scores from the ModelProto, user-defined symbols, byte
+      fallback; unigram models and normalisation charsmaps are refused.
+      Ids match the merge ranks of the same tokenizer's tokenizer.json.
+- [x] ops: 1-D MaxPool / AveragePool and 1-D Resize (rank-3, over a unit
+      height, as Conv), Neg and Abs on int64 / int32, and Transpose of
+      4-byte non-float tensors (it read i32 as f32 and panicked).
+- [ ] stableaudio: parity run against the PyTorch reference; SAME-L and
+      the medium transformer; audio-to-audio and inpainting (the encoder
+      graph); RandomNormalLike for the dithered decoder build.

@@ -457,6 +457,10 @@ func (o resizeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	if len(in) > 2 && in[2] != nil && in[2].Numel() > 0 && c.s.constVals[st.in[2]] == nil {
 		return nil, nil, false
 	}
+	// The kernel is over NCHW planes; a 1-D (NCW) Resize stays on the CPU.
+	if len(in[0].Shape()) != 4 {
+		return nil, nil, false
+	}
 	tp, err := ops.PlanResize(o.attrs, in)
 	if err != nil {
 		return nil, nil, false

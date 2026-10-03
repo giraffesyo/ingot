@@ -64,9 +64,11 @@ func (o *resizeOp) taps(in []*tensor.Tensor) (ResizeTaps, error) {
 	if len(in) < 1 || in[0] == nil || in[0].DType() != tensor.F32 {
 		return t, fmt.Errorf("need f32 input")
 	}
-	xs := in[0].Shape()
+	// 1-D Resize (NCW) runs as the 2-D case over a unit height.
+	oneD := len(in[0].Shape()) == 3
+	xs := shape2D(in[0].Shape())
 	if len(xs) != 4 {
-		return t, fmt.Errorf("only 4-D NCHW resize supported, got %v", xs)
+		return t, fmt.Errorf("only NCW and NCHW resize supported, got %v", in[0].Shape())
 	}
 	// Resolve scales/sizes from inputs (opset 11/13/18: X, roi, scales, sizes).
 	var scales []float32
@@ -80,6 +82,14 @@ func (o *resizeOp) taps(in []*tensor.Tensor) (ResizeTaps, error) {
 		sizes = asI64(in[3])
 	} else if o.sizes != nil {
 		sizes = o.sizes
+	}
+	if oneD {
+		if len(sizes) == 3 {
+			sizes = []int64{sizes[0], sizes[1], 1, sizes[2]}
+		}
+		if len(scales) == 3 {
+			scales = []float32{scales[0], scales[1], 1, scales[2]}
+		}
 	}
 	H, W := xs[2], xs[3]
 	var sh, sw float32
@@ -127,10 +137,15 @@ func (o *resizeOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) 
 		return nil, o.n.Errorf("%v", err)
 	}
 	x := in[0]
-	xs := x.Shape()
+	xs := shape2D(x.Shape())
 	N, C, H, W := xs[0], xs[1], xs[2], xs[3]
 	OH, OW := tp.OH, tp.OW
-	out := ctx.NewUninit(tensor.F32, N, C, OH, OW)
+	var out *tensor.Tensor
+	if len(x.Shape()) == 3 {
+		out = ctx.NewUninit(tensor.F32, N, C, OW)
+	} else {
+		out = ctx.NewUninit(tensor.F32, N, C, OH, OW)
+	}
 	xf, of := x.F32(), out.F32()
 
 	switch o.mode {

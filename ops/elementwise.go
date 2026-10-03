@@ -338,6 +338,38 @@ func vecOf(fn func(float32) float32) func(dst, src []float32) {
 	}
 }
 
+// unaryInt runs Neg or Abs on an int64 or int32 tensor; nil for any other
+// op or dtype.
+func unaryInt(ctx *Ctx, op string, x *tensor.Tensor) *tensor.Tensor {
+	if op != "Neg" && op != "Abs" {
+		return nil
+	}
+	neg := op == "Neg"
+	switch x.DType() {
+	case tensor.I64:
+		out := ctx.NewUninit(tensor.I64, x.Shape()...)
+		of := out.I64()
+		for i, v := range x.I64() {
+			if neg || v < 0 {
+				v = -v
+			}
+			of[i] = v
+		}
+		return out
+	case tensor.I32:
+		out := ctx.NewUninit(tensor.I32, x.Shape()...)
+		of := out.I32()
+		for i, v := range x.I32() {
+			if neg || v < 0 {
+				v = -v
+			}
+			of[i] = v
+		}
+		return out
+	}
+	return nil
+}
+
 // unaryChunk is the per-task element count for parallel elementwise ops.
 const unaryChunk = 16384
 
@@ -347,6 +379,11 @@ func (o *unaryOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	}
 	x := in[0]
 	if x.DType() != tensor.F32 {
+		// Neg and Abs on integers: exported shape arithmetic (negative
+		// Slice bounds, padding amounts) computes them on int64.
+		if out := unaryInt(ctx, o.n.OpType, x); out != nil {
+			return ctx.Out(out), nil
+		}
 		return nil, o.n.Errorf("unsupported dtype %s", x.DType())
 	}
 	out := ctx.NewUninit(tensor.F32, x.Shape()...)
