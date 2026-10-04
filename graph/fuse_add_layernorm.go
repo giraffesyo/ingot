@@ -44,9 +44,7 @@ func fuseAddLayerNorm(g *Graph, stats map[string]int) bool {
 		// (the Value object survives; only its producer changes).
 		host := ln
 		ins := []*Value{a, b}
-		for _, v := range ln.Inputs[1:] {
-			ins = append(ins, v)
-		}
+		ins = append(ins, ln.Inputs[1:]...)
 		for _, v := range ins {
 			if v != nil {
 				v.Consumers = append(v.Consumers, host)

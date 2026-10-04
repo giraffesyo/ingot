@@ -41,7 +41,7 @@ func TestSDPACacheIncremental(t *testing.T) {
 	for h := 0; h < H; h++ {
 		for i := 0; i < total; i++ {
 			s := make([]float64, i+1)
-			var m float64 = math.Inf(-1)
+			m := math.Inf(-1)
 			for j := 0; j <= i; j++ {
 				var d float64
 				for p := 0; p < dh; p++ {

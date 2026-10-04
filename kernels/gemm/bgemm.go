@@ -320,10 +320,12 @@ func BgemmWeights(m int, x []float32, ldx int, pb *BPackedB, y []float32, ldy in
 			bufs[wk] = wb
 		}
 		j0 := jp * qNR
-		cols := min(qNR, n-j0)
+		// The nolints cover arches whose rows kernel is a panicking stub, where
+		// staticcheck sees everything after the call as unreachable.
+		cols := min(qNR, n-j0) //nolint:staticcheck
 		bp := &pb.data[jp*kg*qNR*bKG]
 		var rows [qMR]*uint16
-		for ip := 0; ip < mp; ip++ {
+		for ip := 0; ip < mp; ip++ { //nolint:staticcheck
 			i0 := ip * qMR
 			rc := min(qMR, m-i0)
 			for r := 0; r < qMR; r++ {

@@ -408,10 +408,6 @@ func hardSigmoidVec(alpha, beta float32) func(dst, src []float32) {
 
 func sigmoidVec(dst, src []float32) { vek.Sigmoid(dst, src) }
 
-func gelu(x float32) float32 {
-	return 0.5 * x * (1 + float32(math.Erf(float64(x)/math.Sqrt2)))
-}
-
 func geluTanh(x float32) float32 {
 	const c = 0.7978845608028654 // sqrt(2/pi)
 	return 0.5 * x * (1 + float32(math.Tanh(c*float64(x+0.044715*x*x*x))))

@@ -312,7 +312,7 @@ func resolveModel(name string) (string, error) {
 	repo := "Qwen3-TTS-12Hz-" + name
 	snaps, _ := filepath.Glob(filepath.Join(hub, "models--Qwen--"+repo, "snapshots", "*"))
 	if len(snaps) == 0 {
-		return "", fmt.Errorf("Qwen/%s not found under %s (download it, or pass a snapshot directory)", repo, hub)
+		return "", fmt.Errorf("checkpoint Qwen/%s not found under %s (download it, or pass a snapshot directory)", repo, hub)
 	}
 	return snaps[len(snaps)-1], nil
 }

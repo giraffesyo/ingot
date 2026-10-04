@@ -70,7 +70,7 @@ func Load(onnxPath, vocabPath string) (*Aligner, error) {
 // (mono, any rate; resampled to 16 kHz and normalised to zero mean, unit
 // variance as Wav2Vec2FeatureExtractor does).
 func (a *Aligner) LogProbs(wav []float32, rate int) ([][]float32, error) {
-	x := wav
+	var x []float32
 	if rate != SampleRate {
 		x = audio.Resample(wav, rate, SampleRate)
 	} else {

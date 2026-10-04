@@ -46,12 +46,6 @@ func (w weights) raw(name string) *tensor.Tensor {
 	return t
 }
 
-// has reports whether the checkpoint holds prefix+name.
-func (w weights) has(name string) bool {
-	_, ok := w.set.Info(w.prefix + name)
-	return ok
-}
-
 // catch converts a loadError panic into *err; other panics propagate.
 func catch(err *error) {
 	if r := recover(); r != nil {

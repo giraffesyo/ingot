@@ -136,7 +136,7 @@ func writeNPY(w io.Writer, t *tensor.Tensor) error {
 	h += strings.Repeat(" ", pad) + "\n"
 	var b bytes.Buffer
 	b.WriteString("\x93NUMPY\x01\x00")
-	binary.Write(&b, binary.LittleEndian, uint16(len(h)))
+	b.Write(binary.LittleEndian.AppendUint16(nil, uint16(len(h))))
 	b.WriteString(h)
 	b.Write(t.Bytes())
 	_, err := w.Write(b.Bytes())

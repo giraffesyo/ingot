@@ -108,11 +108,9 @@ func TestSgemmVsRef(t *testing.T) {
 				if d < 0 {
 					d = -d
 				}
-				scale := 1.0
+				scale := want + 1
 				if want < 0 {
 					scale = -want + 1
-				} else {
-					scale = want + 1
 				}
 				if d > 2e-6*float64(k)*scale/10+1e-5 {
 					t.Fatalf("m=%d n=%d k=%d c[%d][%d] = %g want %g", m, n, k, i, j, got, want)

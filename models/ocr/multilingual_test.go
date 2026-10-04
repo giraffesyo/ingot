@@ -2,7 +2,6 @@ package ocr
 
 import (
 	"encoding/json"
-	"fmt"
 	"image"
 	"os"
 	"path/filepath"
@@ -72,7 +71,7 @@ func TestMultilingual(t *testing.T) {
 	}
 	for lang, n := range chars {
 		acc := 1 - float64(edits[lang])/float64(n)
-		t.Log(fmt.Sprintf("%s: char accuracy %.3f (%d edits / %d)", lang, acc, edits[lang], n))
+		t.Logf("%s: char accuracy %.3f (%d edits / %d)", lang, acc, edits[lang], n)
 		if acc < 0.9 {
 			t.Errorf("%s: char accuracy %.3f", lang, acc)
 		}

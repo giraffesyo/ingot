@@ -40,13 +40,6 @@ func (e *enc) packedInt64(f int, vs []int64) {
 	}
 	e.bytes(f, s.b)
 }
-func (e *enc) packedFloat(f int, vs []float32) {
-	var s enc
-	for _, v := range vs {
-		s.b = binary.LittleEndian.AppendUint32(s.b, math.Float32bits(v))
-	}
-	e.bytes(f, s.b)
-}
 
 func buildTestModel() []byte {
 	// initializer W: float [2,3] raw_data

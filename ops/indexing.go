@@ -264,7 +264,7 @@ func (o *gatherElementsOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor,
 	idx := asI64(idxT)
 	es := data.DType().Size()
 	src, dst := data.Bytes(), out.Bytes()
-	dstr := tensor.Shape(ds).Strides()
+	dstr := ds.Strides()
 	coord := make([]int, len(is))
 	for k := range idx {
 		off := 0
@@ -319,7 +319,7 @@ func (o *scatterElementsOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor
 	idx := asI64(idxT)
 	es := data.DType().Size()
 	ob, ub := out.Bytes(), upd.Bytes()
-	dstr := tensor.Shape(ds).Strides()
+	dstr := ds.Strides()
 	coord := make([]int, len(is))
 	for k := range idx {
 		off := 0

@@ -93,7 +93,7 @@ func QgemmPackedS8(pa *QPackedA, n int, b []int8, ldb int, c []int32, ldc int, p
 			}
 		}
 		guard(func() {
-			for ip := 0; ip < mp; ip++ {
+			for ip := 0; ip < mp; ip++ { //nolint:staticcheck // kernel is a panicking stub off arm64
 				i0 := ip * mr
 				rows := min(mr, m-i0)
 				if rows == mr && cols == nr {

@@ -168,7 +168,7 @@ type TextInputs struct {
 // mropeAxis is interleaved M-RoPE's axis for rotary frequency i
 // (mrope_section [24, 20, 20]): frequencies 1, 4, … 58 follow the height
 // position, 2, 5, … 59 the width, the rest time.
-func mropeAxis(i int) int {
+func mropeAxis(i int) int { //nolint:unused // only the Metal text encoder calls it
 	if i < 60 {
 		switch i % 3 {
 		case 1:

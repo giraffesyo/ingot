@@ -43,8 +43,7 @@ func resolveExternal(m *Model, dir string) error {
 		cache[rel] = b
 		return b, nil
 	}
-	var visit func(t *Tensor) error
-	visit = func(t *Tensor) error {
+	visit := func(t *Tensor) error {
 		if t == nil || t.DataLocation != 1 {
 			return nil
 		}

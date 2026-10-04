@@ -165,7 +165,7 @@ func stackScan(ctx *ops.Ctx, ts []*tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	n := ts[0].Numel()
 	for i, t := range ts {
-		if !t.Shape().Equal(tensor.Shape(es)) {
+		if !t.Shape().Equal(es) {
 			return nil, fmt.Errorf("scan element shapes differ: %v vs %v", t.Shape(), es)
 		}
 		switch t.DType() {

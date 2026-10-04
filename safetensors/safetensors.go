@@ -56,7 +56,7 @@ func Open(path string) (*File, error) {
 	f, err := parse(raw)
 	if err != nil {
 		if unmap != nil {
-			unmap()
+			_ = unmap()
 		}
 		return nil, fmt.Errorf("safetensors: %s: %w", path, err)
 	}

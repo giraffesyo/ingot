@@ -94,7 +94,7 @@ func SgemmPacked(pa *PackedA, n int, b []float32, ldb int, c []float32, ldc int,
 		for p := 0; p < k; p++ {
 			copy(bp[p*nr:p*nr+cols], b[p*ldb+j0:p*ldb+j0+cols])
 		}
-		for ip := 0; ip < mp; ip++ {
+		for ip := 0; ip < mp; ip++ { //nolint:staticcheck // kernel is a panicking stub off arm64
 			i0 := ip * mr
 			rows := min(mr, m-i0)
 			if rows == mr && cols == nr {
