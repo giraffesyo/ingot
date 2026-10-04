@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-27T02:10:24.054321Z",
+  "title": "Design System: QwenImage UI",
+  "extensions": {
+    "colorMeta": {
+      "page": {
+        "role": "neutral",
+        "displayName": "Pale graphite page"
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "White control surface"
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Pale image canvas"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Graphite ink"
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted graphite"
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Soft divider"
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Forest green"
+      },
+      "accent-hover": {
+        "role": "primary",
+        "displayName": "Deep forest green"
+      },
+      "error": {
+        "role": "error",
+        "displayName": "Error red"
+      },
+      "field-border": {
+        "role": "neutral",
+        "displayName": "Field border"
+      },
+      "queue-selected": {
+        "role": "neutral",
+        "displayName": "Selected queue fill"
+      },
+      "queue-hover": {
+        "role": "neutral",
+        "displayName": "Queue hover fill"
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Interface body",
+        "purpose": "Default controls and body text."
+      },
+      "title": {
+        "displayName": "Section title",
+        "purpose": "Preview and queue headings."
+      },
+      "label": {
+        "displayName": "Field label",
+        "purpose": "Persistent form labels."
+      },
+      "hint": {
+        "displayName": "Supporting hint",
+        "purpose": "Helper text below controls and queue options."
+      },
+      "log": {
+        "displayName": "Run log",
+        "purpose": "Wrapped model and stage messages."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "button-background",
+        "value": "background 150ms ease-out",
+        "purpose": "Button and queue-row state changes; disabled by prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stacked-max",
+        "value": "800px"
+      },
+      {
+        "name": "compact-max",
+        "value": "420px"
+      },
+      {
+        "name": "outer-rules-min",
+        "value": "1600px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Full-width form action; the queue uses a compact variant.",
+      "html": "<button class=\"ds-primary\">Add to queue</button>",
+      "css": ".ds-primary{font:600 14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;padding:8px 14px;border:1px solid transparent;border-radius:var(--radius, 6px);min-height:40px;cursor:pointer;transition:background 150ms ease-out;background:var(--accent, #246447);color:white;min-height:44px;}.ds-primary:hover:not(:disabled){background:var(--accent-hover, #174c34);}.ds-primary:active:not(:disabled){background:#103d29;}.ds-primary:focus-visible{outline:2px solid var(--accent, #246447);outline-offset:3px;}.ds-primary:disabled{cursor:default;opacity:.58;}@media(prefers-reduced-motion:reduce){.ds-primary{transition:none;}}"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Settings reuse, cancellation, reference removal, and other supporting actions.",
+      "html": "<button class=\"ds-secondary\">Use these settings</button>",
+      "css": ".ds-secondary{font:600 14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;padding:8px 14px;border:1px solid transparent;border-radius:var(--radius, 6px);min-height:40px;cursor:pointer;transition:background 150ms ease-out;background:var(--surface, #fff);color:var(--ink, #24302a);border-color:#b5c0b7;}.ds-secondary:hover:not(:disabled){background:var(--canvas, #edf0ed);}.ds-secondary:active:not(:disabled){background:#dce2dd;}.ds-secondary:focus-visible{outline:2px solid var(--accent, #246447);outline-offset:3px;}.ds-secondary:disabled{cursor:default;opacity:.58;}@media(prefers-reduced-motion:reduce){.ds-secondary{transition:none;}}"
+    },
+    {
+      "name": "Text button",
+      "kind": "button",
+      "refersTo": "button-text",
+      "description": "Low-emphasis queue cleanup action.",
+      "html": "<button class=\"ds-text\">Clear finished</button>",
+      "css": ".ds-text{font:600 14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;padding:8px 14px;border:1px solid transparent;border-radius:var(--radius, 6px);min-height:40px;cursor:pointer;transition:background 150ms ease-out;background:transparent;color:var(--muted, #5c6860);font-size:12px;padding:4px;min-height:32px;}.ds-text:hover:not(:disabled){color:var(--accent, #246447);text-decoration:underline;text-underline-offset:3px;}.ds-text:focus-visible{outline:2px solid var(--accent, #246447);outline-offset:3px;}.ds-text:disabled{cursor:default;opacity:.58;}@media(prefers-reduced-motion:reduce){.ds-text{transition:none;}}"
+    },
+    {
+      "name": "Labeled input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "White editable surface with persistent label and visible keyboard focus.",
+      "html": "<label class=\"ds-label\" for=\"ds-seed\">Seed</label><input class=\"ds-input\" id=\"ds-seed\" type=\"text\" inputmode=\"numeric\" value=\"42\">",
+      "css": ".ds-label{display:block;font:600 13px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #24302a);margin-bottom:7px;}.ds-input{width:100%;min-width:0;font:14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;padding:9px 11px;border:1px solid #b5c0b7;border-radius:var(--radius, 6px);background:var(--surface, #fff);color:var(--ink, #24302a);caret-color:var(--accent, #246447);}.ds-input:focus-visible{outline:2px solid var(--accent, #246447);outline-offset:3px;}.ds-input:disabled{opacity:.65;cursor:default;}@media(max-width:420px){.ds-input{font-size:16px;}}"
+    },
+    {
+      "name": "Preview empty state",
+      "kind": "custom",
+      "refersTo": "preview",
+      "description": "The quiet image surface that gives way to the selected generated result.",
+      "html": "<div class=\"ds-canvas\"><div class=\"ds-empty\"><svg width=\"36\" height=\"36\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.2\" aria-hidden=\"true\"><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/><circle cx=\"8\" cy=\"8\" r=\"1.5\"/><path d=\"m3 17 5-5 4 4 4-6 5 7\"/></svg><h3>Your next image starts here.</h3><p>Add a prompt to the queue, then start it.<br>Queued images share model loads within each batch.</p></div></div>",
+      "css": ".ds-canvas{min-height:320px;height:min(44vh, 520px);display:flex;align-items:center;justify-content:center;background:var(--canvas, #edf0ed);border-radius:8px;overflow:hidden;font:14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;}.ds-empty{text-align:center;color:var(--muted, #5c6860);padding:32px;max-width:440px;}.ds-empty svg{margin-bottom:13px;}.ds-empty h3{color:var(--ink, #24302a);font-size:17px;font-weight:550;margin:0 0 8px;text-wrap:balance;}.ds-empty p{font-size:13px;line-height:1.7;margin:0;}@media(max-width:800px){.ds-canvas{min-height:300px;height:auto;aspect-ratio:1;}}"
+    },
+    {
+      "name": "Selected queue row",
+      "kind": "custom",
+      "refersTo": "queue-row",
+      "description": "FIFO job selection with prompt, seed metadata, and written state.",
+      "html": "<button class=\"ds-job\" aria-pressed=\"true\"><span class=\"ds-number\">1</span><span><span class=\"ds-prompt\">A ceramic teapot beside an open window</span><span class=\"ds-meta\">Seed 42 · 40 steps</span></span><span class=\"ds-status\" data-status=\"queued\">Queued</span></button>",
+      "css": ".ds-job{display:grid;grid-template-columns:24px minmax(0, 1fr) auto;align-items:center;gap:10px;width:100%;min-height:40px;padding:11px 10px;border:1px solid transparent;border-radius:0;text-align:left;background:transparent;font:400 14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #24302a);cursor:pointer;transition:background 150ms ease-out;}.ds-job[aria-pressed=\"true\"]{background:#dfece3;}.ds-job:hover{background:#e8ede9;}.ds-job:focus-visible{outline:2px solid var(--accent, #246447);outline-offset:-3px;}.ds-number{color:var(--muted, #5c6860);font-size:11px;font-variant-numeric:tabular-nums;}.ds-prompt{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:13px;}.ds-meta{display:block;color:var(--muted, #5c6860);font-size:11px;margin-top:2px;font-variant-numeric:tabular-nums;}.ds-status{font-size:11px;color:var(--muted, #5c6860);}.ds-status[data-status=\"failed\"]{color:var(--error, #9b302a);}.ds-status[data-status=\"running\"],.ds-status[data-status=\"completed\"]{color:var(--accent, #246447);font-weight:600;}@media(prefers-reduced-motion:reduce){.ds-job{transition:none;}}"
+    },
+    {
+      "name": "Run log",
+      "kind": "custom",
+      "refersTo": "log",
+      "description": "Inline disclosure for stage messages; failures open it automatically.",
+      "html": "<details class=\"ds-log\" open><summary>Run log</summary><pre tabindex=\"0\" aria-label=\"Generation log\">Batch of 4 · shared stage weights\nstage: decode</pre></details>",
+      "css": ".ds-log{border-top:1px solid var(--line, #d6ddd7);padding-top:10px;margin-top:18px;font:14px/1.5 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;}.ds-log summary{width:fit-content;min-height:32px;padding:5px 0;font-weight:550;font-size:12px;color:var(--muted, #5c6860);cursor:pointer;}.ds-log summary:focus-visible,.ds-log pre:focus-visible{outline:2px solid var(--accent, #246447);outline-offset:3px;}.ds-log pre{background:var(--canvas, #edf0ed);color:var(--ink, #24302a);font:12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;border-radius:var(--radius, 6px);padding:14px;max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The local image workbench",
+    "overview": "A quiet, compact utility keeps controls legible and lets generated images occupy the largest surface. Light graphite, white fields, forest green actions, and system typography provide the visual hierarchy.\n\nThis records the standalone module's implemented system in `web/style.css`, `web/index.html`, and `web/app.js`. Fonts and icons require no network resources; the interface ships no raster artwork.",
+    "keyCharacteristics": [
+      "Compact controls with persistent labels.",
+      "Flat surfaces separated by tone and thin rules.",
+      "Restrained green actions and explicit text states."
+    ],
+    "rules": [
+      {
+        "name": "The Text State Rule",
+        "body": "Always pair status color with a written state; color alone does not communicate queue progress or failure.",
+        "section": "colors"
+      },
+      {
+        "name": "The Flat Surface Rule",
+        "body": "Use tone and borders for separation, preserving the implemented shadow-free surface hierarchy.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use the existing system font stacks and inline SVG icons.",
+      "Do preserve visible labels, keyboard focus, and written status messages.",
+      "Do let long prompts truncate in queue rows while preserving status and metadata."
+    ],
+    "donts": [
+      "Don't add network fonts, remote decorative assets, or external UI dependencies.",
+      "Don't use shadows to separate the existing flat surfaces.",
+      "Don't crop the generated result to fill its preview frame."
+    ]
+  }
+}

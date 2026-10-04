@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>QwenImage · Ingot</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="identity"><span class="wordmark">ingot</span><span class="separator" aria-hidden="true">/</span><h1>QwenImage</h1></div>
+    <span class="local-note"><span class="status-dot" aria-hidden="true"></span>Local workspace</span>
+  </header>
+  <main>
+    <section class="controls" aria-label="Image settings">
+      <form id="generate-form">
+        <fieldset id="settings">
+          <div class="field prompt-field">
+            <label for="prompt">What would you like to make?</label>
+            <textarea id="prompt" name="prompt" rows="6" maxlength="16000" required placeholder="Describe the subject, setting, light, and details. Or tell QwenImage how to change your reference images."></textarea>
+          </div>
+          <div class="field references">
+            <div class="label-row"><label for="images">Reference images</label><span class="optional">Optional</span></div>
+            <input id="images" type="file" accept="image/png,image/jpeg" multiple aria-describedby="images-help">
+            <p id="images-help" class="hint">Add PNG or JPEG images to edit. Up to 10, in selection order. Editing requires Metal on Apple Silicon.</p>
+            <ul id="references" class="reference-list" aria-label="Selected reference images"></ul>
+          </div>
+          <div class="field-row">
+            <div class="field"><label for="size">Resolution preset</label><select id="size" name="size" aria-describedby="size-help"><option value="512">512 px</option><option value="768">768 px</option><option value="1024" selected>1024 px</option><option value="1536">1536 px</option><option value="2048">2048 px</option></select></div>
+            <div class="field"><label for="steps">Steps</label><input id="steps" name="steps" type="number" min="1" max="100" value="40" required></div>
+          </div>
+          <p id="size-help" class="hint dimensions-help">Square by default; edits follow the last reference’s aspect ratio. Set exact width and height in Advanced settings.</p>
+          <div class="field"><label for="count">Images to add</label><select id="count" name="count"><option value="1">1 image</option><option value="2">2 seed variations</option><option value="4">4 seed variations</option><option value="8">8 seed variations</option></select><p class="hint">Variations use consecutive seeds, starting with your seed.</p></div>
+          <div class="field">
+            <label for="output">Output folder</label>
+            <div class="path-row"><input id="output" name="output" type="text" autocomplete="off" spellcheck="false" required aria-describedby="output-help"><button id="browse-output" type="button" class="secondary" aria-haspopup="dialog">Browse…</button></div>
+            <p id="output-help" class="hint">Each job saves in its own subfolder. You can type a new path; it will be created when queued.</p>
+          </div>
+          <details class="advanced">
+            <summary>Advanced settings</summary>
+            <div class="advanced-content">
+              <div class="field"><label for="seed">Seed</label><div class="seed-row"><input id="seed" name="seed" type="text" inputmode="numeric" pattern="[0-9]+" value="42" required aria-describedby="seed-help"><button id="random-seed" type="button" class="secondary">Randomize</button></div><p id="seed-help" class="hint">Reuse a seed and settings to repeat a result.</p></div>
+              <div class="field-row">
+                <div class="field"><label for="width">Width</label><input id="width" name="width" type="number" min="0" max="2048" step="32" value="0" required></div>
+                <div class="field"><label for="height">Height</label><input id="height" name="height" type="number" min="0" max="2048" step="32" value="0" required></div>
+              </div>
+              <p class="hint dimensions-help">Both 0: square, or the last reference’s aspect ratio. Custom: 256–2048 px each, in steps of 32.</p>
+              <div class="field"><label for="device">Compute device</label><select id="device" name="device"><option value="auto">Auto</option><option value="gpu">Metal · Apple Silicon</option><option value="cpu">CPU · generation only</option></select></div>
+              <label class="check-label"><input id="fast" type="checkbox" checked> Fast mode on Metal</label>
+              <p class="hint">Uses bf16 inputs. Turn off for f32 precision.</p>
+            </div>
+          </details>
+        </fieldset>
+        <div id="form-error" class="error" role="alert" hidden></div>
+        <div class="actions"><button id="generate" type="submit" class="primary" disabled>Connecting…</button></div>
+        <p id="added" role="status" class="hint"></p>
+        <p class="privacy-note">Runs on your machine with local model weights.</p>
+      </form>
+    </section>
+    <section class="output" aria-labelledby="preview-title">
+      <div class="output-heading"><h2 id="preview-title">Preview</h2><a id="download" class="download" hidden>Download PNG <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 15v5h14v-5"/></svg></a></div>
+      <div id="canvas" class="canvas">
+        <div id="empty" class="empty-state"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 4-6 5 7"/></svg><h3>Your next image starts here.</h3><p>Add a prompt to the queue, then start it.<br>Queued images share model loads within each batch.</p></div>
+        <img id="result" alt="" hidden>
+      </div>
+      <div class="run-info">
+        <div class="status-row"><p id="status" role="status" aria-live="polite">Connecting to the local server…</p><span id="elapsed" class="elapsed"></span></div>
+        <p id="result-meta" class="hint"></p>
+        <p id="job-output" class="hint" hidden></p>
+        <progress id="progress" aria-label="Generation progress" hidden></progress>
+        <div id="run-error" class="error" role="alert" hidden></div>
+        <div class="selected-actions"><button id="cancel" type="button" class="secondary" hidden>Cancel selected job</button><button id="reuse" type="button" class="secondary" hidden>Use these settings</button><button id="retry-preview" type="button" class="secondary" hidden>Retry preview</button></div>
+        <details id="log-details" class="log-details"><summary>Run log</summary><pre id="log" tabindex="0" aria-label="Generation log">Stage timings and model messages will appear here.</pre></details>
+      </div>
+      <section class="queue" aria-labelledby="queue-title">
+        <div class="queue-heading"><h2 id="queue-title">Queue <span id="queue-count">0</span></h2><button id="toggle-queue" type="button" class="primary" disabled>Start queue</button></div>
+        <div class="queue-options"><label for="batch-size">Batch size <select id="batch-size"><option value="1">1</option><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label><button id="clear-finished" type="button" class="text-button" disabled>Clear finished</button></div>
+        <p id="queue-hint" class="hint">Queue is paused. Add a few jobs to share model loads.</p>
+        <ol id="jobs" class="job-list" aria-label="Image queue"></ol>
+        <p id="queue-empty" class="hint">No jobs yet. Add a prompt on the left to get started.</p>
+      </section>
+    </section>
+  </main>
+  <dialog id="folder-dialog" aria-labelledby="folder-title">
+    <h2 id="folder-title">Choose output folder</h2>
+    <form id="folder-form">
+      <label for="folder-path">Folder path</label>
+      <div class="path-row"><input id="folder-path" type="text" autocomplete="off" spellcheck="false" required><button type="submit" class="secondary">Go</button></div>
+    </form>
+    <div class="folder-navigation"><button id="folder-up" type="button" class="secondary" disabled>Up one level</button><button id="folder-home" type="button" class="secondary">Home folder</button></div>
+    <p id="folder-status" class="hint" role="status"></p>
+    <p id="folder-error" class="error" role="alert" hidden></p>
+    <ul id="folder-list" aria-label="Subfolders"></ul>
+    <div class="folder-actions"><button id="folder-cancel" type="button" class="secondary">Cancel</button><button id="folder-use" type="button" class="primary" disabled>Use this folder</button></div>
+  </dialog>
+  <footer><span>Qwen-Image-2.1</span><span>Offline · Powered by Ingot</span></footer>
+  <noscript><p class="error">Enable JavaScript to use this local interface.</p></noscript>
+</body>
+</html>
