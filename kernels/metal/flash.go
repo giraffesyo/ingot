@@ -153,6 +153,9 @@ kernel void flash_attn(device bfloat* Q [[buffer(0)]], device bfloat* K1 [[buffe
 }
 `
 
+// FlashHeadDim is the head width the fused attention kernel is built for.
+const FlashHeadDim = 128
+
 var flashPSO struct {
 	once    sync.Once
 	p       *Pipeline

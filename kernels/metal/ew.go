@@ -29,10 +29,10 @@ static float powi(float x, int n) {
 // out[i] = op(a[(i / da) % ma], b[(i / db) % mb]) over n elements;
 // p = (n, da, ma, op), q = (db, mb, 0, 0): each operand is a contiguous
 // block of the output's dims repeated around it (trailing vector, per-row
-// scalar, [1,H,1,1], ...).
-kernel void binary_bcast(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],
-                         device float* o [[buffer(2)]], constant uint4& p [[buffer(3)]],
-                         constant uint4& q [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+// scalar, [1,H,1,1], ...). The result is written as T: f32, or bf16
+// straight into a bf16 GEMM / attention operand.
+template <typename T>
+void binary_bcast_t(device const float* a, device const float* b, device T* o, constant uint4& p, constant uint4& q, uint i) {
 	if (i >= p.x) return;
 	const float x = a[(i / p.y) % p.z], y = b[(i / q.x) % q.y];
 	const uint op = p.w;
@@ -46,7 +46,17 @@ kernel void binary_bcast(device const float* a [[buffer(0)]], device const float
 	case 5: r = max(x, y); break;
 	default: r = min(x, y); break;
 	}
-	o[i] = r;
+	o[i] = T(r);
+}
+kernel void binary_bcast(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],
+                         device float* o [[buffer(2)]], constant uint4& p [[buffer(3)]],
+                         constant uint4& q [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+	binary_bcast_t<float>(a, b, o, p, q, i);
+}
+kernel void binary_bcast_bf16(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],
+                              device bfloat* o [[buffer(2)]], constant uint4& p [[buffer(3)]],
+                              constant uint4& q [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+	binary_bcast_t<bfloat>(a, b, o, p, q, i);
 }
 
 static float erf_ew(float x) {
@@ -146,7 +156,8 @@ kernel void gather_rows_c(device const float* src [[buffer(0)]], device float* d
 	dst[i.y * p.x + i.x] = src[idx[i.y] * p.x + i.x];
 }
 
-// o[r] = mean or sum of x[r, :cols]; p = (cols, ld, mean, 0).
+// o[r] = sum (p.z = 0), mean (1) or L2 norm (2) of x[r, :cols];
+// p = (cols, ld, mode, 0).
 kernel void reduce_rows(device const float* x [[buffer(0)]], device float* o [[buffer(1)]],
                         constant uint4& p [[buffer(2)]], uint row [[threadgroup_position_in_grid]],
                         uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
@@ -154,14 +165,18 @@ kernel void reduce_rows(device const float* x [[buffer(0)]], device float* o [[b
 	threadgroup float scratch[8];
 	device const float* xr = x + row * p.y;
 	float acc = 0;
-	for (uint i = tid; i < p.x; i += 256) acc += xr[i];
+	if (p.z == 2) {
+		for (uint i = tid; i < p.x; i += 256) acc += xr[i] * xr[i];
+	} else {
+		for (uint i = tid; i < p.x; i += 256) acc += xr[i];
+	}
 	acc = simd_sum(acc);
 	if (lane == 0) scratch[sg] = acc;
 	threadgroup_barrier(mem_flags::mem_threadgroup);
 	if (tid == 0) {
 		float s = 0;
 		for (int k = 0; k < 8; k++) s += scratch[k];
-		o[row] = p.z != 0 ? s / p.x : s;
+		o[row] = p.z == 2 ? sqrt(s) : p.z == 1 ? s / p.x : s;
 	}
 }
 `
@@ -195,7 +210,7 @@ const (
 var ewPSO struct {
 	once                                          sync.Once
 	binary, unary, transp, redux, copy2d, gatherC *Pipeline
-	nd                                            *Pipeline
+	nd, binaryBF16                                *Pipeline
 	err                                           error
 }
 
@@ -206,7 +221,7 @@ func (d *Device) PrepareEW() error {
 			name string
 			dst  **Pipeline
 		}{{"binary_bcast", &ewPSO.binary}, {"unary_ew", &ewPSO.unary}, {"transpose_nd", &ewPSO.transp}, {"reduce_rows", &ewPSO.redux},
-			{"copy2d", &ewPSO.copy2d}, {"gather_rows_c", &ewPSO.gatherC}, {"nd_ew", &ewPSO.nd}} {
+			{"copy2d", &ewPSO.copy2d}, {"gather_rows_c", &ewPSO.gatherC}, {"nd_ew", &ewPSO.nd}, {"binary_bcast_bf16", &ewPSO.binaryBF16}} {
 			if *k.dst, ewPSO.err = d.Compile(ewSrc, k.name); ewPSO.err != nil {
 				return
 			}
@@ -227,12 +242,22 @@ func (e *Encoder) Binary(op int, a, b, out Region, n, na, nb int) {
 
 // BinaryBcast writes out[i] = op(a[(i/da) % ma], b[(i/db) % mb]) for i < n.
 func (e *Encoder) BinaryBcast(op int, a, b, out Region, n, da, ma, db, mb int) {
+	e.binaryBcast(ewPSO.binary, op, a, b, out, n, da, ma, db, mb)
+}
+
+// BinaryBcastBF16 is BinaryBcast over f32 operands writing out as bf16 (a
+// bf16 GEMM's or fused attention's operand, without a cast pass).
+func (e *Encoder) BinaryBcastBF16(op int, a, b, out Region, n, da, ma, db, mb int) {
+	e.binaryBcast(ewPSO.binaryBF16, op, a, b, out, n, da, ma, db, mb)
+}
+
+func (e *Encoder) binaryBcast(p *Pipeline, op int, a, b, out Region, n, da, ma, db, mb int) {
 	if da <= 0 || ma <= 0 || db <= 0 || mb <= 0 {
 		e.err = fmt.Errorf("metal: BinaryBcast strides %d %d %d %d", da, ma, db, mb)
 		return
 	}
-	if e.ready(ewPSO.binary) {
-		e.Dispatch(ewPSO.binary, [3]int{n, 1, 1}, [3]int{256, 1, 1}, a, b, out, u32s(n, da, ma, op), u32s(db, mb, 0, 0))
+	if e.ready(p) {
+		e.Dispatch(p, [3]int{n, 1, 1}, [3]int{256, 1, 1}, a, b, out, u32s(n, da, ma, op), u32s(db, mb, 0, 0))
 	}
 }
 
@@ -292,12 +317,24 @@ func (e *Encoder) Transpose(x, out Region, dims, perm []int) {
 
 // ReduceRows writes the mean (or sum) of each of rows rows of cols.
 func (e *Encoder) ReduceRows(x, out Region, rows, cols, ld int, mean bool) {
-	m := 0
+	m := ReduceSum
 	if mean {
-		m = 1
+		m = ReduceMean
 	}
+	e.ReduceRowsMode(x, out, rows, cols, ld, m)
+}
+
+// Row reductions for ReduceRowsMode.
+const (
+	ReduceSum = iota
+	ReduceMean
+	ReduceL2
+)
+
+// ReduceRowsMode writes each row's sum, mean or L2 norm (ReduceSum, ...).
+func (e *Encoder) ReduceRowsMode(x, out Region, rows, cols, ld, mode int) {
 	if e.ready(ewPSO.redux) {
-		e.Dispatch(ewPSO.redux, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, out, u32s(cols, ld, m, 0))
+		e.Dispatch(ewPSO.redux, [3]int{rows * 256, 1, 1}, [3]int{256, 1, 1}, x, out, u32s(cols, ld, mode, 0))
 	}
 }
 

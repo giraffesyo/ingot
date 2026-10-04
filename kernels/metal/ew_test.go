@@ -120,6 +120,17 @@ func TestEW(t *testing.T) {
 		}
 		check("reduce mean", f32s(ro.Bytes())[row], sum/333, 1e-5)
 	}
+	s.Encode(func(e *Encoder) { e.ReduceRowsMode(rr.At(0), ro.At(0), 7, 333, 333, ReduceL2) })
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for row := range 7 {
+		var sq float64
+		for c := range 333 {
+			sq += float64(rf[row*333+c]) * float64(rf[row*333+c])
+		}
+		check("reduce l2", f32s(ro.Bytes())[row], math.Sqrt(sq), 1e-5)
+	}
 }
 
 // TestND: the strided N-d path — broadcast binary (non-contiguous operand

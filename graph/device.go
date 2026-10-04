@@ -19,9 +19,14 @@ type GPUOption func(*GPUSession)
 
 // GPUBF16 runs matrix products against constant weights (MatMul, Gemm,
 // convolution GEMMs) in bf16: weights converted once, activations cast on
-// the fly, f32 accumulation and outputs — the GPU's fast matrix path (~2.7x
-// f32). Attention stays f32. Accuracy: bf16 operand rounding, relative
-// error ~2⁻⁸·√K per product.
+// the fly, f32 accumulation — the GPU's fast matrix path (~2.7x f32) —
+// with bias and a following activation applied in the product's epilogue.
+// Token-major attention (ingot.SDPA with q, k, v and the output all
+// [B, T, H, 128], no mask) runs as the fused bf16 kernel, f32 softmax and
+// accumulation; other attention stays f32. Values read only by those
+// products and that attention are produced in bf16 directly; everything
+// else (residual streams, normalisations) stays f32. Accuracy: bf16
+// operand rounding, relative error ~2⁻⁸·√K per product.
 func GPUBF16() GPUOption { return func(s *GPUSession) { s.bf16 = true } }
 
 // CompileOn compiles g for a device: "cpu" (or ""), "gpu" (an error where

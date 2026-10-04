@@ -112,6 +112,9 @@ func (d *Device) Prepare() error {
 	if err := d.gemmPipelines(); err != nil {
 		return err
 	}
+	if err := d.gemmEpPipelines(); err != nil {
+		return err
+	}
 	return d.nnPipelines()
 }
 

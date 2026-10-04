@@ -46,6 +46,17 @@ type GPUSession struct {
 	// tables caches small constant tables GPU nodes derive from shapes
 	// (resize taps), in session memory for the session's lifetime.
 	tables map[string]metal.Region
+	// staged holds the tensors Stage returned (guarded by mu).
+	staged map[*tensor.Tensor]bool
+	// GPUBF16 plan (see planHalf; nil without it). fuseAct[step] is the
+	// activation a matrix product applies in its epilogue for the unary
+	// node that follows it (actStep marks that node); halfOut[step] says
+	// the step's first output is wanted in bf16, halfIn[step][slot] that
+	// the step reads that input in bf16.
+	fuseAct []int
+	actStep []bool
+	halfOut []bool
+	halfIn  [][]bool
 
 	// GPUTime is the last Run's GPU execution time, summed over its
 	// command buffers.
@@ -113,6 +124,11 @@ func CompileGPU(g *Graph, opts ...GPUOption) (*GPUSession, error) {
 	for _, o := range opts {
 		o(gs)
 	}
+	if gs.bf16 {
+		if err := dev.PrepareFlash(); err != nil {
+			return nil, err
+		}
+	}
 	gs.gops = make([]gpuOp, len(s.steps))
 	skip := map[string]bool{} // INGOT_GPU_SKIP=OpType,...: keep those on the CPU (bisecting)
 	for _, t := range strings.Split(os.Getenv("INGOT_GPU_SKIP"), ",") {
@@ -124,6 +140,9 @@ func CompileGPU(g *Graph, opts ...GPUOption) (*GPUSession, error) {
 		if !skip[st.node.OpType] && !skip["*"] {
 			gs.gops[i] = gpuOpFor(st.node)
 		}
+	}
+	if gs.bf16 && os.Getenv("INGOT_GPU_NOHALF") == "" { // the variable: bisecting
+		gs.planHalf()
 	}
 	return gs, nil
 }
@@ -145,6 +164,28 @@ func (s *GPUSession) Close() {
 	}
 	s.wraps = nil
 	s.mem.free()
+}
+
+// Stage copies t into session memory and returns the copy. Run reads a
+// staged tensor fed as an input in place instead of copying it on every
+// call — for inputs that stay the same across many Runs (a sampler's
+// conditioning). The copy lives until Close; the caller must not write to
+// it while a Run is in progress.
+func (s *GPUSession) Stage(t *tensor.Tensor) *tensor.Tensor {
+	c := s.mem.copyOf(t)
+	s.mu.Lock()
+	if s.staged == nil {
+		s.staged = map[*tensor.Tensor]bool{}
+	}
+	s.staged[c] = true
+	s.mu.Unlock()
+	return c
+}
+
+func (s *GPUSession) isStaged(t *tensor.Tensor) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.staged[t]
 }
 
 // viewOps return views of their input and never allocate: they may run on
@@ -280,6 +321,7 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 			err = fmt.Errorf("graph: gpu: %w", ferr)
 		}
 	}()
+	var staged []*tensor.Tensor
 	for _, v := range s.g.Inputs {
 		t, ok := feeds[v.Name]
 		if !ok {
@@ -287,6 +329,11 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		}
 		if v.DType != tensor.Invalid && t.DType() != v.DType {
 			return nil, fmt.Errorf("graph: input %q: dtype %s, model expects %s", v.Name, t.DType(), v.DType)
+		}
+		if s.isStaged(t) { // already in session memory: read in place
+			vals[v.id] = t
+			staged = append(staged, t)
+			continue
 		}
 		// Feeds move into session memory so GPU nodes can read them.
 		c := s.pool.GetUninit(t.DType(), t.Shape()...)
@@ -312,7 +359,11 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		deferred = deferred[:0]
 		return err
 	}
+	gctx := &gpuCtx{s: s, half: map[*byte]bool{}, acted: map[*byte]bool{}}
 	put := func(id int) {
+		if len(gctx.half) > 0 && vals[id].Numel() > 0 {
+			delete(gctx.half, dataPtr(vals[id]))
+		}
 		if sideOut[id] {
 			deferred = append(deferred, vals[id])
 		} else {
@@ -320,10 +371,31 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		}
 		vals[id] = nil
 	}
-	gctx := &gpuCtx{s: s}
 	// gpuGen[id] == gen marks values written by GPU work not yet flushed.
 	gpuGen := make([]int, s.nval)
 	gen := 1
+	in := make([]*tensor.Tensor, 0, 8)
+	// widen turns the current step's bf16-stored inputs selected by sel
+	// back into the f32 their tensors declare, in place on the CPU (after
+	// a flush: the rare path of a consumer that could not read bf16).
+	widen := func(sel func(k int) bool) error {
+		for k, t := range in {
+			if t == nil || t.Numel() == 0 || !gctx.half[dataPtr(t)] || !sel(k) {
+				continue
+			}
+			if s.stream.Pending() {
+				s.Flushes++
+				s.FlushedBy = append(s.FlushedBy, "widen")
+				if err := flush(); err != nil {
+					return fmt.Errorf("graph: gpu: %w", err)
+				}
+				gen++
+			}
+			widenBF16(t.Bytes())
+			delete(gctx.half, dataPtr(t))
+		}
+		return nil
+	}
 	pending := func(id int) bool {
 		if id < 0 {
 			return false
@@ -334,7 +406,6 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		return gpuGen[id] == gen
 	}
 	s.GPUSteps, s.CPUSteps, s.Flushes, s.FlushedBy = 0, 0, 0, s.FlushedBy[:0]
-	in := make([]*tensor.Tensor, 0, 8)
 	for si := range s.steps {
 		st := &s.steps[si]
 		in = in[:0]
@@ -351,7 +422,23 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		}
 		var outs []*tensor.Tensor
 		placed := false
-		if g := s.gops[si]; g != nil {
+		view := st.node.Domain == "" && viewOps[st.node.OpType]
+		gctx.si = si
+		// A bf16-stored input (see planHalf) reaches only steps that read
+		// it as such; anything else gets it widened first.
+		pass := s.actStep != nil && s.actStep[si] && gctx.acted[dataPtr(in[0])]
+		if len(gctx.half) > 0 && !view && !pass {
+			if err := widen(func(k int) bool { return s.gops[si] == nil || !s.halfIn[si][k] || s.Check }); err != nil {
+				return nil, err
+			}
+		}
+		if pass {
+			// The producing matrix product applied this activation in its
+			// epilogue: the node passes its input through.
+			delete(gctx.acted, dataPtr(in[0]))
+			outs, placed = []*tensor.Tensor{in[0]}, true
+			s.GPUSteps++
+		} else if g := s.gops[si]; g != nil {
 			var enc func(e *metal.Encoder)
 			var ok bool
 			if outs, enc, ok = g.prepare(gctx, st, in); ok {
@@ -386,8 +473,13 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		}
 		side := false
 		if !placed {
+			if len(gctx.half) > 0 && !view { // a GPU op declined its bf16 input
+				if err := widen(func(int) bool { return true }); err != nil {
+					return nil, err
+				}
+			}
 			runCtx := ctx
-			if s.stream.Pending() && !(st.node.Domain == "" && viewOps[st.node.OpType]) {
+			if s.stream.Pending() && !view {
 				if side = sideRun(st, in, pending); side {
 					runCtx = sideCtx
 				} else {
@@ -471,6 +563,12 @@ func (s *GPUSession) Run(feeds map[string]*tensor.Tensor) (res map[string]*tenso
 		}
 		if v.Const != nil {
 			t = t.Clone()
+		}
+		for _, f := range staged {
+			if t.SharesBuffer(f) { // a view of a staged feed: not the pool's to recycle
+				t = t.Clone()
+				break
+			}
 		}
 		res[v.Name] = t
 	}

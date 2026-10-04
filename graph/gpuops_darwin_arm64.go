@@ -22,7 +22,12 @@ type gpuOp interface {
 }
 
 type gpuCtx struct {
-	s *GPUSession
+	s  *GPUSession
+	si int // the step being prepared
+	// half and acted mark, by data pointer, values of the current Run that
+	// hold bf16 data and values a product's epilogue already activated
+	// (see planHalf).
+	half, acted map[*byte]bool
 }
 
 func (c *gpuCtx) out(shape ...int) *tensor.Tensor { return c.s.pool.GetUninit(tensor.F32, shape...) }
@@ -126,7 +131,9 @@ func gpuOpFor(n *Node) gpuOp {
 		case "Softmax":
 			return softmaxGPU{axis: int(a.Int("axis", -1))}
 		case "ReduceMean":
-			return reduceMeanGPU{keep: a.Int("keepdims", 1) == 1, attrAxes: a.Ints("axes", nil)}
+			return reduceMeanGPU{keep: a.Int("keepdims", 1) == 1, attrAxes: a.Ints("axes", nil), mode: metal.ReduceMean}
+		case "ReduceL2":
+			return reduceMeanGPU{keep: a.Int("keepdims", 1) == 1, attrAxes: a.Ints("axes", nil), mode: metal.ReduceL2}
 		case "Transpose":
 			return transposeGPU{perm: a.Ints("perm", nil)}
 		case "Gather":
@@ -234,6 +241,10 @@ func (o binaryGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	if nd {
 		sa, sb := bcastStrides(a.Shape(), oshape), bcastStrides(b.Shape(), oshape)
 		return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.BinaryND(o.op, rs[0], rs[1], ro[0], oshape, sa, sb) }, true
+	}
+	if c.wantHalf() {
+		c.markHalf(out)
+		return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.BinaryBcastBF16(o.op, rs[0], rs[1], ro[0], n, da, ma, db, mb) }, true
 	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.BinaryBcast(o.op, rs[0], rs[1], ro[0], n, da, ma, db, mb) }, true
 }
@@ -398,6 +409,13 @@ func (o ropeGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 		return nil, nil, false
 	}
 	heads := x.Numel() / (T * dh)
+	if c.wantHalf() { // rotated straight into a bf16 operand
+		c.markHalf(out)
+		return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+			// The norm weight (rs[1] stands in) is unread in rotate-only mode.
+			e.RMSNormRoPEBF16(rs[0], ro[0], rs[1], rs[1], rs[2], T, heads, dh, heads*dh, 0, o.mode|metal.RopeNoNorm)
+		}, true
+	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.RoPE(rs[0], ro[0], rs[1], rs[2], T, heads, dh, o.mode) }, true
 }
 
@@ -460,14 +478,14 @@ func (o matmulGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.
 	}
 	if c.s.bf16 && len(bs) == 2 {
 		if wb, ok := c.bf16Const(st, 1); ok {
-			if ab, ok := c.bf16Scratch(M * K); ok {
-				return []*tensor.Tensor{out}, func(e *metal.Encoder) {
-					e.CastBF16(rs[0], ab, M, K, K, K)
-					e.Gemm(metal.Gemm{M: M, N: N, K: K, A: ab, B: wb, C: ro[0], ABF16: true, BF16: true})
-					colEpilogue(e, ro[0], rb, nout, N, gelu)
-				}, true
+			if enc, ok := c.gemmBF16(a, out, rs[0], wb, ro[0], rb, M, N, K, false, gelu); ok {
+				return []*tensor.Tensor{out}, enc, true
 			}
 		}
+	}
+	if c.isHalf(a) {
+		c.release(out)
+		return nil, nil, false
 	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: M, N: N, K: K, A: rs[0], B: rs[1], C: ro[0],
@@ -537,18 +555,44 @@ func (o gemmGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	}
 	if c.s.bf16 {
 		if wb, ok := c.bf16Const(st, 1); ok {
-			if ab, ok := c.bf16Scratch(M * K); ok {
-				return []*tensor.Tensor{out}, func(e *metal.Encoder) {
-					e.CastBF16(rs[0], ab, M, K, K, K)
-					e.Gemm(metal.Gemm{M: M, N: N, K: K, A: ab, B: wb, C: ro[0], TransB: transB, ABF16: true, BF16: true})
-					colEpilogue(e, ro[0], rb, M*N, N, false)
-				}, true
+			if enc, ok := c.gemmBF16(a, out, rs[0], wb, ro[0], rb, M, N, K, transB, false); ok {
+				return []*tensor.Tensor{out}, enc, true
 			}
 		}
+	}
+	if c.isHalf(a) {
+		c.release(out)
+		return nil, nil, false
 	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
 		e.Gemm(metal.Gemm{M: M, N: N, K: K, A: rs[0], B: rs[1], C: ro[0], TransB: transB})
 		colEpilogue(e, ro[0], rb, M*N, N, false)
+	}, true
+}
+
+// gemmBF16 encodes the GPUBF16 product out[M,N] = a[M,K] · op(wb) against
+// bf16 weights: a is read in place when it already holds bf16, else cast
+// into scratch; bias (rb, may be the zero Region), the activation (gelu:
+// the node's own; otherwise the following node's, see planHalf) and bf16
+// rounding of the output ride the product's epilogue.
+func (c *gpuCtx) gemmBF16(a, out *tensor.Tensor, ra, wb, ro, rb metal.Region, M, N, K int, transB, gelu bool) (func(*metal.Encoder), bool) {
+	half := c.isHalf(a)
+	ab := ra
+	if !half {
+		var ok bool
+		if ab, ok = c.bf16Scratch(M * K); !ok {
+			return nil, false
+		}
+	}
+	act, c16 := c.epilogue(out)
+	if gelu {
+		act = metal.ActGeluErf
+	}
+	return func(e *metal.Encoder) {
+		if !half {
+			e.CastBF16(ra, ab, M, K, K, K)
+		}
+		e.GemmEp(metal.GemmEp{M: M, N: N, K: K, A: ab, B: wb, C: ro, TransB: transB, Bias: rb, Act: act, CBF16: c16})
 	}, true
 }
 
@@ -757,9 +801,12 @@ func (o softmaxGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor
 	}, true
 }
 
+// reduceMeanGPU is ReduceMean or ReduceL2 (mode: metal.ReduceMean, ...)
+// over a trailing block of axes.
 type reduceMeanGPU struct {
 	keep     bool
 	attrAxes []int64
+	mode     int
 }
 
 func (o reduceMeanGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
@@ -822,7 +869,8 @@ func (o reduceMeanGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*ten
 		return nil, nil, false
 	}
 	rows := x.Numel() / D
-	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.ReduceRows(rx[0], ro[0], rows, D, D, true) }, true
+	mode := o.mode
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.ReduceRowsMode(rx[0], ro[0], rows, D, D, mode) }, true
 }
 
 type transposeGPU struct{ perm []int64 }
@@ -925,6 +973,14 @@ func (o sdpaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 	if rank3 {
 		oshape = []int{H, T, dh}
 	}
+	if c.s.bf16 && mask == nil && o.flashLayout() && dh == metal.FlashHeadDim {
+		if outs, enc, ok := o.flash(c, in[:3], rs, oshape, B, T, Tk, H); ok {
+			return outs, enc, true
+		}
+	}
+	if c.isHalf(q) || c.isHalf(k) || c.isHalf(v) { // only the fused kernel reads bf16
+		return nil, nil, false
+	}
 	out := c.out(oshape...)
 	s := c.out(H, T, Tk) // one image's scores, all heads
 	ro, ok := c.regions(out, s)
@@ -980,6 +1036,59 @@ func (o sdpaGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Te
 				Batch: H, StrideA: T * Tk, StrideB: lv.head, StrideC: lo.head})
 		}
 	}, true
+}
+
+// flash is the GPUBF16 form of token-major attention (q, k, v and the
+// output all [B, T, H, dh], no mask): operands cast to bf16, then the
+// fused kernel — scores never reach memory. rs holds q, k, v.
+func (o sdpaGPU) flash(c *gpuCtx, qkv []*tensor.Tensor, rs []metal.Region, oshape []int, B, T, Tk, H int) ([]*tensor.Tensor, func(*metal.Encoder), bool) {
+	D := H * metal.FlashHeadDim
+	rows := [3]int{B * T, B * Tk, B * Tk}
+	// Operands not already bf16 are cast into scratch; the scratches are
+	// live together, so they leave the pool together.
+	var cast [3]bool
+	var scratch []*tensor.Tensor
+	r16 := [3]metal.Region{rs[0], rs[1], rs[2]}
+	for i, t := range qkv {
+		if c.isHalf(t) {
+			continue
+		}
+		s := c.s.pool.GetUninit(tensor.BF16, rows[i]*D)
+		scratch = append(scratch, s)
+		r, ok := c.regions(s)
+		if !ok {
+			c.release(scratch...)
+			return nil, nil, false
+		}
+		cast[i], r16[i] = true, r[0]
+	}
+	out := c.out(oshape...)
+	ro, ok := c.regions(out)
+	c.release(scratch...)
+	if !ok {
+		c.release(out)
+		return nil, nil, false
+	}
+	scale := o.scale
+	at := func(r metal.Region, bytes int) metal.Region { return metal.Region{B: r.B, Off: r.Off + bytes} }
+	return []*tensor.Tensor{out}, func(e *metal.Encoder) {
+		for i := range cast {
+			if cast[i] {
+				e.CastBF16(rs[i], r16[i], rows[i], D, D, D)
+			}
+		}
+		for b := range B {
+			k, v := at(r16[1], 2*b*Tk*D), at(r16[2], 2*b*Tk*D)
+			e.Flash(metal.Flash{Q: at(r16[0], 2*b*T*D), K1: k, V1: v, K2: k, V2: v, O: at(ro[0], 4*b*T*D),
+				Tq: T, N1: Tk, Heads: H, LDQ: D, LD1: D, LD2: D, LDO: D, Scale: scale})
+		}
+	}, true
+}
+
+// flashLayout reports the token-major layout the fused kernel reads: q, k,
+// v and the output all [B, T, H, dh].
+func (o sdpaGPU) flashLayout() bool {
+	return o.aLay == 1 && o.bLay == 1 && o.vLay == 1 && o.strideOut
 }
 
 // mhaGPU is ingot.MHA: attention over a packed qkv tensor ([B,T,3,H,dh]
@@ -1220,6 +1329,19 @@ func (sliceGPU) prepare(c *gpuCtx, st *step, in []*tensor.Tensor) ([]*tensor.Ten
 		return []*tensor.Tensor{out}, func(*metal.Encoder) {}, true
 	}
 	src := metal.Region{B: rx[0].B, Off: rx[0].Off + 4*base}
+	if c.wantHalf() {
+		// A unit-step slice of the last axis alone is a strided 2-D copy:
+		// cast straight into the bf16 operand its consumers read.
+		cols, rows, plain := cnt[r-1], out.Numel()/cnt[r-1], sst[r-1] == 1
+		for d := range r - 1 {
+			plain = plain && cnt[d] == xs[d] && sst[d] == stride[d]
+		}
+		if plain {
+			c.markHalf(out)
+			lds := xs[r-1]
+			return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.CastBF16(src, ro[0], rows, cols, lds, cols) }, true
+		}
+	}
 	return []*tensor.Tensor{out}, func(e *metal.Encoder) { e.CopyND(src, ro[0], cnt, sst) }, true
 }
 

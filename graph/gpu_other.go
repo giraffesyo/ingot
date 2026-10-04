@@ -32,4 +32,6 @@ func (s *GPUSession) Run(map[string]*tensor.Tensor) (map[string]*tensor.Tensor, 
 
 func (s *GPUSession) Close() {}
 
+func (s *GPUSession) Stage(t *tensor.Tensor) *tensor.Tensor { return t }
+
 func (s *GPUSession) Release(map[string]*tensor.Tensor) {}
