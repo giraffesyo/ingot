@@ -59,6 +59,22 @@ the transformer and the decoder to the same outputs as the CPU (the 1-D
 pooling and Resize nodes fall back to the CPU ops), slower on the
 transformer at this size.
 
+Conv takes 3-D (NCDHW, rank-5) operands (2026-10-03, CPU): vol2col + GEMM
+tiled over output rows, any stride / dilation / pads / groups, with the
+1×1×1 case running GEMM on the input directly; the GPU executor declines
+rank 5 and falls back to it. Earlier text saying 3-D errors loudly applies
+now only to ConvTranspose and the pooling ops. Built graphs also get
+ingot.SparseConv, a submanifold sparse convolution over a voxel set
+(features [N, Ci], an int32 neighbour table [N, V] from the `sparse`
+package, weights [Co, V, Ci]): gather + GEMM over row tiles, CPU only.
+Empty taps are gathered as zeros rather than skipped.
+
+TRELLIS.2 (models/trellis2, image to 3-D) runs from its safetensors
+checkpoints. Not implemented: background removal (the input must already
+be a cut-out), hole filling, mesh simplification, UV unwrapping and
+texture baking — the GLB carries one vertex per surface voxel with
+per-vertex colour, and metallic / roughness only as material averages.
+
 ## Gaps, by priority
 
 ### Blocks OCR (phase 3) — do first

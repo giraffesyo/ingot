@@ -259,6 +259,20 @@ func FromI64(data []int64, shape ...int) *Tensor {
 	return t
 }
 
+// FromI32 wraps an existing []int32 (no copy) with the given shape.
+func FromI32(data []int32, shape ...int) *Tensor {
+	s := Shape(shape)
+	if len(data) != s.Numel() {
+		panic(fmt.Sprintf("tensor: data len %d != numel %d for shape %v", len(data), s.Numel(), s))
+	}
+	t := &Tensor{dtype: I32}
+	t.setShape(shape)
+	if len(data) > 0 {
+		t.buf = unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4)
+	}
+	return t
+}
+
 // FromBytes wraps raw little-endian storage (no copy) — e.g. a memory-mapped
 // weight file — as a tensor of the given dtype and shape. buf must hold
 // exactly numel·dt.Size() bytes and be Aligned for dt, since the typed

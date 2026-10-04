@@ -520,3 +520,46 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
 - [ ] stableaudio: parity run against the PyTorch reference; SAME-L and
       the medium transformer; audio-to-audio and inpainting (the encoder
       graph); RandomNormalLike for the dithered decoder build.
+
+## Phase 9 — 3-D generation (TRELLIS.2)
+
+- [x] ops: 3-D Conv (rank-5, vol2col + GEMM; Apple Silicon, 3³ same-padded:
+      512→512 at 16³ 77 ms, 128→128 at 32³ 37 ms, 32→32 at 64³ 21 ms,
+      680–780 GFLOPS) and ingot.SparseConv, submanifold sparse
+      convolution as gather + GEMM (4000 cells × 1024→1024 221 ms,
+      200k × 128→128 433 ms; 400–1000 GFLOPS counting empty taps,
+      measured with another job on the machine). Both against float64
+      oracles.
+- [x] sparse: voxel-set bookkeeping — a coordinate index, convolution
+      neighbour tables (200k cells × 27 taps in 8 ms) and subdivision
+      into children.
+- [x] models/trellis2: TRELLIS.2-4B image-to-3D built in Go over the
+      checkpoints — the DINOv3 ViT-L/16 encoder, the 1.3B flow
+      transformer (one builder for the dense structure model and the
+      sparse latent models: 3-D rotary positions from cell coordinates),
+      the dense 3-D conv structure decoder, the sparse ConvNeXt decoders
+      run level by level (each level's cells come from the subdivision
+      the previous one predicts), the guided flow sampler, flexible-
+      dual-grid mesh extraction, GLB export. Parity with the PyTorch
+      reference in float32 (tools/export/trellis2_ref.py, which runs the
+      reference modules on CPU through stand-ins for its CUDA-only
+      sparse-conv and attention libraries): encoder 6.5e-5, flow block
+      2.2e-5, structure decoder 4.9e-4 on logits to 213, the whole
+      12-step structure stage 1.3e-3 with the same 688 occupied cells,
+      both sparse decoders ≤ 5.8e-4 with identical cells at every level,
+      the subject crop exact and the Lanczos resize within one 8-bit
+      step. cmd/trellis2: the 512 pipeline end to end in 125 s on the
+      Apple Silicon (GPU executor, bf16 products; 2,724 latent cells, a
+      1.2M-vertex mesh). The GPU executor places Gemm only for float32
+      weights, so the flow models widen the checkpoint's bf16 there; on
+      the CPU the same stage takes about 5 minutes.
+- [ ] trellis2: the 1024 and cascade pipelines are written but not yet
+      run or checked against the reference; background removal; hole
+      filling, simplification, UV unwrap and texture baking (the mesh is
+      one vertex per voxel with vertex colour); SparseConv on the GPU and
+      skipping empty taps; bf16 or f16 decoder weights in place (they
+      are widened to f32 and packed, about 4 GB per decoder).
+- [ ] Pixal3D (pixel-aligned conditioning on the same backbone): needs
+      the MoGe-2 geometry model, the feature upsampler, the projection
+      of image features onto the voxel grid, and the flow blocks'
+      projected-attention mode.
