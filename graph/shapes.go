@@ -75,6 +75,25 @@ func propagateShapes(g *Graph) {
 		switch key {
 		case "Conv":
 			x := conc(n.Inputs[0])
+			if len(x) == 5 && len(n.Inputs) >= 2 && n.Inputs[1] != nil && n.Inputs[1].Const != nil {
+				// 3-D (NCDHW).
+				ws := n.Inputs[1].Const.Shape()
+				st := ints(n.Attrs.Ints("strides", []int64{1, 1, 1}))
+				di := ints(n.Attrs.Ints("dilations", []int64{1, 1, 1}))
+				pa := ints(n.Attrs.Ints("pads", []int64{0, 0, 0, 0, 0, 0}))
+				if len(ws) != 5 || len(st) != 3 || len(di) != 3 || len(pa) != 6 || n.Attrs.String("auto_pad", "NOTSET") != "NOTSET" {
+					continue
+				}
+				os, ok := []int{x[0], ws[0], 0, 0, 0}, true
+				for d := range 3 {
+					v := (x[2+d] + pa[d] + pa[d+3] - (di[d]*(ws[2+d]-1) + 1)) / st[d]
+					os[2+d], ok = v+1, ok && v >= 0
+				}
+				if ok {
+					set(out, os)
+				}
+				continue
+			}
 			if x == nil || len(x) != 4 || len(n.Inputs) < 2 || n.Inputs[1] == nil || n.Inputs[1].Const == nil {
 				continue
 			}

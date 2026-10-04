@@ -12,9 +12,11 @@ import (
 
 // convOp implements 2-D Conv (NCHW) via im2col + GEMM, with fast paths for
 // 1×1/stride-1/no-pad (GEMM directly on the input) and depthwise (direct).
-// 1-D Conv (NCW, rank-3 X and W) runs as the 2-D case with H = KH = 1.
+// 1-D Conv (NCW, rank-3 X and W) runs as the 2-D case with H = KH = 1;
+// 3-D Conv (NCDHW) is conv3dOp.
 type convOp struct {
 	n         NodeInfo
+	c3        *conv3dOp // set when the attributes are three-dimensional
 	group     int
 	dwPadded  []float32 // lazily packed padded depthwise weights (C * paddedK)
 	dwOnce    sync.Once
@@ -30,11 +32,10 @@ type convOp struct {
 
 	// Pre-packed weights (one gemm.PackedA per group), built on first use and
 	// reused while the weight tensor's storage is unchanged (constant weights).
-	packMu   sync.Mutex
-	packed   []*gemm.PackedA
-	packSrc  *float32
-	packLen  int
-	packFits bool
+	packMu  sync.Mutex
+	packed  []*gemm.PackedA
+	packSrc *float32
+	packLen int
 	winogradCache
 }
 
@@ -60,6 +61,11 @@ func (o *convOp) packedWeights(wf []float32, G, Mg, K int) []*gemm.PackedA {
 func buildConv(n NodeInfo) (Op, error) {
 	o := &convOp{n: n, group: int(n.Attrs.Int("group", 1)), autoPad: n.Attrs.String("auto_pad", "NOTSET")}
 	o.kshape = n.Attrs.Ints("kernel_shape", nil)
+	if isConv3D(n) {
+		var err error
+		o.c3, err = buildConv3D(n)
+		return o, err
+	}
 	st := n.Attrs.Ints("strides", []int64{1, 1})
 	di := n.Attrs.Ints("dilations", []int64{1, 1})
 	pa := n.Attrs.Ints("pads", []int64{0, 0, 0, 0})
@@ -134,6 +140,17 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 		return nil, o.n.Errorf("need X and W")
 	}
 	x, w := in[0], in[1]
+	if len(x.Shape()) == 5 {
+		// Rank-5 operands with every spatial attribute defaulted.
+		if o.c3 == nil {
+			c3, err := buildConv3D(o.n)
+			if err != nil {
+				return nil, err
+			}
+			o.c3 = c3
+		}
+		return o.c3.Run(ctx, in)
+	}
 	var bias []float32
 	if len(in) > 2 && in[2] != nil {
 		bias = in[2].F32()
@@ -144,7 +161,7 @@ func (o *convOp) Run(ctx *Ctx, in []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	oneD := len(x.Shape()) == 3 && len(w.Shape()) == 3
 	xs, ws := shape2D(x.Shape()), shape2D(w.Shape())
 	if len(xs) != 4 || len(ws) != 4 || (oneD && o.strides[0] != 1) {
-		return nil, o.n.Errorf("only 1-D and 2-D conv supported (X %v, W %v)", x.Shape(), w.Shape())
+		return nil, o.n.Errorf("conv operands do not match the attributes' rank (X %v, W %v)", x.Shape(), w.Shape())
 	}
 	N, C, H, W := xs[0], xs[1], xs[2], xs[3]
 	M, Cg, KH, KW := ws[0], ws[1], ws[2], ws[3]
