@@ -75,6 +75,11 @@ be a cut-out), hole filling, mesh simplification, UV unwrapping and
 texture baking — the GLB carries one vertex per surface voxel with
 per-vertex colour, and metallic / roughness only as material averages.
 
+Pixal3D runs through the same package (2026-10-03). Its camera is not
+estimated: the photo's field of view is given, or assumed 49.1°. The NAF
+upsampler's weights must be converted from a PyTorch pickle first
+(tools/export/naf_convert.py).
+
 ## Gaps, by priority
 
 ### Blocks OCR (phase 3) — do first

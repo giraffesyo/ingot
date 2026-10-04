@@ -65,6 +65,12 @@ func (w weights) linear(name string) (wt, bias *tensor.Tensor) {
 	return wt, w.f32(name + ".bias")
 }
 
+// has reports whether the checkpoint holds prefix+name.
+func (w weights) has(name string) bool {
+	_, ok := w.f.Info(w.prefix + name)
+	return ok
+}
+
 // catch converts a loadError panic into *err; other panics propagate.
 func catch(err *error) {
 	if r := recover(); r != nil {

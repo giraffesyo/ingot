@@ -37,12 +37,10 @@ func TestStructureFlowParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	cond := ref.tensor(t, "cond")
-	g, err := BuildFlow(cfg, openFile(t, base+".safetensors"), GridCoords(cfg.Resolution), cond.Shape()[0], int(ref.Meta["blocks"].(float64)), false)
+	f, blocks := openFile(t, base+".safetensors"), int(ref.Meta["blocks"].(float64))
+	g, err := BuildFlow(cfg, f, GridCoords(cfg.Resolution), cond.Shape()[0], blocks, false)
 	s := compile(t, g, err)
-	out, err := s.Run(map[string]*tensor.Tensor{
-		"x": ref.tensor(t, "x"), "cond": cond,
-		"t": tensor.FromF32([]float32{float32(ref.Meta["t"].(float64))}, 1),
-	})
+	out, err := s.Run(flowFeeds(t, cfg, f, blocks, ref.tensor(t, "x"), cond, float32(ref.Meta["t"].(float64))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +84,8 @@ func TestStructureSampling(t *testing.T) {
 	}
 	cond, noise := ref.tensor(t, "cond"), ref.tensor(t, "noise")
 	coords := GridCoords(cfg.Resolution)
-	g, err := BuildFlow(cfg, openFile(t, base+".safetensors"), coords, cond.Shape()[0], cfg.NumBlocks, false)
+	f := openFile(t, base+".safetensors")
+	g, err := BuildFlow(cfg, f, coords, cond.Shape()[0], cfg.NumBlocks, false)
 	s := compile(t, g, err)
 
 	params := SamplerParams{SigmaMin: ref.Meta["sigma_min"].(float64)}
@@ -94,9 +93,12 @@ func TestStructureSampling(t *testing.T) {
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatal(err)
 	}
-	neg := tensor.New(tensor.F32, cond.Shape()...)
+	kv, err := FlowConditions(cfg, f, cfg.NumBlocks, cond, tensor.New(tensor.F32, cond.Shape()...))
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := time.Now()
-	z, err := Sample(FlowVelocity(s, len(coords), cfg.InChannels, cond, neg), noise.F32(), params, func(i, n int) {
+	z, err := Sample(FlowVelocity(s, len(coords), cfg.InChannels, kv[0], kv[1], nil), noise.F32(), params, func(i, n int) {
 		t.Logf("step %d/%d (%.1fs)", i, n, time.Since(start).Seconds())
 	})
 	if err != nil {

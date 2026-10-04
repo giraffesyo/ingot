@@ -23,7 +23,11 @@ type rgba8 struct {
 // cut-out (the reference runs a matting model here, which this package
 // does not include). Images wider than 1024 pixels are reduced first.
 // The result is square RGB.
-func Preprocess(img image.Image) (*image.NRGBA, error) {
+func Preprocess(img image.Image) (*image.NRGBA, error) { return PreprocessMargin(img, 1) }
+
+// PreprocessMargin is Preprocess with the square crop scaled about the
+// subject's centre: 1 crops tight; Pixal3D's pipeline uses 1.1.
+func PreprocessMargin(img image.Image, scale float64) (*image.NRGBA, error) {
 	b := img.Bounds()
 	src := rgba8{pix: make([]uint8, 4*b.Dx()*b.Dy()), w: b.Dx(), h: b.Dy(), ch: 4}
 	for y := range src.h {
@@ -63,7 +67,7 @@ func Preprocess(img image.Image) (*image.NRGBA, error) {
 		return nil, fmt.Errorf("trellis2: image has no opaque subject (alpha above 80%% nowhere)")
 	}
 	cx, cy := float64(x0+x1)/2, float64(y0+y1)/2
-	half := max(x1-x0, y1-y0) / 2
+	half := int(float64(max(x1-x0, y1-y0))*scale) / 2
 	// The crop box rounds half to even, as the reference's does.
 	left, top := int(math.RoundToEven(cx-float64(half))), int(math.RoundToEven(cy-float64(half)))
 	side := int(math.RoundToEven(cx+float64(half))) - left
@@ -91,7 +95,11 @@ func Preprocess(img image.Image) (*image.NRGBA, error) {
 
 // ImageTensor resizes a preprocessed image to size×size (Lanczos) and
 // normalises it for the encoder: [1, 3, size, size].
-func ImageTensor(img *image.NRGBA, size int) *tensor.Tensor {
+func ImageTensor(img *image.NRGBA, size int) *tensor.Tensor { return imageTensor(img, size, true) }
+
+// imageTensor is ImageTensor, or with normalize false the plain [0, 1] RGB
+// the feature upsampler is guided by.
+func imageTensor(img *image.NRGBA, size int, normalize bool) *tensor.Tensor {
 	b := img.Bounds()
 	src := rgba8{pix: make([]uint8, 3*b.Dx()*b.Dy()), w: b.Dx(), h: b.Dy(), ch: 3}
 	for y := range src.h {
@@ -106,7 +114,11 @@ func ImageTensor(img *image.NRGBA, size int) *tensor.Tensor {
 	f := t.F32()
 	for i := range size * size {
 		for c := range 3 {
-			f[c*size*size+i] = (float32(src.pix[3*i+c])/255 - ImageMean[c]) / ImageStd[c]
+			v := float32(src.pix[3*i+c]) / 255
+			if normalize {
+				v = (v - ImageMean[c]) / ImageStd[c]
+			}
+			f[c*size*size+i] = v
 		}
 	}
 	return t

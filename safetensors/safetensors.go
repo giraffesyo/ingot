@@ -246,7 +246,9 @@ func HalfToF32(h uint16) float32 {
 
 func dtypeSize(s string) (int, bool) {
 	switch s {
-	case "F64", "I64", "U64":
+	case "C128":
+		return 16, true
+	case "F64", "I64", "U64", "C64":
 		return 8, true
 	case "F32", "I32", "U32":
 		return 4, true

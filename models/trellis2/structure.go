@@ -4,22 +4,78 @@ import (
 	"fmt"
 
 	"github.com/giraffesyo/ingot/graph"
+	"github.com/giraffesyo/ingot/safetensors"
 	"github.com/giraffesyo/ingot/sparse"
 	"github.com/giraffesyo/ingot/tensor"
 )
 
-// FlowVelocity adapts a compiled BuildFlow graph to the sampler: cond and
-// neg are the image features and the negative condition ([condTokens,
-// cond_channels]); x is [T, in_channels] flattened.
-func FlowVelocity(r graph.Runner, tokens, channels int, cond, neg *tensor.Tensor) Velocity {
-	return func(x []float32, t float32, positive bool) ([]float32, error) {
-		c := cond
-		if !positive {
-			c = neg
+// FlowCondition is one condition's cross-attention keys and values for
+// every block, keyed by the BuildFlow input they feed.
+type FlowCondition map[string]*tensor.Tensor
+
+// FlowConditions evaluates BuildFlowCond over each of conds ([condTokens,
+// cond_channels], all the same shape): what a sampling run computes once,
+// instead of projecting the condition in every block of every evaluation.
+func FlowConditions(cfg FlowConfig, f *safetensors.File, blocks int, conds ...*tensor.Tensor) ([]FlowCondition, error) {
+	if len(conds) == 0 {
+		return nil, nil
+	}
+	g, err := BuildFlowCond(cfg, f, conds[0].Shape()[0], blocks)
+	if err != nil {
+		return nil, err
+	}
+	s, err := graph.Compile(g)
+	if err != nil {
+		return nil, fmt.Errorf("trellis2: flow condition: %w", err)
+	}
+	out := make([]FlowCondition, len(conds))
+	for i, c := range conds {
+		// The outputs are kept, not released: they live as long as the run.
+		res, err := s.Run(map[string]*tensor.Tensor{"cond": c})
+		if err != nil {
+			return nil, fmt.Errorf("trellis2: flow condition: %w", err)
 		}
-		res, err := r.Run(map[string]*tensor.Tensor{
-			"x": tensor.FromF32(x, tokens, channels), "t": tensor.FromF32([]float32{t}, 1), "cond": c,
-		})
+		out[i] = res
+	}
+	return out, nil
+}
+
+// stager is a runner that reads inputs it has staged in place (the GPU
+// session: no copy into its memory on every Run).
+type stager interface {
+	Stage(t *tensor.Tensor) *tensor.Tensor
+}
+
+// FlowVelocity adapts a compiled BuildFlow graph to the sampler: cond and
+// neg are the keys and values of the image features and of the negative
+// condition (FlowConditions); x is [T, in_channels] flattened. proj, for a
+// model with projected image features, is their [T, ProjChannels] tensor;
+// the negative condition uses zeros in its place.
+func FlowVelocity(r graph.Runner, tokens, channels int, cond, neg FlowCondition, proj *tensor.Tensor) Velocity {
+	feeds := [2]map[string]*tensor.Tensor{}
+	stage := func(t *tensor.Tensor) *tensor.Tensor {
+		if s, ok := r.(stager); ok {
+			return s.Stage(t)
+		}
+		return t
+	}
+	for i, c := range []FlowCondition{neg, cond} {
+		feeds[i] = make(map[string]*tensor.Tensor, len(c)+3)
+		for name, t := range c {
+			feeds[i][name] = stage(t)
+		}
+	}
+	if proj != nil {
+		feeds[0]["proj"] = stage(tensor.New(tensor.F32, proj.Shape()...))
+		feeds[1]["proj"] = stage(proj)
+	}
+	return func(x []float32, t float32, positive bool) ([]float32, error) {
+		fd := feeds[0]
+		if positive {
+			fd = feeds[1]
+		}
+		fd["x"], fd["t"] = tensor.FromF32(x, tokens, channels), tensor.FromF32([]float32{t}, 1)
+		res, err := r.Run(fd)
 		if err != nil {
 			return nil, fmt.Errorf("trellis2: flow step: %w", err)
 		}

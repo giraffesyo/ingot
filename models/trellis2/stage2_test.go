@@ -42,12 +42,10 @@ func TestLatentFlowParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	cond := ref.tensor(t, "cond")
-	g, err := BuildFlow(cfg, openFile(t, base+".safetensors"), cells(ref.tensor(t, "coords")), cond.Shape()[0], int(ref.Meta["blocks"].(float64)), false)
+	f, blocks := openFile(t, base+".safetensors"), int(ref.Meta["blocks"].(float64))
+	g, err := BuildFlow(cfg, f, cells(ref.tensor(t, "coords")), cond.Shape()[0], blocks, false)
 	s := compile(t, g, err)
-	out, err := s.Run(map[string]*tensor.Tensor{
-		"x": ref.tensor(t, "x"), "cond": cond,
-		"t": tensor.FromF32([]float32{float32(ref.Meta["t"].(float64))}, 1),
-	})
+	out, err := s.Run(flowFeeds(t, cfg, f, blocks, ref.tensor(t, "x"), cond, float32(ref.Meta["t"].(float64))))
 	if err != nil {
 		t.Fatal(err)
 	}

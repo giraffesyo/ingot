@@ -3,6 +3,7 @@ package trellis2
 import (
 	"fmt"
 	"image"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -56,6 +57,10 @@ type Pipeline struct {
 	dir  string            // the TRELLIS.2 snapshot
 	deps map[string]string // other repositories ("org/name") → snapshot
 
+	// Upsampler is the NAF feature upsampler's checkpoint (safetensors,
+	// from tools/export/naf_convert.py), needed by pipelines whose models
+	// take projected image features (Pixal3D).
+	Upsampler string
 	// Device runs the models: "cpu", "gpu", "gpu-bf16" or "auto"
 	// (graph.CompileOn). Default "auto".
 	Device string
@@ -156,6 +161,22 @@ type Options struct {
 	// MaxTokens caps a cascade's refined latent grid (default 49152
 	// cells); the refinement resolution drops until it fits.
 	MaxTokens int
+	// FovX is the input photo's horizontal field of view in radians, for
+	// pipelines with projected image features (default DefaultFovX).
+	FovX float64
+}
+
+// Projected reports whether the pipeline's models take image features
+// projected onto the voxel grid (Pixal3D) rather than plain image tokens.
+// Such a pipeline needs Upsampler set, an image from PreprocessMargin(1.1),
+// and runs only the cascade types.
+func (p *Pipeline) Projected() (bool, error) {
+	base, err := p.checkpoint("sparse_structure_flow_model")
+	if err != nil {
+		return false, err
+	}
+	cfg, err := LoadFlowConfig(base + ".json")
+	return cfg.ProjChannels() > 0, err
 }
 
 // Run generates a textured mesh from a preprocessed image (Preprocess).
@@ -165,6 +186,11 @@ func (p *Pipeline) Run(img *image.NRGBA, o Options) (*Mesh, error) {
 	}
 	if o.MaxTokens == 0 {
 		o.MaxTokens = 49152
+	}
+	if proj, err := p.Projected(); err != nil {
+		return nil, err
+	} else if proj {
+		return p.runProjected(img, o)
 	}
 	type variant struct {
 		structure          int    // sparse-structure grid the latent cells come from
@@ -209,7 +235,7 @@ func (p *Pipeline) Run(img *image.NRGBA, o Options) (*Mesh, error) {
 	}
 
 	// Stage 1: which cells of the latent grid the object occupies.
-	cells, err := p.structure(cond512, v.structure, noise, steps(p.cfg.StructureSampler.params()))
+	cells, err := p.structure(cond512, nil, v.structure, noise, steps(p.cfg.StructureSampler.params()))
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +253,7 @@ func (p *Pipeline) Run(img *image.NRGBA, o Options) (*Mesh, error) {
 		if err != nil {
 			return nil, err
 		}
-		if cells, v.resolution, err = p.refineCells(cells, low, v.target, o.MaxTokens); err != nil {
+		if cells, v.resolution, err = p.refineCells(cells, low, v.target, o.MaxTokens, false); err != nil {
 			return nil, err
 		}
 		p.logf("cascade: %d cells at resolution %d", len(cells), v.resolution)
@@ -243,6 +269,149 @@ func (p *Pipeline) Run(img *image.NRGBA, o Options) (*Mesh, error) {
 	}
 
 	return p.decode(cells, shape, tex, v.resolution)
+}
+
+// runProjected is Run for a pipeline with projected image features: the
+// cascade, each stage conditioned on the image's global tokens and on
+// image features sampled where the stage's cells project into the image.
+func (p *Pipeline) runProjected(img *image.NRGBA, o Options) (*Mesh, error) {
+	target, ok := map[string]int{"": 1024, "1024_cascade": 1024, "1536_cascade": 1536}[o.Type]
+	if !ok {
+		return nil, fmt.Errorf("trellis2: a projected-feature pipeline runs only 1024_cascade or 1536_cascade, not %q", o.Type)
+	}
+	if p.Upsampler == "" {
+		return nil, fmt.Errorf("trellis2: this pipeline needs the NAF upsampler checkpoint (Pipeline.Upsampler)")
+	}
+	fov := o.FovX
+	if fov == 0 {
+		fov = DefaultFovX
+	}
+	cam := CameraFromFov(fov, 1)
+	p.logf("camera: field of view %.1f°, distance %.3f", fov*180/math.Pi, cam.Distance)
+	rng := rand.New(rand.NewPCG(o.Seed, 0x7472656c6c697332))
+	noise := func(n int) []float32 {
+		out := make([]float32, n)
+		for i := range out {
+			out[i] = float32(rng.NormFloat64())
+		}
+		return out
+	}
+	steps := func(s SamplerParams) SamplerParams {
+		if o.Steps > 0 {
+			s.Steps = o.Steps
+		}
+		return s
+	}
+
+	// Stage 1: structure, from features projected onto the whole 16³ grid.
+	glob, patches, err := p.encodeSplit(img, 512)
+	if err != nil {
+		return nil, err
+	}
+	base, err := p.checkpoint("sparse_structure_flow_model")
+	if err != nil {
+		return nil, err
+	}
+	scfg, err := LoadFlowConfig(base + ".json")
+	if err != nil {
+		return nil, err
+	}
+	proj, err := ProjectFeatures(cam, GridCoords(scfg.Resolution), scfg.Resolution, 512, patches, nil)
+	if err != nil {
+		return nil, err
+	}
+	cells, err := p.structure(glob, proj, 32, noise, steps(p.cfg.StructureSampler.params()))
+	if err != nil {
+		return nil, err
+	}
+	p.logf("structure: %d occupied cells of 32³", len(cells))
+
+	// Stage 2: the shape latent at 512, features upsampled to 512².
+	shapeSampler := steps(p.cfg.ShapeSampler.params())
+	if proj, err = p.projected(img, cam, cells, 32, 512, 512, patches); err != nil {
+		return nil, err
+	}
+	low, _, err := p.sample("shape_slat_flow_model_512", "shape (512)", cells, glob, proj, nil, noise, shapeSampler)
+	if err != nil {
+		return nil, err
+	}
+
+	// Stage 3: refine the cells, then the shape latent on the finer grid.
+	cells, res, err := p.refineCells(cells, low, target, o.MaxTokens, true)
+	if err != nil {
+		return nil, err
+	}
+	p.logf("cascade: %d cells at resolution %d", len(cells), res)
+	if glob, patches, err = p.encodeSplit(img, 1024); err != nil {
+		return nil, err
+	}
+	if proj, err = p.projected(img, cam, cells, res/16, 1024, 512, patches); err != nil {
+		return nil, err
+	}
+	shape, _, err := p.sample("shape_slat_flow_model_1024", "shape", cells, glob, proj, nil, noise, shapeSampler)
+	if err != nil {
+		return nil, err
+	}
+
+	// Stage 4: texture, features upsampled to the full 1024².
+	if proj, err = p.projected(img, cam, cells, res/16, 1024, 1024, patches); err != nil {
+		return nil, err
+	}
+	tex, _, err := p.sample("tex_slat_flow_model_1024", "texture", cells, glob, proj, shape, noise, steps(p.cfg.TexSampler.params()))
+	if err != nil {
+		return nil, err
+	}
+	return p.decode(cells, shape, tex, res)
+}
+
+// encodeSplit runs the image encoder and splits its tokens into the global
+// ones (class and registers) and the patch map.
+func (p *Pipeline) encodeSplit(img *image.NRGBA, size int) (glob, patches *tensor.Tensor, err error) {
+	feats, err := p.encode(img, size)
+	if err != nil {
+		return nil, nil, err
+	}
+	n := (size / 16) * (size / 16)
+	T, C := feats.Shape()[0], feats.Shape()[1]
+	if T <= n {
+		return nil, nil, fmt.Errorf("trellis2: %d image tokens leave no global tokens beside %d patches", T, n)
+	}
+	g := T - n
+	glob, patches = tensor.New(tensor.F32, g, C), tensor.New(tensor.F32, n, C)
+	copy(glob.F32(), feats.F32()[:g*C])
+	copy(patches.F32(), feats.F32()[g*C:])
+	return glob, patches, nil
+}
+
+// projected builds a stage's per-cell image features: the patch features
+// and their NAF-upsampled version (to up×up, guided by the image at
+// imageRes), both sampled at the cells' projections from a grid³ grid.
+func (p *Pipeline) projected(img *image.NRGBA, cam Camera, cells []sparse.Coord, grid, imageRes, up int, patches *tensor.Tensor) (*tensor.Tensor, error) {
+	start := time.Now()
+	f, err := safetensors.Open(p.Upsampler)
+	if err != nil {
+		return nil, fmt.Errorf("trellis2: upsampler: %w", err)
+	}
+	defer f.Close()
+	g, err := BuildNAFEncoder(f, imageRes, up)
+	if err != nil {
+		return nil, err
+	}
+	s, err := graph.Compile(g)
+	if err != nil {
+		return nil, fmt.Errorf("trellis2: upsampler: %w", err)
+	}
+	res, err := s.Run(map[string]*tensor.Tensor{"image": imageTensor(img, imageRes, false)})
+	if err != nil {
+		return nil, fmt.Errorf("trellis2: upsampler: %w", err)
+	}
+	hr, err := Upsample(res["q"], patches, up)
+	if err != nil {
+		return nil, err
+	}
+	out, err := ProjectFeatures(cam, cells, grid, imageRes, patches, hr)
+	p.logf("projected features for %d cells (upsampled to %d², %.1fs)", len(cells), up, time.Since(start).Seconds())
+	return out, err
 }
 
 // open maps a checkpoint and returns its base path.
@@ -290,7 +459,7 @@ func (p *Pipeline) encode(img *image.NRGBA, size int) (*tensor.Tensor, error) {
 }
 
 // sample runs a flow model's sampler over coords from noise.
-func (p *Pipeline) sample(name, what string, coords []sparse.Coord, cond *tensor.Tensor, concat []float32,
+func (p *Pipeline) sample(name, what string, coords []sparse.Coord, cond, proj *tensor.Tensor, concat []float32,
 	noise func(int) []float32, params SamplerParams) ([]float32, FlowConfig, error) {
 	base, f, err := p.open(name)
 	if err != nil {
@@ -310,7 +479,16 @@ func (p *Pipeline) sample(name, what string, coords []sparse.Coord, cond *tensor
 	if concat != nil {
 		state = cfg.InChannels - len(concat)/T
 	}
-	run := FlowVelocity(r, T, cfg.InChannels, cond, tensor.New(tensor.F32, cond.Shape()...))
+	// The condition's keys and values are the same in every evaluation:
+	// once for the image features, once for the all-zeros negative.
+	kv, err := FlowConditions(cfg, f, cfg.NumBlocks, cond, tensor.New(tensor.F32, cond.Shape()...))
+	if err != nil {
+		if s, ok := r.(interface{ Close() }); ok {
+			s.Close()
+		}
+		return nil, cfg, fmt.Errorf("trellis2: %s: %w", name, err)
+	}
+	run := FlowVelocity(r, T, cfg.InChannels, kv[0], kv[1], proj)
 	vel := run
 	if concat != nil {
 		// The condition's channels follow the state's in every row.
@@ -365,7 +543,7 @@ func (p *Pipeline) compileFlow(cfg FlowConfig, f *safetensors.File, coords []spa
 
 // structure samples the sparse-structure latent and decodes it to the
 // occupied cells of a res³ grid.
-func (p *Pipeline) structure(cond *tensor.Tensor, res int, noise func(int) []float32, params SamplerParams) ([]sparse.Coord, error) {
+func (p *Pipeline) structure(cond, proj *tensor.Tensor, res int, noise func(int) []float32, params SamplerParams) ([]sparse.Coord, error) {
 	base, err := p.checkpoint("sparse_structure_flow_model")
 	if err != nil {
 		return nil, err
@@ -375,7 +553,7 @@ func (p *Pipeline) structure(cond *tensor.Tensor, res int, noise func(int) []flo
 		return nil, err
 	}
 	n := fcfg.Resolution
-	z, _, err := p.sample("sparse_structure_flow_model", "structure", GridCoords(n), cond, nil, noise, params)
+	z, _, err := p.sample("sparse_structure_flow_model", "structure", GridCoords(n), cond, proj, nil, noise, params)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +602,7 @@ func (p *Pipeline) structure(cond *tensor.Tensor, res int, noise func(int) []flo
 // the same cells that conditions it.
 func (p *Pipeline) latent(name, what string, cells []sparse.Coord, cond *tensor.Tensor, concat []float32,
 	noise func(int) []float32, params SamplerParams) ([]float32, error) {
-	out, _, err := p.sample(name, what, cells, cond, concat, noise, params)
+	out, _, err := p.sample(name, what, cells, cond, nil, concat, noise, params)
 	return out, err
 }
 
@@ -445,7 +623,12 @@ func denormalize(x []float32, n Normalization) (*tensor.Tensor, error) {
 // far enough to know its surface cells at 512³, and those are regrouped
 // onto the latent grid of the target resolution — as fine as fits within
 // maxTokens.
-func (p *Pipeline) refineCells(cells []sparse.Coord, low []float32, target, maxTokens int) ([]sparse.Coord, int, error) {
+//
+// spread selects how a 512³ cell maps to the finer latent grid: false
+// scales cell centres by grid/512 and truncates (TRELLIS.2); true scales
+// them by (grid−1)/512 and rounds half to even (Pixal3D, whose projection
+// grid puts cell 0 and cell grid−1 on the cube's faces).
+func (p *Pipeline) refineCells(cells []sparse.Coord, low []float32, target, maxTokens int, spread bool) ([]sparse.Coord, int, error) {
 	const lowRes = 512
 	base, f, err := p.open("shape_slat_decoder")
 	if err != nil {
@@ -471,7 +654,11 @@ func (p *Pipeline) refineCells(cells []sparse.Coord, low []float32, target, maxT
 		for _, c := range d.Coords {
 			var q sparse.Coord
 			for a := range 3 {
-				q[a] = int32((float32(c[a]) + 0.5) / lowRes * float32(grid))
+				if spread {
+					q[a] = int32(math.RoundToEven(float64((float32(c[a]) + 0.5) / lowRes * float32(grid-1))))
+				} else {
+					q[a] = int32((float32(c[a]) + 0.5) / lowRes * float32(grid))
+				}
 			}
 			if !seen[q] {
 				seen[q] = true
@@ -548,20 +735,27 @@ func (p *Pipeline) decode(cells []sparse.Coord, shape, tex []float32, resolution
 	return mesh, nil
 }
 
-// FindSnapshot locates repo ("org/name") in the Hugging Face cache
-// ($HF_HUB_CACHE, $HF_HOME/hub, or ~/.cache/huggingface/hub).
+// HubDir is the Hugging Face cache directory: $HF_HUB_CACHE, $HF_HOME/hub,
+// or ~/.cache/huggingface/hub.
+func HubDir() (string, error) {
+	if hub := os.Getenv("HF_HUB_CACHE"); hub != "" {
+		return hub, nil
+	}
+	if home := os.Getenv("HF_HOME"); home != "" {
+		return filepath.Join(home, "hub"), nil
+	}
+	u, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("trellis2: %w", err)
+	}
+	return filepath.Join(u, ".cache", "huggingface", "hub"), nil
+}
+
+// FindSnapshot locates repo ("org/name") in the Hugging Face cache.
 func FindSnapshot(repo string) (string, error) {
-	hub := os.Getenv("HF_HUB_CACHE")
-	if hub == "" {
-		if home := os.Getenv("HF_HOME"); home != "" {
-			hub = filepath.Join(home, "hub")
-		} else {
-			u, err := os.UserHomeDir()
-			if err != nil {
-				return "", fmt.Errorf("trellis2: %w", err)
-			}
-			hub = filepath.Join(u, ".cache", "huggingface", "hub")
-		}
+	hub, err := HubDir()
+	if err != nil {
+		return "", err
 	}
 	snaps, _ := filepath.Glob(filepath.Join(hub, "models--"+strings.ReplaceAll(repo, "/", "--"), "snapshots", "*"))
 	for i := len(snaps) - 1; i >= 0; i-- {

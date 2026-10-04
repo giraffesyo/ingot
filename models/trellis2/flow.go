@@ -25,6 +25,24 @@ type FlowConfig struct {
 	ShareMod       bool    `json:"share_mod"`
 	QKRMSNorm      bool    `json:"qk_rms_norm"`
 	QKRMSNormCross bool    `json:"qk_rms_norm_cross"`
+	// ImageAttnMode is "cross" (or empty): cross-attention to the image
+	// tokens; or "proj": cross-attention to the image's global tokens plus,
+	// per token, a linear projection of image features sampled where the
+	// token's cell projects into the image (Pixal3D).
+	ImageAttnMode  string `json:"image_attn_mode"`
+	ProjInChannels int    `json:"proj_in_channels"`
+}
+
+// ProjChannels is the width of the per-token projected image features, or
+// 0 for a model without them.
+func (c FlowConfig) ProjChannels() int {
+	if c.ImageAttnMode != "proj" {
+		return 0
+	}
+	if c.ProjInChannels != 0 {
+		return c.ProjInChannels
+	}
+	return c.CondChannels
 }
 
 // LoadFlowConfig reads a flow checkpoint's JSON (path without extension +
@@ -44,6 +62,9 @@ func LoadFlowConfig(path string) (FlowConfig, error) {
 	if a.PEMode != "rope" || !a.ShareMod || !a.QKRMSNorm || !a.QKRMSNormCross {
 		return a, fmt.Errorf("trellis2: %s: flow variant not implemented (pe_mode=%q share_mod=%v qk_rms_norm=%v/%v)",
 			path, a.PEMode, a.ShareMod, a.QKRMSNorm, a.QKRMSNormCross)
+	}
+	if a.ImageAttnMode != "" && a.ImageAttnMode != "cross" && a.ImageAttnMode != "proj" {
+		return a, fmt.Errorf("trellis2: %s: image_attn_mode %q not implemented", path, a.ImageAttnMode)
 	}
 	if a.NumHeads == 0 || a.ModelChannels%a.NumHeads != 0 || (a.ModelChannels/a.NumHeads)%2 != 0 {
 		return a, fmt.Errorf("trellis2: %s: %d channels over %d heads", path, a.ModelChannels, a.NumHeads)
@@ -100,9 +121,18 @@ type flow struct {
 	w   weights
 }
 
+// crossKey and crossValue name block i's cross-attention keys and values:
+// outputs of BuildFlowCond, inputs of BuildFlow.
+func crossKey(i int) string   { return fmt.Sprintf("blocks.%d.cross_k", i) }
+func crossValue(i int) string { return fmt.Sprintf("blocks.%d.cross_v", i) }
+
 // BuildFlow builds one velocity evaluation of a flow transformer over the
 // tokens at coords: inputs "x" [T, in_channels], "t" [1] (flow time in
-// [0, 1]) and "cond" [condTokens, cond_channels]; output "v" [T,
+// [0, 1]) and every block's cross-attention keys and values
+// ("blocks.<i>.cross_k" / "cross_v", [1, condTokens, heads, head_dim] —
+// BuildFlowCond's outputs, which depend on the condition alone and so are
+// computed once per condition, not once per evaluation) — plus "proj" [T,
+// ProjChannels] for a model with projected image features; output "v" [T,
 // out_channels]. The sparse-structure model runs it over GridCoords; the
 // structured-latent models over the occupied voxels, with any concatenated
 // condition already appended to x's channels. blocks < cfg.NumBlocks
@@ -116,7 +146,10 @@ func BuildFlow(cfg FlowConfig, f *safetensors.File, coords [][3]int32, condToken
 	T, D, dh := len(coords), cfg.ModelChannels, cfg.headDim()
 	x := b.Input("x", tensor.F32, T, cfg.InChannels)
 	t := b.Input("t", tensor.F32, 1)
-	cond := b.Input("cond", tensor.F32, condTokens, cfg.CondChannels)
+	var proj *graph.Value
+	if pc := cfg.ProjChannels(); pc > 0 {
+		proj = b.Input("proj", tensor.F32, T, pc)
+	}
 
 	wt, bias := m.w.linear("input_layer")
 	h := b.Scope("input_layer").Linear(x, wt, bias)
@@ -125,11 +158,40 @@ func BuildFlow(cfg FlowConfig, f *safetensors.File, coords [][3]int32, condToken
 	cos := b.Const("rope_cos", tensor.FromF32(c, T, dh/2))
 	sin := b.Const("rope_sin", tensor.FromF32(s, T, dh/2))
 	for i := range blocks {
-		h = m.block(b.Scope(fmt.Sprintf("blocks.%d", i)), m.w.scope(fmt.Sprintf("blocks.%d", i)), h, mod, cond, T, condTokens, cos, sin)
+		k := b.Input(crossKey(i), tensor.F32, 1, condTokens, cfg.NumHeads, dh)
+		v := b.Input(crossValue(i), tensor.F32, 1, condTokens, cfg.NumHeads, dh)
+		h = m.block(b.Scope(fmt.Sprintf("blocks.%d", i)), m.w.scope(fmt.Sprintf("blocks.%d", i)), h, mod, k, v, proj, T, cos, sin)
 	}
 	h = b.LayerNorm(h, D, nil, nil, 1e-5)
 	wt, bias = m.w.linear("out_layer")
 	b.Output("v", b.Scope("out_layer").Linear(h, wt, bias))
+	return b.Build()
+}
+
+// BuildFlowCond builds the condition half of a flow transformer: input
+// "cond" [condTokens, cond_channels]; outputs, per block, the
+// cross-attention keys (to_kv, RMS-normalised) and values BuildFlow takes.
+// A sampling run evaluates it once per condition (the image features, the
+// negative) rather than once per velocity evaluation. The weights stay in
+// the checkpoint's dtype: the graph is small and runs on the CPU.
+func BuildFlowCond(cfg FlowConfig, f *safetensors.File, condTokens, blocks int) (g *graph.Graph, err error) {
+	defer catch(&err)
+	m := &flow{cfg: cfg, w: weights{f: f}}
+	b := graph.NewBuilder("trellis2_flow_cond")
+	D, H, dh, L := int64(cfg.ModelChannels), int64(cfg.NumHeads), int64(cfg.headDim()), int64(condTokens)
+	cond := b.Input("cond", tensor.F32, condTokens, cfg.CondChannels)
+	for i := range blocks {
+		ca := b.Scope(fmt.Sprintf("blocks.%d.cross_attn", i))
+		wc := m.w.scope(fmt.Sprintf("blocks.%d.cross_attn", i))
+		if cfg.ProjChannels() > 0 {
+			wc = wc.scope("cross_attn_block") // see block
+		}
+		wt, bias := wc.linear("to_kv")
+		kv := ca.Linear(cond, wt, bias)
+		k := m.rmsNorm(ca, ca.Reshape(ca.Slice(kv, 1, 0, D), L, H, dh), wc.f32("k_rms_norm.gamma"))
+		b.Output(crossKey(i), ca.Reshape(k, 1, L, H, dh))
+		b.Output(crossValue(i), ca.Reshape(ca.Slice(kv, 1, D, 2*D), 1, L, H, dh))
+	}
 	return b.Build()
 }
 
@@ -173,9 +235,10 @@ func (m *flow) rmsNorm(b *graph.Builder, x *graph.Value, gamma *tensor.Tensor) *
 }
 
 // block is ModulatedTransformerCrossBlock (share_mod) over x [T, dim]:
-// modulated self-attention with rotary positions, cross-attention to cond,
-// modulated MLP.
-func (m *flow) block(b *graph.Builder, w weights, x, tmod, cond *graph.Value, T, L int, cos, sin *graph.Value) *graph.Value {
+// modulated self-attention with rotary positions, cross-attention to the
+// condition's keys and values ck, cv (see BuildFlowCond) — plus the
+// projected features' linear, when the model has them — modulated MLP.
+func (m *flow) block(b *graph.Builder, w weights, x, tmod, ck, cv, proj *graph.Value, T int, cos, sin *graph.Value) *graph.Value {
 	D, H, dh := int64(m.cfg.ModelChannels), int64(m.cfg.NumHeads), int64(m.cfg.headDim())
 	mod := b.Add(b.Const("modulation", w.f32("modulation").Reshape(1, int(6*D))), tmod)
 	chunk := func(i int64) *graph.Value { return b.Slice(mod, 1, i*D, (i+1)*D) }
@@ -197,17 +260,24 @@ func (m *flow) block(b *graph.Builder, w weights, x, tmod, cond *graph.Value, T,
 	wt, bias = ws.linear("to_out")
 	x = b.Add(x, b.Mul(sa.Linear(o, wt, bias), gateA))
 
+	// With projected features the cross-attention is nested one level down
+	// (ProjectAttention.cross_attn_block), next to its proj_linear.
 	ca, wc := b.Scope("cross_attn"), w.scope("cross_attn")
+	wp := wc
+	if proj != nil {
+		wc = wc.scope("cross_attn_block")
+	}
 	y = b.LayerNorm(x, int(D), w.f32("norm2.weight"), w.f32("norm2.bias"), 1e-6)
 	wt, bias = wc.linear("to_q")
 	q = batch(ca, m.rmsNorm(ca, heads(ca, ca.Linear(y, wt, bias), T), wc.f32("q_rms_norm.gamma")), T)
-	wt, bias = wc.linear("to_kv")
-	kv := ca.Linear(cond, wt, bias)
-	k = batch(ca, m.rmsNorm(ca, heads(ca, ca.Slice(kv, 1, 0, D), L), wc.f32("k_rms_norm.gamma")), L)
-	v = batch(ca, ca.Slice(kv, 1, D, 2*D), L)
-	o = ca.Reshape(ca.Op("ingot.SDPA", m.sdpaAttrs(), q, k, v), int64(T), D)
+	o = ca.Reshape(ca.Op("ingot.SDPA", m.sdpaAttrs(), q, ck, cv), int64(T), D)
 	wt, bias = wc.linear("to_out")
-	x = b.Add(x, ca.Linear(o, wt, bias))
+	o = ca.Linear(o, wt, bias)
+	if proj != nil {
+		wt, bias = wp.linear("proj_linear")
+		o = ca.Add(ca.Scope("proj_linear").Linear(proj, wt, bias), o)
+	}
+	x = b.Add(x, o)
 
 	mb, wm := b.Scope("mlp"), w.scope("mlp.mlp")
 	y = b.Add(b.Mul(b.LayerNorm(x, int(D), nil, nil, 1e-6), b.Add(scaleM, one)), shiftM)

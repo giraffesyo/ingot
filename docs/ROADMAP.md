@@ -559,7 +559,41 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       one vertex per voxel with vertex colour); SparseConv on the GPU and
       skipping empty taps; bf16 or f16 decoder weights in place (they
       are widened to f32 and packed, about 4 GB per decoder).
-- [ ] Pixal3D (pixel-aligned conditioning on the same backbone): needs
-      the MoGe-2 geometry model, the feature upsampler, the projection
-      of image features onto the voxel grid, and the flow blocks'
-      projected-attention mode.
+- [x] Pixal3D (TencentARC/Pixal3D, pixel-aligned conditioning on the
+      TRELLIS.2 backbone), as a second mode of models/trellis2: the flow
+      blocks cross-attend to the image's five global tokens and add a
+      per-block linear projection of image features sampled where each
+      cell projects into the photo; those features are the DINOv3 patch
+      map plus its NAF-upsampled version (valeoai/NAF: two conv encoders
+      and a 9×9 neighbourhood attention, evaluated only at the pixels the
+      cells land on). Parity with PyTorch: projection 4.4e-5, upsampler
+      1.7e-5 (the reference's compiled neighbourhood attention replaced by
+      a plain-torch version of its window rule), flow blocks 9.7e-5, the
+      1.1× subject crop exact. cmd/trellis2 -model TencentARC/Pixal3D:
+      the 1024 cascade end to end in 688 s on Apple Silicon (1,858 cells →
+      8,617 at 64³; a 3.4M-vertex mesh). The time is the two 8,617-token
+      sampling stages (148 s and 162 s) and the CPU sparse decoders at
+      1024³ (224 s). tools/export/naf_convert.py turns the upsampler's
+      pickle into safetensors; safetensors now indexes complex-typed
+      tensors (the checkpoint stores its rotary phases) without reading
+      them.
+- [x] trellis2 flow on the GPU: the condition's cross-attention keys and
+      values are computed once per sampling run (BuildFlowCond) instead of
+      in every block of every evaluation, and staged in the GPU session;
+      under GPUBF16 the executor now plans which activations are read only
+      by bf16 products or the fused attention and produces them in bf16
+      (bias and activation in the product's epilogue, kernels/metal
+      GemmEp), runs self-attention through the fused bf16 kernel, and
+      places ReduceL2 on the GPU (it forced four flushes a block). One
+      evaluation (4,096 tokens, 30 blocks, Apple Silicon): gpu-bf16 1.68 s
+      → 0.85 s best case, gpu f32 2.72 s → 2.29 s; error against the CPU
+      7.3e-3 on outputs to 1.24 (was 6.8e-3). PyTorch on the same GPU in
+      float16: 0.82 s. Measured on a loaded machine.
+- [ ] trellis2 flow: fuse the L2-normalise chain and the modulation
+      passes (about 5 ms a block of small elementwise kernels remain); a
+      smaller attention key block measured 10% faster here but is shared
+      with qwenimage and was left alone.
+- [ ] Pixal3D: the camera's field of view is a flag (default 49.1°) —
+      the reference estimates it with MoGe-2, not ported; the cascade's
+      later stages and the final mesh have no end-to-end parity run; the
+      multi-view models.

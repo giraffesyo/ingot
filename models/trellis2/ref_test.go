@@ -62,6 +62,19 @@ func compile(t testing.TB, g *graph.Graph, err error) *graph.Session {
 	return s
 }
 
+// flowFeeds returns a BuildFlow graph's inputs for one evaluation: x, t and
+// cond's cross-attention keys and values over the first blocks blocks.
+func flowFeeds(t testing.TB, cfg FlowConfig, f *safetensors.File, blocks int, x, cond *tensor.Tensor, time float32) map[string]*tensor.Tensor {
+	t.Helper()
+	kv, err := FlowConditions(cfg, f, blocks, cond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feeds := map[string]*tensor.Tensor(kv[0])
+	feeds["x"], feeds["t"] = x, tensor.FromF32([]float32{time}, 1)
+	return feeds
+}
+
 const refDir = "../../testdata/trellis2"
 
 // refCase is a reference manifest from tools/export/trellis2_ref.py.

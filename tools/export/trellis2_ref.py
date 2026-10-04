@@ -35,14 +35,18 @@ from safetensors.torch import load_file
 
 os.environ.setdefault("ATTN_BACKEND", "sdpa")
 REPO = os.environ.get("TRELLIS2_REPO")
-if not REPO:
-    sys.exit("set TRELLIS2_REPO to a checkout of microsoft/TRELLIS.2")
-# Import the model definitions without the package __init__, which pulls in
-# the renderers and their CUDA extensions.
-pkg = types.ModuleType("trellis2")
-pkg.__path__ = [os.path.join(REPO, "trellis2")]
-sys.modules["trellis2"] = pkg
 
+
+def stub_package(name, repo):
+    """Makes `name` importable from repo/name without running the package's
+    __init__, which pulls in the renderers and their CUDA extensions."""
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [os.path.join(repo, name)]
+    sys.modules[name] = pkg
+
+
+if REPO:
+    stub_package("trellis2", REPO)
 
 
 def _install_cpu_shims():
@@ -111,9 +115,11 @@ def snapshot(repo):
     return snaps[0]
 
 
-T2 = snapshot("microsoft/TRELLIS.2-4B")
-T1 = snapshot("microsoft/TRELLIS-image-large")
-DINO = snapshot("facebook/dinov3-vitl16-pretrain-lvd1689m")
+def _snapshots():
+    global T2, T1, DINO
+    T2 = snapshot("microsoft/TRELLIS.2-4B")
+    T1 = snapshot("microsoft/TRELLIS-image-large")
+    DINO = snapshot("facebook/dinov3-vitl16-pretrain-lvd1689m")
 
 
 def save(name, ins, outs, meta):
@@ -135,7 +141,8 @@ def load_model(cls, path, **override):
     args = json.load(open(path + ".json"))["args"]
     args.update(override)
     model = cls(**args)
-    sd = {k: v.float() for k, v in load_file(path + ".safetensors").items()}
+    # Stored buffers can be complex (rotary phases): cast only real weights.
+    sd = {k: v.float() if v.is_floating_point() else v for k, v in load_file(path + ".safetensors").items()}
     missing, unexpected = model.load_state_dict(sd, strict=False)
     missing = [k for k in missing if "rope_phases" not in k]
     if missing:
@@ -294,6 +301,9 @@ def preprocess(size=512):
 
 
 if __name__ == "__main__":
+    if not REPO:
+        sys.exit("set TRELLIS2_REPO to a checkout of microsoft/TRELLIS.2")
+    _snapshots()
     want = sys.argv[1:] or ["dino", "ss_flow", "ss_dec", "ss_sample", "slat_flow", "slat_dec", "preprocess"]
     for name in want:
         globals()[name]()
