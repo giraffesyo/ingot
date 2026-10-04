@@ -593,7 +593,23 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       passes (about 5 ms a block of small elementwise kernels remain); a
       smaller attention key block measured 10% faster here but is shared
       with qwenimage and was left alone.
-- [ ] Pixal3D: the camera's field of view is a flag (default 49.1°) —
-      the reference estimates it with MoGe-2, not ported; the cascade's
-      later stages and the final mesh have no end-to-end parity run; the
-      multi-view models.
+- [ ] Pixal3D follow-ups:
+      - estimate the camera: port MoGe-2 (the reference derives the
+        horizontal field of view from its intrinsics); until then the
+        field of view is a flag, default 49.1°, and a wrong value
+        distorts the shape;
+      - re-run the cascade end to end on the GPU: the one full run
+        predates the cached cross-attention keys and the half-precision
+        executor path, which only the CPU parity tests cover for the
+        projected-feature models;
+      - an end-to-end parity run against the reference (the cascade's
+        later stages and the mesh were checked by eye);
+      - the multi-view checkpoints;
+      - read the upsampler's released pickle directly, or publish the
+        converted file, so naf_convert.py is not a setup step.
+- [ ] trellis2 follow-ups shared by both models: run and check the 1024
+      and cascade TRELLIS.2 pipelines; mesh hole filling, simplification,
+      UV unwrap and texture baking (a 1024³ mesh is millions of vertices
+      and about 200 MB); SparseConv on the GPU and skipping empty taps
+      (the decoders are a third of a 1024 run); a clean CPU timing of the
+      flow model after the cached-keys change.
