@@ -1,8 +1,16 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [canary]
+  pull_request:
+  merge_group:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Correctness on every arch we ship, natively (no emulation). The race
@@ -22,11 +30,14 @@ jobs:
           - os: windows-latest       # windows/amd64
             race: false
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: "1.26.x"
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - name: Enforce pure Go (no cgo in the library)
         run: CGO_ENABLED=0 go build ./...
         shell: bash
@@ -39,18 +50,103 @@ jobs:
         if: ${{ !matrix.race }}
         run: go test -count=1 ./...
 
+  # gofmt, a tidy go.mod, and golangci-lint (.golangci.yml) type-checked for
+  # each target whose build tags select different files: the amd64 and arm64
+  # kernels, the Metal backend, the Windows mmap path.
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux/amd64, linux/arm64, darwin/arm64, windows/amd64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          [ -z "$out" ] || { echo "not gofmt-clean:"; echo "$out"; exit 1; }
+      - name: go.mod is tidy
+        run: go mod tidy -diff
+      - name: Split target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          echo "GOOS=${TARGET%/*}" >> "$GITHUB_ENV"
+          echo "GOARCH=${TARGET#*/}" >> "$GITHUB_ENV"
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+
+  # Conventional Commits on every new commit, and on the PR title (which
+  # becomes the subject of a squash merge).
+  commits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Lint commit subjects
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT" in
+          pull_request)
+            tools/commitlint.sh -s "$PR_TITLE"
+            range="$PR_BASE..$PR_HEAD" ;;
+          merge_group)
+            range="$MG_BASE..$MG_HEAD" ;;
+          *)
+            # A force push or a new branch has no usable "before".
+            if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              range="$BEFORE..$GITHUB_SHA"
+            else
+              range="$GITHUB_SHA~1..$GITHUB_SHA"
+            fi ;;
+          esac
+          tools/commitlint.sh "$range"
+
+  # Known vulnerabilities reachable from our code (stdlib + modules).
+  vuln:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
   # Cross-compile smoke for targets we can't run here (static, cgo-free).
   cross-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       CGO_ENABLED: "0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: "1.26.x"
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - run: |
-          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64 js/wasm wasip1/wasm; do
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 freebsd/amd64 js/wasm wasip1/wasm; do
             echo "== $t =="
             GOOS=${t%/*} GOARCH=${t#*/} go build ./...
           done
@@ -59,11 +155,14 @@ jobs:
   # kernel/op suites execute in full; the zoo needs testdata not present in CI.
   wasm-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: "1.26.x"
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - run: |
           EXEC="$(go env GOROOT)/lib/wasm/go_js_wasm_exec"
           [ -f "$EXEC" ] || EXEC="$(go env GOROOT)/misc/wasm/go_js_wasm_exec"
@@ -76,20 +175,38 @@ jobs:
   # numbers are interpretable and shows whether the AVX2 path was active.
   bench-amd64:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: "1.26.x"
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - name: CPU info
         run: |
           lscpu | grep -E 'Model name|Flags' | tr ' ' '\n' | grep -E 'avx2|fma|avx512' | sort -u || true
       - name: GEMM + elementwise benchmarks (native AVX2)
         run: |
+          set -o pipefail
           go test -run='^$' -bench='Sgemm|MicroKernel' -benchmem ./kernels/gemm | tee bench-gemm.txt
           go test -run='^$' -bench='Qgemm'              -benchmem ./kernels/gemm | tee bench-qgemm.txt
           go test -run='^$' -bench='Vek'                -benchmem ./kernels/vek  | tee bench-vek.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmarks-amd64
           path: bench-*.txt
+
+  # One status to require in branch protection: green only when every gating
+  # job is (the benchmarks are informational and not listed).
+  ok:
+    if: always()
+    needs: [test, lint, commits, vuln, cross-build, wasm-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done

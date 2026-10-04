@@ -1,0 +1,49 @@
+name: Release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Tagging vX.Y.Z on canary publishes a GitHub release: static cgo-free
+  # binaries of every command for six targets, checksums, and a signed build
+  # provenance attestation (verify: gh attestation verify FILE -R OWNER/REPO).
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write      # create the release
+      id-token: write      # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tag is on canary
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/canary
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false     # release builds never restore a shared cache
+      - name: Test
+        run: CGO_ENABLED=0 go vet ./... && CGO_ENABLED=0 go test -count=1 ./...
+      - name: Build archives
+        run: tools/dist.sh "$GITHUB_REF_NAME"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $pre

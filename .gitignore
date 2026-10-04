@@ -1,4 +1,17 @@
 /bin/
+/dist/
+# Commands built in place (go build ./cmd/...) and their default outputs.
+/ocr
+/onnxrun
+/prosody
+/qwen3tts
+/qwenimage
+/stableaudio
+/trellis2
+*.exe
+/out.png
+/out.wav
+/out.glb
 # Model corpus is regenerable via tools/export (zoo.py / export.py); do not commit binaries.
 /testdata/models/
 
@@ -6,6 +19,8 @@
 *.test
 *.out
 .DS_Store
+.idea/
+.vscode/
 # OCR models are large & license-bound (fetched from RapidOCR); the small
 # synthetic corpus IS committed as the accuracy gate.
 /testdata/ocr/*.onnx
@@ -36,4 +51,7 @@ __pycache__/
 /testdata/layout/v3_io.json
 /testdata/ocr/v5/
 /testdata/realdocs/
-/qwenimage
+# Local QwenImage UI output when launched from the repository root.
+/outputs/
+# TRELLIS.2 reference activations (tools/export/trellis2_ref.py; derived from the checkpoints).
+/testdata/trellis2/
