@@ -99,7 +99,18 @@ by the optimizer.
 - Tests: table-driven; reference-vs-fast property tests with random shapes (seeded).
   Benchmarks named `BenchmarkOp/shape=...`.
 - Generated asm is checked in; the generator (`kernels/*/gen/`) is `go run`-able.
-- `make test`, `make bench`, `make lint`, `make prof`. CI = `CGO_ENABLED=0 make test`.
+- `make test`, `make bench`, `make lint`, `make prof`. CI = `CGO_ENABLED=0 make test`
+  plus `make lint` (golangci-lint, `.golangci.yml`) on linux/amd64, linux/arm64,
+  darwin/arm64 and windows/amd64, and govulncheck.
+- Commits and PR titles are Conventional Commits: `type(scope): description`, the
+  scope being the package (`perf(gemm): …`, `feat(ops,graph): …`). Types: feat, fix,
+  perf, docs, test, bench, refactor, build, ci, chore, style, revert.
+  `make hooks` installs the commit-msg check; CI enforces it.
+- Releases: push a `vX.Y.Z` tag on canary; `.github/workflows/release.yml` builds
+  the archives (`tools/dist.sh`) and publishes them.
+- Never name the machines numbers were measured on (models, providers, hostnames,
+  core counts), other projects, or private hosts — in code, docs or commits. Say
+  "Apple Silicon", "a Zen 5 box". See `AGENTS.md`.
 - Don't add dependencies casually. Allowed: `golang.org/x/*`, `google.golang.org/protobuf`
   (for onnx), `github.com/mmcloughlin/avo` (build-time only). Anything else: justify in PR.
 
