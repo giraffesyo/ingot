@@ -3,7 +3,9 @@
 // tokens split out first, NFC normalisation, the Qwen2/GPT-4-style or the
 // Mistral-style pre-tokenizer split, GPT-2 byte-to-unicode mapping, and
 // merge-rank BPE. Checkpoints without a tokenizer.json (vocab.json +
-// merges.txt) load through LoadBPE.
+// merges.txt) load through LoadBPE. SentencePiece BPE .model files load
+// through LoadSentencePiece, T5-style Unigram tokenizer.json files through
+// LoadUnigram.
 //
 // Configurations outside that subset are rejected at load time rather than
 // tokenised approximately.

@@ -146,12 +146,21 @@ NEG = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，
 
 
 def tokenizer_cases():
+    """umT5 ids as tokenizer.json defines them (the tokenizers library: the
+    Replace normaliser and Metaspace as shipped — what transformers 4.x,
+    the original Wan code and training used). transformers 5 rebuilds T5's
+    backend (WhitespaceSplit before Metaspace, no normaliser), which
+    differs only on text the pipeline's cleaning never produces (tabs,
+    newlines, edge spaces) and on spaces next to inline special tokens;
+    its ids are kept for reference."""
+    from tokenizers import Tokenizer
+    fast = Tokenizer.from_file(os.path.join(SNAP, "tokenizer", "tokenizer.json"))
     tok = AutoTokenizer.from_pretrained(os.path.join(SNAP, "tokenizer"))
     cases = []
     for p in PROMPTS + [NEG]:
         clean = pipeline_wan_i2v.prompt_clean(p)
-        cases.append({"text": p, "clean": clean, "ids": tok(clean, add_special_tokens=True).input_ids,
-                      "raw_ids": tok(p, add_special_tokens=True).input_ids})
+        cases.append({"text": p, "clean": clean, "ids": fast.encode(clean).ids, "raw_ids": fast.encode(p).ids,
+                      "transformers_ids": tok(clean, add_special_tokens=True).input_ids})
     json.dump({"cases": cases}, open(os.path.join(OUT, "tokenizer.json"), "w"), indent=1, ensure_ascii=False)
     print(f"tokenizer: {len(cases)} cases, negative prompt {len(cases[-1]['ids'])} tokens")
 
