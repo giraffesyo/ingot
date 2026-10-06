@@ -360,6 +360,17 @@ func (p *Pipeline) denoise(o *Options, res *Result, grid Grid, texts []*tensor.T
 		return err
 	}
 	defer closeRunner(r)
+	// The text keys and values are the same every step: stage them in the
+	// GPU session once instead of copying them in on every evaluation.
+	if gs, ok := r.(interface {
+		Stage(*tensor.Tensor) *tensor.Tensor
+	}); ok {
+		for _, kv := range kvs {
+			for k, v := range kv {
+				kv[k] = gs.Stage(v)
+			}
+		}
+	}
 	res.Stages["load"] = time.Since(t0)
 	p.logf(o, "wan: transformer ready %.1fs", res.Stages["load"].Seconds())
 

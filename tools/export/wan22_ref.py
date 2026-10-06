@@ -265,7 +265,8 @@ def pipeline_case(te, dit, vae, H=64, W=96, frames=9, steps=4, cfg=5.0):
 
 
 def real():
-    snap = snapshot_download(REPO, local_files_only=True)
+    snap = snapshot_download(REPO, local_files_only=True,
+                             allow_patterns=["*.json", "text_encoder/*", "transformer/*", "vae/*"])
     from safetensors import safe_open
 
     te = UMT5EncoderModel.from_pretrained(snap, subfolder="text_encoder", torch_dtype=torch.float32).eval()
