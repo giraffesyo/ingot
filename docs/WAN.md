@@ -1,6 +1,6 @@
 # Wan 2.2 TI2V-5B (image-to-video)
 
-`models/wan` and `cmd/wan` run Wan 2.2 TI2V-5B — text- and image-to-video —
+`models/wan` and `ingot wan` run Wan 2.2 TI2V-5B — text- and image-to-video —
 in pure Go on the ingot runtime, CPU or Metal GPU.
 
 ## Licence
@@ -20,8 +20,8 @@ carries the same licence. Weights are not part of this repository.
 ```
 hf download Wan-AI/Wan2.2-TI2V-5B-Diffusers --include "*.json" --include "tokenizer/*" \
     --include "text_encoder/*" --include "transformer/*" --include "vae/*"
-go run ./cmd/wan -image hero.png -prompt "her long hair and cloak blow in a strong wind" \
-    -frames 49 -size 832x480 -steps 30 -device gpu-bf16 -out frames -video clip.avi
+go run ./cmd/ingot wan --image hero.png --prompt "her long hair and cloak blow in a strong wind" \
+    --frames 49 --size 832x480 --steps 30 --device gpu-bf16 --out frames --video clip.avi
 ```
 
 About 35 GB on disk: the transformer is stored in float32 (20 GB), umT5-XXL

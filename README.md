@@ -35,11 +35,27 @@ every new commit and PR title.
 
 ## Install
 
+The `ingot` command line:
+
+```
+brew install giraffesyo/tap/ingot
+go install github.com/giraffesyo/ingot/cmd/ingot@latest   # or from source
+```
+
+```
+ingot run --model m.onnx --random --runs 20   # any ONNX model, timed
+ingot ocr --in page.png --format md           # OCR a document
+ingot qwenimage --prompt "a red fox in the snow" --out fox.png
+ingot --help                                  # every subcommand
+```
+
+The library:
+
 ```
 go get github.com/giraffesyo/ingot@latest
 ```
 
-Prebuilt static binaries of the commands (`ocr`, `onnxrun`, `qwenimage`, …) for
+Prebuilt static binaries of `ingot` for
 Linux, macOS and Windows on amd64/arm64 are attached to each
 [release](https://github.com/giraffesyo/ingot/releases), with `checksums.txt` and a
 build provenance attestation (`gh attestation verify <archive> -R giraffesyo/ingot`).

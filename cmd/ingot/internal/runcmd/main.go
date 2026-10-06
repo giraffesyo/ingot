@@ -1,19 +1,18 @@
-// Command onnxrun loads an ONNX model and runs it: on inputs from .npy
-// files, or seeded random ones — for conformance checks against ONNX
-// Runtime / PyTorch (-ref compares outputs with reference .npy files) and
-// quick timings.
+// Package runcmd is ingot run: it loads an ONNX model and runs it, on
+// inputs from .npy files or seeded random ones — for conformance checks
+// against ONNX Runtime / PyTorch (--ref compares outputs with reference .npy
+// files) and quick timings.
 //
-//	onnxrun -model m.onnx -in input_values=x.npy -out outdir
-//	onnxrun -model m.onnx -random -dim 16000 -runs 20 -device gpu
-//	onnxrun -model m.onnx -in x=x.npy -ref logits=logits_ort.npy
+//	ingot run --model m.onnx --in input_values=x.npy --out outdir
+//	ingot run --model m.onnx --random --dim 16000 --runs 20 --device gpu
+//	ingot run --model m.onnx --in x=x.npy --ref logits=logits_ort.npy
 //
-// Inputs not given with -in are random when -random is set (f32 normal,
-// integers in [0, 10), bools false); their dynamic dims take -dim, or a
-// full shape from -shape name=1x3x224x224.
-package main
+// Inputs not given with --in are random when --random is set (f32 normal,
+// integers in [0, 10), bools false); their dynamic dims take --dim, or a
+// full shape from --shape name=1x3x224x224.
+package runcmd
 
 import (
-	"flag"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -24,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/giraffesyo/ingot/graph"
 	"github.com/giraffesyo/ingot/onnx"
 	"github.com/giraffesyo/ingot/tensor"
@@ -31,7 +32,12 @@ import (
 
 type kv map[string]string
 
-func (m kv) String() string { return fmt.Sprint(map[string]string(m)) }
+func (m kv) String() string {
+	if len(m) == 0 {
+		return "" // no "(default map[])" in --help
+	}
+	return fmt.Sprint(map[string]string(m))
+}
 func (m kv) Set(s string) error {
 	k, v, ok := strings.Cut(s, "=")
 	if !ok || k == "" {
@@ -40,47 +46,65 @@ func (m kv) Set(s string) error {
 	m[k] = v
 	return nil
 }
+func (m kv) Type() string { return "name=value" }
 
-func main() {
-	model := flag.String("model", "", "ONNX model (required)")
-	ins, shapes, refs := kv{}, kv{}, kv{}
-	flag.Var(ins, "in", "input from a .npy file: name=path (repeatable)")
-	flag.Var(shapes, "shape", "shape of a random input: name=1x3x224x224 (repeatable)")
-	flag.Var(refs, "ref", "compare an output with a reference .npy: name=path (repeatable)")
-	random := flag.Bool("random", false, "fill inputs not given with -in with seeded random data")
-	dim := flag.Int("dim", 1, "value for dynamic dims of random inputs")
-	seed := flag.Uint64("seed", 1, "random input seed")
-	device := flag.String("device", "cpu", "cpu, gpu, gpu-bf16 or auto")
-	runs := flag.Int("runs", 1, "runs to time (reports the median)")
-	out := flag.String("out", "", "directory to write each output as <name>.npy")
-	flag.Parse()
-	if *model == "" {
-		fmt.Fprintln(os.Stderr, "onnxrun: -model is required")
-		flag.Usage()
-		os.Exit(2)
+type options struct {
+	model, device, out string
+	ins, shapes, refs  kv
+	random             bool
+	dim, runs          int
+	seed               uint64
+}
+
+// Command returns the run subcommand.
+func Command() *cobra.Command {
+	o := options{ins: kv{}, shapes: kv{}, refs: kv{}}
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run an ONNX model on .npy or random inputs; compare and time it",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return run(o)
+		},
 	}
+	f := cmd.Flags()
+	f.StringVar(&o.model, "model", "", "ONNX model (required)")
+	f.Var(o.ins, "in", "input from a .npy file: name=path (repeatable)")
+	f.Var(o.shapes, "shape", "shape of a random input: name=1x3x224x224 (repeatable)")
+	f.Var(o.refs, "ref", "compare an output with a reference .npy: name=path (repeatable)")
+	f.BoolVar(&o.random, "random", false, "fill inputs not given with --in with seeded random data")
+	f.IntVar(&o.dim, "dim", 1, "value for dynamic dims of random inputs")
+	f.Uint64Var(&o.seed, "seed", 1, "random input seed")
+	f.StringVar(&o.device, "device", "cpu", "cpu, gpu, gpu-bf16 or auto")
+	f.IntVar(&o.runs, "runs", 1, "runs to time (reports the median)")
+	f.StringVar(&o.out, "out", "", "directory to write each output as <name>.npy")
+	_ = cmd.MarkFlagRequired("model")
+	return cmd
+}
+
+func run(o options) error {
 	t0 := time.Now()
-	m, err := onnx.DecodeFile(*model)
+	m, err := onnx.DecodeFile(o.model)
 	if err != nil {
-		fail(err)
+		return err
 	}
 	g, err := graph.FromONNX(m)
 	if err != nil {
-		fail(err)
+		return err
 	}
 	inputs := g.Inputs // the compiled graph's inputs, read before optimisation
-	r, err := graph.CompileOn(g, *device)
+	r, err := graph.CompileOn(g, o.device)
 	if err != nil {
-		fail(err)
+		return err
 	}
-	fmt.Fprintf(os.Stderr, "onnxrun: %s loaded on %s in %.2f s\n", filepath.Base(*model), *device, time.Since(t0).Seconds())
+	fmt.Fprintf(os.Stderr, "run: %s loaded on %s in %.2f s\n", filepath.Base(o.model), o.device, time.Since(t0).Seconds())
 
-	rng := rand.New(rand.NewPCG(*seed, *seed^0x5eed))
+	rng := rand.New(rand.NewPCG(o.seed, o.seed^0x5eed))
 	feeds := map[string]*tensor.Tensor{}
-	for name, path := range ins {
+	for name, path := range o.ins {
 		t, err := readNPY(path)
 		if err != nil {
-			fail(err)
+			return err
 		}
 		feeds[name] = t
 	}
@@ -88,18 +112,18 @@ func main() {
 		if v.Const != nil || feeds[v.Name] != nil {
 			continue
 		}
-		if !*random {
-			fail(fmt.Errorf("input %q (%s %v) not given: pass -in %s=x.npy or -random", v.Name, v.DType, v.Shape, v.Name))
+		if !o.random {
+			return fmt.Errorf("input %q (%s %v) not given: pass --in %s=x.npy or --random", v.Name, v.DType, v.Shape, v.Name)
 		}
 		shape := append([]int(nil), v.Shape...)
-		if s, ok := shapes[v.Name]; ok {
+		if s, ok := o.shapes[v.Name]; ok {
 			if shape, err = parseShape(s); err != nil {
-				fail(err)
+				return err
 			}
 		}
 		for i, d := range shape {
 			if d < 0 {
-				shape[i] = *dim
+				shape[i] = o.dim
 			}
 		}
 		feeds[v.Name] = randomTensor(rng, v.DType, shape)
@@ -110,24 +134,24 @@ func main() {
 			found = found || v.Name == name
 		}
 		if !found {
-			fail(fmt.Errorf("the model has no input %q", name))
+			return fmt.Errorf("the model has no input %q", name)
 		}
 	}
 
 	var res map[string]*tensor.Tensor
 	var times []time.Duration
-	for range max(1, *runs) {
+	for range max(1, o.runs) {
 		if res != nil {
 			r.Release(res)
 		}
 		t := time.Now()
 		if res, err = r.Run(feeds); err != nil {
-			fail(err)
+			return err
 		}
 		times = append(times, time.Since(t))
 	}
 	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
-	fmt.Fprintf(os.Stderr, "onnxrun: run %v (median of %d; min %v)\n", times[len(times)/2], len(times), times[0])
+	fmt.Fprintf(os.Stderr, "run: run %v (median of %d; min %v)\n", times[len(times)/2], len(times), times[0])
 
 	names := make([]string, 0, len(res))
 	for n := range res {
@@ -137,35 +161,36 @@ func main() {
 	for _, n := range names {
 		t := res[n]
 		fmt.Printf("%-24s %-4s %-18v %s\n", n, t.DType(), t.Shape(), stats(t))
-		if p, ok := refs[n]; ok {
+		if p, ok := o.refs[n]; ok {
 			ref, err := readNPY(p)
 			if err != nil {
-				fail(err)
+				return err
 			}
 			fmt.Printf("%-24s vs %s: %s\n", "", filepath.Base(p), compare(t, ref))
 		}
-		if *out != "" {
-			if err := os.MkdirAll(*out, 0o755); err != nil {
-				fail(err)
+		if o.out != "" {
+			if err := os.MkdirAll(o.out, 0o755); err != nil {
+				return err
 			}
-			f, err := os.Create(filepath.Join(*out, sanitize(n)+".npy"))
+			f, err := os.Create(filepath.Join(o.out, sanitize(n)+".npy"))
 			if err != nil {
-				fail(err)
+				return err
 			}
 			if err := writeNPY(f, t); err != nil {
 				f.Close()
-				fail(fmt.Errorf("output %s: %w", n, err))
+				return fmt.Errorf("output %s: %w", n, err)
 			}
 			if err := f.Close(); err != nil {
-				fail(err)
+				return err
 			}
 		}
 	}
-	for n := range refs {
+	for n := range o.refs {
 		if res[n] == nil {
-			fail(fmt.Errorf("-ref %s: no such output", n))
+			return fmt.Errorf("--ref %s: no such output", n)
 		}
 	}
+	return nil
 }
 
 func parseShape(s string) ([]int, error) {
@@ -279,9 +304,4 @@ func sanitize(s string) string {
 		}
 		return r
 	}, s)
-}
-
-func fail(err error) {
-	fmt.Fprintln(os.Stderr, "onnxrun:", err)
-	os.Exit(1)
 }

@@ -86,7 +86,7 @@ jobs finish their current stage or denoising step before releasing resources.
 - Image editing requires Metal on Apple Silicon, as in the existing pipeline.
   The UI inherits QwenImage's substantial model-memory requirements.
 - A failed decode retains `image.png.latents`. Recover using the normal CLI:
-  `qwenimage -model /path/to/snapshot -from-latents outputs/<id>/image.png.latents -out recovered.png`.
+  `ingot qwenimage --model /path/to/snapshot --from-latents outputs/<id>/image.png.latents --out recovered.png`.
 
 ## Build isolation and checks
 

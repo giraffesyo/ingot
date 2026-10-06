@@ -49,8 +49,8 @@ No regression merges.
 ## Architecture (layers, strict dependency direction: top depends on bottom)
 
 ```
-cmd/ocr, cmd/onnxrun,      CLIs
-cmd/qwenimage
+cmd/ingot                  the CLI (cobra): run, ocr, qwenimage, wan, ...; one
+cmd/qwenimage-ui           package per subcommand under cmd/ingot/internal
 models/ocr                 detection (DBNet++), recognition (SVTR/PARSeq), pre/post-proc, pipeline
 models/qwenimage           Qwen-Image-2.1: text encoder, DiT, VAE, scheduler, pipeline
 tokenizer                  byte-level BPE (HF tokenizer.json)
@@ -112,7 +112,8 @@ by the optimizer.
   core counts), other projects, or private hosts — in code, docs or commits. Say
   "Apple Silicon", "a Zen 5 box". See `AGENTS.md`.
 - Don't add dependencies casually. Allowed: `golang.org/x/*`, `google.golang.org/protobuf`
-  (for onnx), `github.com/mmcloughlin/avo` (build-time only). Anything else: justify in PR.
+  (for onnx), `github.com/mmcloughlin/avo` (build-time only), `github.com/spf13/cobra`
+  (`cmd/ingot` only; never imported by the library packages). Anything else: justify in PR.
 
 ## Roadmap (see docs/ROADMAP.md)
 
