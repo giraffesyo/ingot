@@ -40,6 +40,53 @@ func TestAVX512MatchesGeneric(t *testing.T) {
 	}
 }
 
+// TestPairModeNarrowEdge: with the AVX-512 kernel active, the packed-B
+// small-M sweep pairs panels; a pair whose second panel is a narrow edge
+// (n = 24: a full panel and an 8-wide one) runs as two singles, and the
+// edge must still be written. The init probe picks AVX-512 only where it is
+// faster, so the test forces it.
+func TestPairModeNarrowEdge(t *testing.T) {
+	if !HasAVX512 {
+		t.Skip("no AVX-512F")
+	}
+	defer func(k func(int, []float32, []float32, []float32, int, bool, []float32), name string) {
+		microKernel, ActiveKernel = k, name
+	}(microKernel, ActiveKernel)
+	microKernel, ActiveKernel = microKernelAVX512, "avx512"
+	r := rand.New(rand.NewPCG(41, 42))
+	for _, c := range []struct{ m, n, k int }{
+		// NR+8, 3·NR+5: the last pair ends in a narrow edge; 2·NR+8: a lone
+		// edge panel; 4·NR: pairs only. m=64, k=24 is SparseConv's 1-tap case.
+		{64, NR + 8, 24}, {7, NR + 8, 5}, {13, 3*NR + 5, 33}, {6, 2*NR + 8, 400},
+		{9, 4 * NR, 17}, {64, 1000, 24},
+	} {
+		a, b, bias := randMat(r, c.m*c.k), randMat(r, c.k*c.n), randMat(r, c.n)
+		pb := PackB(false, c.k, c.n, b, c.n)
+		for _, withBias := range []bool{false, true} {
+			var e Epilogue
+			if withBias {
+				e.Bias = bias
+			}
+			want := epiRef(c.m, c.n, c.k, a, b, e.Bias, nil, 0, nil)
+			got := make([]float32, c.m*c.n)
+			for i := range got {
+				got[i] = float32(math.NaN()) // an unwritten element fails
+			}
+			if withBias {
+				SgemmPackedBEpi(c.m, a, c.k, pb, got, c.n, &e)
+			} else {
+				SgemmPackedB(c.m, 1, a, c.k, pb, 0, got, c.n)
+			}
+			tol := 1e-5 * math.Sqrt(float64(c.k))
+			for i, w := range want {
+				if g := float64(got[i]); !(math.Abs(g-w) <= tol*(1+math.Abs(w))) {
+					t.Fatalf("m=%d n=%d k=%d bias=%v: [%d,%d] = %g, want %g", c.m, c.n, c.k, withBias, i/c.n, i%c.n, g, w)
+				}
+			}
+		}
+	}
+}
+
 func BenchmarkMicroKernelVariants(b *testing.B) {
 	r := rand.New(rand.NewPCG(9, 10))
 	kc := KC

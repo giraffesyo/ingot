@@ -346,8 +346,6 @@ func (g *gemmCtx) smallPackA(t int) {
 	}
 }
 
-// smallMTask computes C[:, panel t] over the whole k range: for each k block
-// it packs the B panel into this worker's buffer and sweeps the A panels.
 // spill writes a scratch MR×NR tile into C (mr rows, nr cols), accumulating
 // when acc.
 func (g *gemmCtx) spill(tile, cptr []float32, mr, nr int, acc bool) {
@@ -364,11 +362,73 @@ func (g *gemmCtx) spill(tile, cptr []float32, mr, nr int, acc bool) {
 	}
 }
 
+// smallMTask computes sweep unit t: panel t, or panels 2t and 2t+1 in pair
+// mode.
 func (g *gemmCtx) smallMTask(t, w int) {
-	jp := t
-	if g.pairMode {
-		jp = 2 * t
+	if !g.pairMode {
+		g.smallMPanel(t, w)
+		return
 	}
+	// Paired-panel fast path: with pre-packed B and the AVX-512 kernel the
+	// next panel is adjacent in memory — a 6×32 kernel halves the broadcast
+	// loads per FMA (the banked 6×16 kernel is load-port bound at ~78% of
+	// peak). Scheduling pairs the panels (smallMSweep halves the task
+	// count); an odd final panel or a pair ending in a narrow edge runs as
+	// singles — both panels of the pair, since no other task covers the
+	// second.
+	jp := 2 * t
+	if jp+1 < g.nPanels && min(NR, g.nc-(jp+1)*NR) == NR {
+		g.smallMPair(jp, w)
+		return
+	}
+	g.smallMPanel(jp, w)
+	if jp+1 < g.nPanels {
+		g.smallMPanel(jp+1, w)
+	}
+}
+
+// smallMPair computes the two full panels jp, jp+1 with the 6×32 kernel.
+func (g *gemmCtx) smallMPair(jp, w int) {
+	ldc := g.ldc
+	nkb := (g.kc + KC - 1) / KC
+	acc0 := g.acc
+	if g.epiPreload(jp*NR, 2*NR) {
+		acc0 = true
+	}
+	for kb := 0; kb < nkb; kb++ {
+		p0 := kb * KC
+		kc := min(KC, g.kc-p0)
+		bp0 := g.pb.data[(kb*g.pb.np+jp)*KC*NR:]
+		bp1 := g.pb.data[(kb*g.pb.np+jp+1)*KC*NR:]
+		acc := acc0 || kb > 0
+		var bias []float32
+		if kb == nkb-1 {
+			bias = g.biasAt(jp*NR, 2*NR)
+		}
+		for ip := 0; ip < g.mPanels; ip++ {
+			mr := min(MR, g.mc-ip*MR)
+			apan := g.asm[(kb*g.mPanels+ip)*KC*MR:]
+			cptr := g.cblk[ip*MR*ldc+jp*NR:]
+			if mr == MR {
+				microKernel2AVX512(kc, apan, bp0, bp1, cptr, ldc, acc, bias)
+				continue
+			}
+			tile := g.tiles[w]
+			microKernel(kc, apan, bp0, tile, NR, false, nil)
+			g.spill(tile, cptr, mr, NR, acc)
+			microKernel(kc, apan, bp1, tile, NR, false, nil)
+			g.spill(tile, cptr[NR:], mr, NR, acc)
+			if bias != nil {
+				g.spillBias(cptr, mr, 2*NR, bias)
+			}
+		}
+	}
+}
+
+// smallMPanel computes panel jp, C[:, jp·NR : jp·NR+nr], over the whole k
+// range: for each k block it packs the B panel into this worker's buffer
+// (or reads the pre-packed one) and sweeps the A panels.
+func (g *gemmCtx) smallMPanel(jp, w int) {
 	nr := min(NR, g.nc-jp*NR)
 	bp := g.bpans[w]
 	if bp == nil {
@@ -377,47 +437,6 @@ func (g *gemmCtx) smallMTask(t, w int) {
 	}
 	ldc := g.ldc
 	nkb := (g.kc + KC - 1) / KC
-	// Paired-panel fast path: with pre-packed B and the AVX-512 kernel the
-	// next panel is adjacent in memory — a 6×32 kernel halves the broadcast
-	// loads per FMA (the banked 6×16 kernel is load-port bound at ~78% of
-	// peak). Scheduling pairs the panels (smallMSweep halves the task
-	// count); an odd final panel or narrow edge falls through to singles.
-	if g.pairMode && jp+1 < g.nPanels && min(NR, g.nc-(jp+1)*NR) == NR {
-		ldc := g.ldc
-		acc0 := g.acc
-		if g.epiPreload(jp*NR, 2*NR) {
-			acc0 = true
-		}
-		for kb := 0; kb < nkb; kb++ {
-			p0 := kb * KC
-			kc := min(KC, g.kc-p0)
-			bp0 := g.pb.data[(kb*g.pb.np+jp)*KC*NR:]
-			bp1 := g.pb.data[(kb*g.pb.np+jp+1)*KC*NR:]
-			acc := acc0 || kb > 0
-			var bias []float32
-			if kb == nkb-1 {
-				bias = g.biasAt(jp*NR, 2*NR)
-			}
-			for ip := 0; ip < g.mPanels; ip++ {
-				mr := min(MR, g.mc-ip*MR)
-				apan := g.asm[(kb*g.mPanels+ip)*KC*MR:]
-				cptr := g.cblk[ip*MR*ldc+jp*NR:]
-				if mr == MR {
-					microKernel2AVX512(kc, apan, bp0, bp1, cptr, ldc, acc, bias)
-					continue
-				}
-				tile := g.tiles[w]
-				microKernel(kc, apan, bp0, tile, NR, false, nil)
-				g.spill(tile, cptr, mr, NR, acc)
-				microKernel(kc, apan, bp1, tile, NR, false, nil)
-				g.spill(tile, cptr[NR:], mr, NR, acc)
-				if bias != nil {
-					g.spillBias(cptr, mr, 2*NR, bias)
-				}
-			}
-		}
-		return
-	}
 	acc0 := g.acc
 	if g.epiPreload(jp*NR, nr) {
 		acc0 = true
