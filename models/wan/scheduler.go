@@ -81,8 +81,8 @@ func lambda(s float32) float64 {
 }
 
 // Step advances sample by one step given the model's velocity prediction;
-// it returns the new sample (a fresh slice; sample is kept as the
-// corrector's reference).
+// it returns the new sample in a fresh slice (sample may be overwritten
+// with it afterwards).
 func (u *UniPC) Step(velocity, sample []float32) []float32 {
 	sigma := u.Sigmas[u.step]
 	// convert_model_output: x0 = x − σ·v.
@@ -99,7 +99,7 @@ func (u *UniPC) Step(velocity, sample []float32) []float32 {
 		order = min(order, len(u.Timesteps)-u.step)
 	}
 	u.thisOrder = min(order, u.lowerOrder+1)
-	u.last = sample
+	u.last = append(u.last[:0:0], sample...) // the caller may overwrite sample with the result
 	out := u.predict(sample)
 	if u.lowerOrder < u.cfg.SolverOrder {
 		u.lowerOrder++

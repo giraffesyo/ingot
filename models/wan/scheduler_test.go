@@ -24,7 +24,7 @@ func TestUniPC(t *testing.T) {
 	n := len(x)
 	outs, want := c.tensor(t, "model_outputs").F32(), c.tensor(t, "samples").F32()
 	for i := range steps {
-		x = u.Step(outs[i*n:(i+1)*n], x)
+		copy(x, u.Step(outs[i*n:(i+1)*n], x)) // in place, as the pipeline does
 		compare(t, "step", x, want[i*n:(i+1)*n], 1e-5)
 	}
 }

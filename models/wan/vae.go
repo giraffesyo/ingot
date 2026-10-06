@@ -561,3 +561,9 @@ func (dc *Decoder) Decode(z *tensor.Tensor, frame func(*tensor.Tensor) error) (*
 	}
 	return out, nil
 }
+
+// Close releases the runners' device memory.
+func (dc *Decoder) Close() {
+	closeRunner(dc.first)
+	closeRunner(dc.steady)
+}
