@@ -613,3 +613,29 @@ qwenimage21_ref.py (testdata/qwenimage21, gitignored).
       and about 200 MB); SparseConv on the GPU and skipping empty taps
       (the decoders are a third of a 1024 run); a clean CPU timing of the
       flow model after the cached-keys change.
+
+## Phase 10 — video (Wan 2.2 TI2V-5B)
+
+Model page: docs/WAN.md. Parity references: tools/export/wan22_ref.py
+(testdata/wan22, gitignored; tiny random-weight instances of the
+reference modules plus real-weight cases).
+
+- [x] tokenizer: Unigram tokenizer.json (T5 / umT5): special tokens,
+      Replace normaliser, Metaspace, Viterbi with tokenizers' unknown
+      penalty and fused unknowns; ids exact.
+- [x] models/wan: umT5-XXL encoder, the 5B transformer (3-D RoPE,
+      per-token timesteps as gathered segments, text keys/values once per
+      prompt), the Wan 2.2 VAE as [frames, C, h, w] graphs (causal 3-D
+      conv = 2-D convs over shifted frames; chunked streaming decode with
+      the reference's feature caches), UniPC, the TI2V image-to-video
+      pipeline; parity ≤ 1e-5 relative per stage, end to end latents
+      ≤ 5e-6 and video 1.2e-6 (tiny), real weights ≤ 9.4e-6 per stage.
+- [x] cmd/wan: PNG frames as decoded, Motion-JPEG AVI, -keep mask
+      composite (pixel-exact hold of a region). Apple Silicon gpu-bf16,
+      49 frames, CFG: 480×640 6.9 s/step, 704×928 15.7 s/step.
+- [ ] wan: faster VAE decode (139 s at 704×928), a bf16 transformer file
+      or lazy conversion (first step ~1 min), peak-RSS measurement,
+      text-to-video and longer clips exercised at full size, a spatial-
+      region latent hold (the model has no per-pixel conditioning; only
+      the post-decode composite is exact today).
+
