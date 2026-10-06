@@ -55,3 +55,5 @@ __pycache__/
 /outputs/
 # TRELLIS.2 reference activations (tools/export/trellis2_ref.py; derived from the checkpoints).
 /testdata/trellis2/
+# Wan 2.2 TI2V reference activations and tiny models (tools/export/wan22_ref.py; regenerated).
+/testdata/wan22/
