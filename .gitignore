@@ -57,3 +57,6 @@ __pycache__/
 /testdata/trellis2/
 # Wan 2.2 TI2V reference activations and tiny models (tools/export/wan22_ref.py; regenerated).
 /testdata/wan22/
+/wan
+/frames/
+*.avi
