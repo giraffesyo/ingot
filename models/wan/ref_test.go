@@ -26,9 +26,14 @@ func tinyDir(t testing.TB) string {
 	return d
 }
 
-// realDir is the Wan2.2-TI2V-5B-Diffusers snapshot when its weights are in
-// the HF cache (or WAN22_DIR), else the test is skipped.
+// realDir is the Wan2.2-TI2V-5B-Diffusers snapshot (HF cache or
+// WAN22_DIR). Real-weight tests map ~35 GB and need the references from
+// WAN22_REAL=1 tools/export/wan22_ref.py, so they run only with
+// WAN22_REAL=1 set (not under make test's race detector).
 func realDir(t testing.TB) string {
+	if os.Getenv("WAN22_REAL") == "" {
+		t.Skip("real-weight test: set WAN22_REAL=1")
+	}
 	d := os.Getenv("WAN22_DIR")
 	if d == "" {
 		var err error

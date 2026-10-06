@@ -92,7 +92,8 @@ configs, widths and depths shrunk, head dim 128 kept — writes them as a
 Diffusers-layout model directory under `testdata/wan22/tiny`, and saves
 reference activations; `WAN22_REAL=1` adds real-weight cases (umT5 on a
 prompt, the transformer's first block, the VAE on a small image). All of it
-is ignored, regenerated, never committed.
+is ignored, regenerated, never committed. The Go real-weight tests run with
+`WAN22_REAL=1 go test ./models/wan -run Real`.
 
 | stage | reference | max relative error |
 |---|---|---|
