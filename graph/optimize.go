@@ -1592,7 +1592,10 @@ func fuseSDPA(g *Graph, stats map[string]int) bool {
 				case p.Inputs[0] != nil && p.Inputs[0].Const != nil:
 					mv = p.Inputs[0]
 				}
-				if mv == nil || mv.Const.DType() != tensor.F32 {
+				// The fused op takes one [T, Tk] mask for every batch and
+				// head; a per-head additive term (T5's position bias)
+				// stays unfused.
+				if mv == nil || mv.Const.DType() != tensor.F32 || !sharedMask(mv.Const.Shape()) {
 					break
 				}
 				mask = mv
@@ -2580,4 +2583,15 @@ func fuseBlkResidual(g *Graph, stats map[string]int) {
 		}
 	}
 	g.Nodes = nodes
+}
+
+// sharedMask reports whether an additive attention term of this shape is
+// one [T, Tk] matrix (any leading dims are 1).
+func sharedMask(s tensor.Shape) bool {
+	for i := 0; i+2 < len(s); i++ {
+		if s[i] != 1 {
+			return false
+		}
+	}
+	return true
 }

@@ -147,3 +147,65 @@ func TestBuilderMultiOutput(t *testing.T) {
 		t.Fatalf("a=%v b=%v", a, bb)
 	}
 }
+
+// TestPerHeadBiasAttention: softmax(Q·Kᵀ + bias[H, T, T])·V with a
+// per-head additive term (T5's relative position bias) must not fuse into
+// ingot.SDPA, whose mask is one [T, Tk] matrix for every head.
+func TestPerHeadBiasAttention(t *testing.T) {
+	const H, T, dk = 3, 5, 4
+	r := rand.New(rand.NewPCG(7, 7))
+	rnd := func(shape ...int) *tensor.Tensor {
+		x := tensor.New(tensor.F32, shape...)
+		for i := range x.F32() {
+			x.F32()[i] = float32(r.NormFloat64())
+		}
+		return x
+	}
+	q, k, v, bias := rnd(H, T, dk), rnd(H, dk, T), rnd(H, T, dk), rnd(H, T, T)
+	b := NewBuilder("perhead")
+	qi := b.Input("q", tensor.F32, H, T, dk)
+	s := b.Add(b.Op("MatMul", nil, qi, b.Const("k", k)), b.Const("bias", bias))
+	p := b.Op("Softmax", Attr("axis", -1), s)
+	b.Output("o", b.Op("MatMul", nil, p, b.Const("v", v)))
+	g, err := b.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := Compile(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.Run(map[string]*tensor.Tensor{"q": q})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out["o"].F32()
+	for h := range H {
+		for i := range T {
+			var row [T]float64
+			mx := math.Inf(-1)
+			for j := range T {
+				var d float64
+				for c := range dk {
+					d += float64(q.F32()[(h*T+i)*dk+c]) * float64(k.F32()[(h*dk+c)*T+j])
+				}
+				row[j] = d + float64(bias.F32()[(h*T+i)*T+j])
+				mx = max(mx, row[j])
+			}
+			var sum float64
+			for j := range T {
+				row[j] = math.Exp(row[j] - mx)
+				sum += row[j]
+			}
+			for c := range dk {
+				var want float64
+				for j := range T {
+					want += row[j] / sum * float64(v.F32()[(h*T+j)*dk+c])
+				}
+				if d := math.Abs(float64(got[(h*T+i)*dk+c]) - want); d > 1e-5 {
+					t.Fatalf("head %d row %d col %d: got %g want %g", h, i, c, got[(h*T+i)*dk+c], want)
+				}
+			}
+		}
+	}
+}
