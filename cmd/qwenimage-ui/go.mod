@@ -1,6 +1,6 @@
 module github.com/giraffesyo/ingot/cmd/qwenimage-ui
 
-go 1.26.7
+go 1.26.9
 
 require github.com/giraffesyo/ingot v0.0.0
 

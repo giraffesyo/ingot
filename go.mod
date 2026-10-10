@@ -1,6 +1,6 @@
 module github.com/giraffesyo/ingot
 
-go 1.26.7
+go 1.26.9
 
 require (
 	github.com/spf13/cobra v1.10.2
